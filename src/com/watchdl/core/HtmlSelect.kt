@@ -342,10 +342,22 @@ object HtmlSelect {
             val have = cls.split(Regex("\\s+"))
             if (sel.classes.any { it !in have }) return false
         }
-        // [attr] / [attr=value]
-        for ((k, v) in sel.attrs) {
+        // [attr] / [attr=value]；键里可能带算符（`property$=`），拆开再比。
+        for ((k0, v) in sel.attrs) {
+            val op = RuleNode.Companion.ATTR_OPS.firstOrNull { k0.endsWith(it) && k0.length > it.length }
+            val k = if (op == null) k0 else k0.dropLast(op.length)
             val actual = node.attrs[k] ?: return false
-            if (v != null && actual != v) return false
+            if (v != null) {
+                val hit = when (op) {
+                    "\$=" -> actual.endsWith(v)
+                    "^=" -> actual.startsWith(v)
+                    "*=" -> actual.contains(v)
+                    "~=" -> v.split('|').any { actual.split(' ').contains(it) }
+                    "|=" -> actual == v || actual.startsWith("$v-")
+                    else -> actual == v
+                }
+                if (!hit) return false
+            }
         }
         return sel.tag.isEmpty() || node.tag == sel.tag
     }

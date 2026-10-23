@@ -46,6 +46,30 @@ fun main() {
     check(LegadoSelector.toCss(".a@text##小说|[0-9]") == ".a@text##小说|[0-9]")
     check(LegadoSelector.toCss(".a@href@js:result+[0-9]") == ".a@href@js:result+[0-9]")
 
+    // 属性选择器算符（旧实现只认裸 `=`，`$=` `~=` 整只被吞，直接选错元素）
+    check(LegadoSelector.toCss("[property$=book_name]@content") == "[property$=book_name]@content")
+    check(LegadoSelector.toCss("[property~=a|b]@content") == "[property~=\"a|b\"]@content")
+    check(HtmlSelect.select("<div class=\"a b\"></div>", "[class~=b]", Selector.Pick.TEXT, null).size == 1)
+    check(HtmlSelect.select("<div data-x=\"foo-bar\"></div>", "[data-x^=foo]", Selector.Pick.TEXT, null).size == 1)
+    check(HtmlSelect.select("<div data-x=\"foo-bar\"></div>", "[data-x$=bar]", Selector.Pick.TEXT, null).size == 1)
+
+    // XPath 的 `@` 是谓词语法，不能当取值后缀或被切层
+    check(LegadoSelector.toCss("//meta[@name=\"description\"]/@content") == "//meta[@name=\"description\"]/@content")
+
+    // 伪类不是类名（`div.c_tag:nth-of-type(2)` 以前渲染成 `div:nth-of-type(2).c_tag`）
+    check(LegadoSelector.toCss("div.c_tag:nth-of-type(2)@text") == "div.c_tag:nth-of-type(2)@text")
+
+    // 逗号多选一交给 Jsoup，不能拆成「类 s1 且类 s5」
+    check(LegadoSelector.toCss(".s1,.s5@text") == ".s1,.s5@text")
+    check(HtmlSelect.select("<i class=\"s5\">a</i>", ".s1,.s5", Selector.Pick.TEXT, null) == listOf("a"))
+
+    // 内建常量大小写敏感（`imageStyle: "TEXT"`）
+    check(LegadoSelector.toCss("TEXT") == "TEXT")
+
+    // `{{...}}` 是取值模板，不是选择器
+    check(LegadoSelector.toCss("{{$.id}}") == "{{$.id}}")
+    check(LegadoSelector.toCss("https://x/y?bid={{$.id}}") == "https://x/y?bid={{$.id}}")
+
     // 渲染必须幂等：909 条真实书源规则实测的回归防线
     for (r in listOf("span.2:0@text", "tag.a@href", "-class.lst@tag.li@text",
                      ".field@span.1:2:5@text", "a.0@text&&td.6:4@text##\\[|\\]")) {

@@ -38,6 +38,9 @@ sealed interface RuleNode {
         /** 渲染时用来标记「本段要倒置」的非 CSS 标记。 */
         const val REV_MARK = "[rev]"
 
+        /** 属性选择器的算符，长的在前，避免 `=` 抢先匹配 `$=`。 */
+        val ATTR_OPS = listOf("^=", "$=", "*=", "~=", "|=", "=")
+
         /**
          * 解析一条 legado 选择器。
          *
@@ -51,6 +54,12 @@ sealed interface RuleNode {
             // 不摘会在按 `@` 切路径时把 `css:` 留进选择器，选不到任何东西。
             val prefix = listOf("@css:", "@xpath:", "@json:").firstOrNull { s.startsWith(it, true) }
             if (prefix != null) s = s.substring(prefix.length).trim()
+
+            // `//meta[@name="description"]/@content` 整段是 XPath，里面的 `@`
+            // 是谓词语法，不能参与 `@` 切层或取值后缀判定。
+            if (s.startsWith("/") || s.startsWith("@xpath:", true)) {
+                return Step(StepSel.Path(s.removePrefix("@xpath:").trim()))
+            }
 
             val first = when {
                 s.startsWith("json:") || prefix.equals("@json:", true) -> s.substringAfter(':').trim()
@@ -112,6 +121,8 @@ sealed interface RuleNode {
                 when {
                     // `>` 独立成段，渲染时原样还回去。
                     c == '>' -> { flush(); out.add(stepOf(">")) }
+                    // 逗号是多选一（`.s1,.s5`），段内保留，不能并进类名。
+                    c == ',' -> cur.append(c)
                     c.isWhitespace() -> flush()
                     else -> cur.append(c)
                 }
@@ -141,6 +152,9 @@ sealed interface RuleNode {
             Regex("^(.*?):contains\\(\\s*(.+?)\\s*\\)$").find(raw)?.let { m ->
                 return Step(StepSel.parse(m.groupValues[1]), Picker.Contains(m.groupValues[2].trim('\'', '"')))
             }
+
+            // XPath 整段原样保留，不能进 expandDotted（谓词会被拆坏）。
+            if (raw.startsWith("/")) return Step(StepSel.Path(raw))
 
             var s = expandDotted(raw.trimStart().removePrefix("-").trim())
             // 方括号位置：`[0]`、`[-1]`、`[!0]`、`[!0:2]`、`[0:3:2]`、`[rev]`。
@@ -388,8 +402,8 @@ sealed interface RuleNode {
 
         /** 一个段的匹配条件渲染回 CSS 形态。 */
         private fun renderSel(sel: StepSel): String {
-            if (sel.xpath || sel.raw == ">") return sel.raw
-            if (sel.raw == ">" || sel.raw == ">*") return sel.raw
+            // `>`/`>*`/`TEXT` 等带 raw 的段原样还回去。
+            if (sel.xpath || sel.raw.isNotEmpty()) return sel.raw
             if (sel.wildcard && sel.id.isEmpty() && sel.classes.isEmpty() &&
                 sel.attrs.isEmpty() && sel.text == null) return "*"
             val sb = StringBuilder()
@@ -397,12 +411,20 @@ sealed interface RuleNode {
             if (sel.tag.isEmpty() && sel.text != null) sb.append('*') else if (sel.tag.isNotEmpty()) sb.append(sel.tag)
             if (sel.id.isNotEmpty()) sb.append('#').append(sel.id)
             for (c in sel.classes) sb.append('.').append(c)
-            for ((k, v) in sel.attrs) {
+            for ((k0, v) in sel.attrs) {
+                // 键里可能带算符（`property$=`），拆开再渲染。
+                val op = ATTR_OPS.firstOrNull { k0.endsWith(it) && k0.length > it.length }
+                val k = if (op == null) k0 else k0.dropLast(op.length)
                 sb.append('[').append(k)
-                if (v != null) sb.append('=').append(v)
+                if (v != null) {
+                    // 值里带空格/冒号等特殊字符时补引号，保持与原文一致。
+                    sb.append(op ?: "=")
+                    sb.append(if (v.any { !it.isLetterOrDigit() && it != '-' && it != '_' }) "\"$v\"" else v)
+                }
                 sb.append(']')
             }
             if (sel.text != null) sb.append(":text(").append(sel.text).append(')')
+            for (p in sel.pseudo) sb.append(p)
             return sb.toString()
         }
 
@@ -448,12 +470,20 @@ data class StepSel(
     val wildcard: Boolean = false,
     /** XPath 表达式原文。 */
     val raw: String = "",
+    /** 伪类/伪元素原文（`:nth-of-type(2)` 等）。执行层不解释，只为渲染保真。 */
+    val pseudo: List<String> = emptyList(),
 ) {
     val isEmpty: Boolean
         get() = !xpath && tag.isEmpty() && id.isEmpty() && classes.isEmpty() &&
-            attrs.isEmpty() && text == null && !wildcard && raw != ">"
+            attrs.isEmpty() && text == null && !wildcard && raw != ">" && pseudo.isEmpty()
 
     companion object {
+        /**
+         * legado 的内建取值常量（`imageStyle: "TEXT"` 等）。
+         * 它们不是选择器，大小写敏感，必须原样保留。
+         */
+        private val BUILTIN_CONSTS = setOf("TEXT", "HTML", "ALL", "OWN_TEXT", "TEXT_NODES")
+
         fun Path(expr: String) = StepSel(xpath = true, raw = expr)
 
         /**
@@ -463,6 +493,14 @@ data class StepSel(
         fun parse(raw: String): StepSel {
             var rest = raw.trim()
             if (rest.isEmpty()) return StepSel()
+            // XPath 整段原样保留：`//meta[ name="description"]/@content` 里的
+            // 谓词会被下面对属性/类的正则拆坏（实测渲染成 `//meta[@"description"]`）。
+            if (rest.startsWith("/")) return Path(rest)
+
+            if (raw.trim() in BUILTIN_CONSTS) return StepSel(raw = raw.trim())
+            // 逗号是多选一（`.s1,.s5`），交给 Jsoup 自己展开；
+            // 拆开会把 `s5` 当成类名并进 `s1`，选不到任何东西。
+            if (',' in raw) return StepSel(raw = raw.trim())
 
             var text: String? = null
             Regex(":text\\(([^)]*)\\)").find(rest)?.let { m ->
@@ -479,17 +517,31 @@ data class StepSel(
             val classes = Regex("\\.([\\w-]+)").findAll(rest).map { it.groupValues[1] }.toList()
             rest = Regex("\\.[\\w-]+").replace(rest, "")
 
-            val attrs = Regex("\\[([\\w-]+)(?:=(['\"]?)([^\\]]*?)\\2)?]").findAll(rest).map { m ->
-                m.groupValues[1] to m.groupValues[3].takeIf { it.isNotEmpty() }
+            // 属性选择器：`[k]`、`[k=v]`、`[k="v"]`、`[k$=v]`、`[k~=v]`、`[k^=v]`。
+            // 以前只认裸 `=`，`[property$=book_name]` 整只被吞掉，直接选错元素。
+            val attrs = Regex("\\[([\\w-]+)(?:(\\^=|\\$=|\\*=|~=|\\|=|=)([^\\]]*))?]").findAll(rest).map { m ->
+                val k = m.groupValues[1]
+                val op = m.groupValues[2]
+                // 值两侧的引号是写法，剥掉再存；渲染时按需补回。
+                val v = m.groupValues[3].trim().trim('"', '\'').ifEmpty { null }
+                if (op.isEmpty() || v == null) k to null else k + op to v
             }.toList()
             rest = Regex("\\[[^\\]]*]").replace(rest, "")
+
+            // 伪类/伪元素必须在剥掉属性之后提取：属性值里也有 `:`
+            // （`[property="og:novel:author"]`），先提会把值拆坏。
+            // 以前 `div.c_tag:nth-of-type(2)` 的 `:nth-of-type` 被当类名，
+            // 渲染成 `div:nth-of-type(2).c_tag`，选择器直接失效。
+            val pseudo = Regex(":{1,2}[\\w-]+(?:\\([^)]*\\))?")
+                .findAll(rest).map { it.value }.toList()
+            rest = pseudo.fold(rest) { acc, p -> acc.replace(p, "") }
 
             val tag = rest.trim().trimEnd('*').lowercase()
             if (text == null && id.isEmpty() && classes.isEmpty() && attrs.isEmpty() && tag.isEmpty())
                 return StepSel(wildcard = true)
             return StepSel(
                 tag = tag, id = id, classes = classes, attrs = attrs, text = text,
-                wildcard = tag.isEmpty(),
+                wildcard = tag.isEmpty(), pseudo = pseudo,
             )
         }
     }

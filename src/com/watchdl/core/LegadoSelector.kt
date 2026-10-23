@@ -94,6 +94,10 @@ object LegadoSelector {
         // `##正则##替换` 与 `@js:`/`<js>` 之后是自由文本，不参与选择器语法。
         // 以前整串喂进解析器，正则里的 `[0-9]` 被当成序号、JS 里的
         // `result.match(...)` 被当成属性名，渲染结果面目全非。
+        // `{{$.id}}` / `{{java.getString(…)}}` 是 JSONPath/JS 取值模板，
+        // 不是 CSS 选择器，原样返回（解析会把 `.introinfo` 当类名拆坏）。
+        if (raw.contains("{{")) return raw
+
         val jsAt = listOf(raw.indexOf("@js:"), raw.indexOf("<js>"))
             .filter { it >= 0 }.minOrNull() ?: raw.length
         val head = raw.substring(0, jsAt)
