@@ -177,7 +177,10 @@ sealed interface RuleNode {
             val t = raw.trim()
             if (t.isEmpty()) return t
             val tokens = t.split('.').filter { it.isNotEmpty() }
-            if (tokens.size < 2 || tokens[0] !in setOf("id", "class", "tag", "text")) return t
+            if (tokens.size < 2) return t
+            // 简写展开只对以 id./class./tag./text. 开头的段生效；
+            // 其余情况还要处理 `span.2:0`：点号后是位置记号，不是类名。
+            if (tokens[0] !in setOf("id", "class", "tag", "text")) return expandDotPosition(t)
             val sb = StringBuilder()
             var i = 0
             while (i < tokens.size) {
@@ -209,6 +212,20 @@ sealed interface RuleNode {
                 }
             }
             return sb.toString()
+        }
+
+
+        /**
+         * `span.2:0` → `span[2:0]`、`td.-1:-2` → `td[-1:-2]`。
+         *
+         * legado 的位置简写可以是单个数字（`.0`）或区间（`.2:0`）。
+         * 以前只认单个数字，区间被当成类名，渲染成了 `span:0.2`。
+         */
+        private fun expandDotPosition(t: String): String {
+            val pos = Regex("^([^.]+)\\.([\\-\\d:!]+)$").find(t) ?: return t
+            val (head, idx) = pos.destructured
+            if (head.isEmpty()) return t
+            return "$head[$idx]"
         }
 
         /**
@@ -346,8 +363,27 @@ sealed interface RuleNode {
                 Selector.Pick.ATTR -> n.attr ?: ""
             }
             is Group -> joinNodes(n.levels)
-            // `[rev]` 挂到链尾；单独一条链时等价于「选完再反转」。
-            is Reverse -> REV_MARK + render(n.inner)
+            // `[rev]` 要挂在**首段**的序号位上（`.lst[rev] li`）。
+            // 放在串首会被当成整串前缀，重新解析时丢掉。
+            is Reverse -> revRender(n.inner)
+        }
+
+
+        /** 把 [REV_MARK] 塞进链里第一个 [Step]，没有段时退化成裸标记。 */
+        private fun revRender(n: RuleNode): String = when (n) {
+            is Step -> {
+                val base = renderSel(n.sel) + (n.picker?.let { renderPicker(it) } ?: "")
+                base + REV_MARK
+            }
+            is Group -> {
+                val i = n.levels.indexOfFirst { it is Step }
+                if (i < 0) REV_MARK + joinNodes(n.levels)
+                else joinNodes(n.levels.toMutableList().also {
+                    it[i] = Reverse(it[i])
+                })
+            }
+            is Reverse -> revRender(n.inner)
+            is RuleNode.Pick -> REV_MARK + render(n)
         }
 
         /** 一个段的匹配条件渲染回 CSS 形态。 */

@@ -34,5 +34,23 @@ fun main() {
         check(imported.rule == null && imported.issue != null) { "$api source must be marked unsupported" }
     }
     check(LegadoImport.parseHeader(null) == emptyMap<String, String>())
+
+    // 点号位置简写：`span.2:0` 是区间，不是类名 `0`
+    check(LegadoSelector.toCss("span.2:0@text") == "span[2:0]@text")
+    check(LegadoSelector.toCss("td.-1:-2@text") == "td[-1:-2]@text")
+    check(LegadoSelector.toCss("span.0@text") == "span[0]@text")
+    check(LegadoSelector.toCss("class.lst@text") == ".lst@text")
+
+    // `##正则##` 与 `@js:` 之后是自由文本，不能当选择器解析
+    check(LegadoSelector.toCss("##.*第[0-9]/[0-9]页.*") == "##.*第[0-9]/[0-9]页.*")
+    check(LegadoSelector.toCss(".a@text##小说|[0-9]") == ".a@text##小说|[0-9]")
+    check(LegadoSelector.toCss(".a@href@js:result+[0-9]") == ".a@href@js:result+[0-9]")
+
+    // 渲染必须幂等：909 条真实书源规则实测的回归防线
+    for (r in listOf("span.2:0@text", "tag.a@href", "-class.lst@tag.li@text",
+                     ".field@span.1:2:5@text", "a.0@text&&td.6:4@text##\\[|\\]")) {
+        val once = LegadoSelector.toCss(r)
+        check(LegadoSelector.toCss(once) == once) { "idempotency broke: $r -> $once" }
+    }
     println("RuleBoundaryTest passed")
 }

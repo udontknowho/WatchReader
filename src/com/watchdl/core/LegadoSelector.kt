@@ -90,8 +90,20 @@ object LegadoSelector {
      * 保留这个函数是因为 [LegadoImport] 与若干测试按字符串比较结果。
      * 新代码应直接用 [RuleNode.parse]，不要经过字符串再解析一遍。
      */
-    fun toCss(raw: String): String =
-        RuleNode.parse(raw)?.let { RuleNode.render(it).trim() } ?: raw.trim()
+    fun toCss(raw: String): String {
+        // `##正则##替换` 与 `@js:`/`<js>` 之后是自由文本，不参与选择器语法。
+        // 以前整串喂进解析器，正则里的 `[0-9]` 被当成序号、JS 里的
+        // `result.match(...)` 被当成属性名，渲染结果面目全非。
+        val jsAt = listOf(raw.indexOf("@js:"), raw.indexOf("<js>"))
+            .filter { it >= 0 }.minOrNull() ?: raw.length
+        val head = raw.substring(0, jsAt)
+        val tail = raw.substring(jsAt)
+        val reAt = head.indexOf("##")
+        val body = if (reAt >= 0) head.substring(0, reAt) else head
+        val rest = if (reAt >= 0) head.substring(reAt) else ""
+        val css = RuleNode.parse(body)?.let { RuleNode.render(it).trim() } ?: body.trim()
+        return css + rest + tail
+    }
 
     /**
      * 对整条 `||` 备选链逐条做 [toCss]，再用 `||` 拼回去。
