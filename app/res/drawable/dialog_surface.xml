@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- MD3 对话框面板：surface container high (#2B2930) + 28 dp 圆角 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="@color/md_surface3" />
+    <corners android:radius="28dp" />
+</shape>

@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>WatchDownloader · 可点原型</title>
+<style>
+  /* 尺寸与 Kotlin 端 ui/Md3.kt 一一对应：189×248dp，density 2.0 */
+  :root{
+    --p:#D0BCFF; --on-p:#381E72; --p-cont:#4F378B; --on-p-c:#EADDFF;
+    --s-cont:#4A4458; --on-s-c:#E8DEF8;
+    --surf:#141218; --surf1:#1D1B20; --surf2:#211F26; --surf3:#2B2930; --surf4:#36343B;
+    --on-s:#E6E0E9; --on-s-v:#CAC4D0; --outline:#938F99; --out-v:#49454F;
+    --err:#F2B8B5; --ok:#7BD88F;
+    --W:189px; --H:248px;
+    --pad:8px; --gap:6px; --topbar:36px; --search:34px; --btn:34px;
+    --item:42px; --tap:32px; --nav:48px;
+    --fs-xl:17px; --fs-lg:14px; --fs-md:12px; --fs-sm:10px;
+    --r-card:12px; --r-item:10px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:#0a0a0c;color:var(--on-s);
+    font-family:"Roboto","Noto Sans SC","PingFang SC",sans-serif;
+    padding:30px 16px 60px;display:flex;flex-direction:column;align-items:center;
+  }
+  h1{font-size:18px;font-weight:400;margin-bottom:4px}
+  .hint{font-size:11px;color:#938F99;margin-bottom:18px;text-align:center;line-height:1.7}
+
+  .watch{
+    position:relative;padding:14px;
+    background:linear-gradient(145deg,#3a3a3e,#1c1c1f 55%,#2a2a2e);
+    border-radius:34px;
+    box-shadow:0 0 0 2px #4a4a50,0 18px 44px rgba(0,0,0,.75),
+               inset 0 1px 1px rgba(255,255,255,.09);
+  }
+  .watch::after{
+    content:"";position:absolute;right:-6px;top:74px;width:6px;height:40px;
+    background:linear-gradient(180deg,#55555c,#2c2c30);border-radius:0 4px 4px 0;
+  }
+  .screen{
+    width:var(--W);height:var(--H);background:var(--surf);
+    border-radius:26px;overflow:hidden;display:flex;flex-direction:column;position:relative;
+  }
+
+  /* 应用栏 */
+  .bar{height:var(--topbar);flex-shrink:0;display:flex;align-items:center;gap:1px;padding:0 4px}
+  .bar .t{font-size:var(--fs-lg);font-weight:500;flex:1;padding-left:5px;
+          white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ico{width:var(--tap);height:var(--tap);border-radius:50%;display:flex;
+       align-items:center;justify-content:center;font-size:13px;color:var(--on-s-v);
+       flex-shrink:0;cursor:pointer;user-select:none}
+  .ico:active{background:rgba(230,224,233,.12)}
+
+  .body{flex:1;padding:0 var(--pad) var(--pad);overflow-y:auto;scrollbar-width:none}
+  .body::-webkit-scrollbar{display:none}
+
+  /* 搜索框 */
+  .sbar{height:var(--search);border-radius:calc(var(--search)/2);background:var(--surf4);
+        display:flex;align-items:center;gap:5px;padding:0 10px;
+        font-size:var(--fs-md);color:var(--on-s-v);margin-bottom:var(--gap);
+        flex-shrink:0;cursor:pointer}
+  .sbar .ph{opacity:.75;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sbar input{background:none;border:none;outline:none;color:var(--on-s);
+              font-size:var(--fs-md);flex:1;width:100%;font-family:inherit}
+
+  /* 按钮 */
+  .btn{height:var(--btn);border-radius:calc(var(--btn)/2);display:flex;align-items:center;
+       justify-content:center;gap:4px;font-size:var(--fs-md);font-weight:500;
+       flex-shrink:0;cursor:pointer;user-select:none}
+  .btn:active{filter:brightness(1.18)}
+  .filled{background:var(--p);color:var(--on-p)}
+  .tonal{background:var(--s-cont);color:var(--on-s-c)}
+  .text{color:var(--p)}
+  .outl{border:1px solid var(--outline);color:var(--p)}
+  .row{display:flex;gap:var(--gap);margin-bottom:var(--gap)}
+  .row .btn{flex:1}
+
+  /* 分组标题 */
+  .lbl{font-size:var(--fs-sm);font-weight:500;letter-spacing:.5px;color:var(--p);
+       text-transform:uppercase;padding:4px 2px 3px}
+
+  /* 列表项 */
+  .it{min-height:var(--item);padding:3px 6px;border-radius:var(--r-item);
+      display:flex;flex-direction:column;justify-content:center;gap:1px;margin-bottom:2px}
+  .it.hl{background:var(--surf3)}
+  .it.click{cursor:pointer}
+  .it.click:active{background:var(--surf4)}
+  .it .a{font-size:var(--fs-md);line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .it .b{font-size:var(--fs-sm);line-height:1.3;color:var(--on-s-v);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .it.one{flex-direction:row;align-items:center;gap:7px}
+  .it.one .a{flex:1}
+  .it .idx{font-size:var(--fs-sm);color:var(--on-s-v);min-width:22px;flex-shrink:0}
+
+  /* 卡片 */
+  .card{background:var(--surf3);border-radius:var(--r-card);padding:7px;margin-bottom:var(--gap)}
+  .card.out{background:transparent;border:1px solid var(--out-v)}
+
+  /* 进度条 */
+  .trk{height:3px;border-radius:2px;background:var(--surf4);overflow:hidden;margin:5px 0 4px}
+  .fil{height:100%;border-radius:2px;background:var(--p);transition:width .3s}
+
+  .mk{font-size:var(--fs-sm);flex-shrink:0}
+  .ok{color:var(--ok)} .fail{color:var(--err)} .lock{color:var(--on-s-v);opacity:.55}
+
+  /* 底栏 */
+  .nav{height:var(--nav);flex-shrink:0;background:var(--surf2);display:flex;
+       align-items:center;justify-content:space-around;padding:0 4px}
+  .nv{display:flex;flex-direction:column;align-items:center;gap:1px;font-size:9px;
+      color:var(--on-s-v);flex:1;cursor:pointer}
+  .nv .ic{width:44px;height:22px;border-radius:11px;display:flex;align-items:center;
+          justify-content:center;font-size:12px}
+  .nv.on{color:var(--on-s-c)} .nv.on .ic{background:var(--s-cont)}
+
+  .empty{display:flex;flex-direction:column;align-items:center;justify-content:center;
+         gap:8px;color:var(--on-s-v);text-align:center;height:100%;padding:0 12px}
+  .empty .big{font-size:30px;opacity:.3}
+  .empty .t{font-size:var(--fs-sm);line-height:1.6}
+
+  .snack{position:absolute;left:8px;right:8px;bottom:8px;background:var(--surf4);
+         border-radius:9px;padding:9px 10px;font-size:var(--fs-sm);
+         display:flex;align-items:center;gap:8px;box-shadow:0 3px 12px rgba(0,0,0,.55)}
+  .snack .act{margin-left:auto;color:var(--p);font-weight:500;cursor:pointer}
+
+  .rd{font-size:var(--fs-md);line-height:1.8;text-align:justify;padding:0 3px}
+  .rd p{text-indent:2em}
+  .rdfoot{height:22px;flex-shrink:0;display:flex;align-items:center;justify-content:space-between;
+          padding:0 12px;font-size:9px;color:var(--on-s-v)}
+  .rdfoot .nx{color:var(--p);font-weight:500;cursor:pointer}
+
+  .spinner{display:flex;flex-direction:column;align-items:center;justify-content:center;
+           gap:8px;height:100%;color:var(--on-s-v);font-size:var(--fs-sm)}
+  .spin{width:20px;height:20px;border:2px solid var(--surf4);border-top-color:var(--p);
+        border-radius:50%;animation:sp .8s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+
+  .ctrl{margin-top:16px;display:flex;gap:6px;flex-wrap:wrap;justify-content:center;max-width:420px}
+  .ctrl button{background:var(--surf3);color:var(--on-s);border:1px solid var(--out-v);
+               border-radius:14px;padding:5px 11px;font-size:11px;cursor:pointer;font-family:inherit}
+  .ctrl button:active{background:var(--surf4)}
+  .note{max-width:420px;font-size:11px;line-height:1.7;color:#938F99;margin-top:16px;
+        border-left:2px solid var(--out-v);padding-left:11px}
+  .note b{color:#CAC4D0;font-weight:500}
+</style>
+</head>
+<body>
+
+<h1>WatchDownloader</h1>
+<div class="hint">
+  可点原型 · 189 × 248 dp（OPPO Watch 3 Pro，density 2.0）<br>
+  与 Kotlin 端 <code>ui/Md3.kt</code> 尺寸一致
+</div>
+
+<div class="watch"><div class="screen" id="screen"></div></div>
+
+<div class="ctrl">
+  <button onclick="go('home')">① 首页</button>
+  <button onclick="go('hits')">② 搜索结果</button>
+  <button onclick="go('toc')">③ 目录</button>
+  <button onclick="go('dl')">④ 下载中</button>
+  <button onclick="go('src')">⑤ 书源</button>
+  <button onclick="go('reader')">⑥ 阅读器</button>
+  <button onclick="startDL()">▶ 模拟下载</button>
+</div>
+
+<div class="note">
+  <b>点着看</b>：列表项、按钮、返回箭头都能点，行为与设计稿一致。<br>
+  「模拟下载」会跑一遍真实的进度刷新节奏（含一次失败重试），看进度屏是否够用。
+</div>
+
+<script>
+// ── 假数据（取自真机实测结果） ──────────────────────────────
+const BOOKS = [
+  { name:"绝世武神", author:"净无痕", total:2500, done:10, failed:0 },
+  { name:"万相之王", author:"天蚕土豆", total:1930, done:3, failed:0 },
+  { name:"斗破苍穹", author:"天蚕土豆", total:1650, done:800, failed:2 },
+  { name:"快眼看书｜斗破", author:"某作者", total:1914, done:0, failed:0 },
+];
+const HITS = [
+  { name:"绝世武神", author:"净无痕" },
+  { name:"斗破仙穹", author:"青山有路" },
+  { name:"穿越成斗气世界萧炎", author:"十年有鱼" },
+  { name:"仙侠完美人生", author:"不吃番茄酱呐" },
+  { name:"万相之王", author:"天蚕土豆" },
+];
+const CHAPS = [
+  { t:"第1章 觉醒的武魂", s:"ok" }, { t:"第2章 连续突破", s:"ok" },
+  { t:"第3章 狂放霸道", s:"" }, { t:"第4章 突破境界", s:"" },
+  { t:"第674章 最后两战", s:"lock" }, { t:"第675章 天地异变", s:"lock" },
+];
+const SOURCES = [
+  { n:"快眼看书（优+）", m:"ok" }, { n:"殓师灵异（优）", m:"ok" },
+  { n:"精华书阁WAP", m:"ok" }, { n:"白色小说", m:"ok" },
+  { n:"小说阅读网", m:"ok" }, { n:"豆瓣读书", m:"fail", note:"脚本" },
+];
+const TEXT = "九霄大陆，武道为尊，弱小的武者，都有千、万斤巨力，开碑裂石；而强大的武者，可斩断河流、劈开大山；更有武道皇者，通天彻地，遨游太虚。武道，决定命运，决定生死，弱者，受人欺凌，强者，俯瞰天下。武魂，九霄大陆之人与生俱来的天赋，是武者的魂魄，可以说武者的成就，与他的武魂息息相关。";
+
+// ── 工具 ───────────────────────────────────────────────────
+const $ = (h) => h;
+function bar(title, back, acts = []) {
+  return `<div class="bar">
+    ${back ? `<div class="ico" onclick="${back}">←</div>` : ''}
+    <div class="t">${title}</div>
+    ${acts.map(a => `<div class="ico" onclick="${a[1]}">${a[0]}</div>`).join('')}
+  </div>`;
+}
+function item(title, sub, { two = !!sub, hl = false, click = '', lead = '', trail = '', trailColor = 'var(--on-s-v)' } = {}) {
+  return `<div class="it ${two ? '' : 'one'} ${hl ? 'hl' : ''} ${click ? 'click' : ''}" ${click ? `onclick="${click}"` : ''}>
+    ${lead}
+    <div class="a">${title}</div>
+    ${two ? (sub ? `<div class="b">${sub}</div>` : '') :
+      (trail ? `<div class="b" style="color:${trailColor}">${trail}</div>` : '')}
+  </div>`;
+}
+function chap(i, c) {
+  const m = c.s === 'ok' ? '<span class="mk ok">✓</span>'
+          : c.s === 'fail' ? '<span class="mk fail">✗</span>'
+          : c.s === 'lock' ? '<span class="mk lock">🔒</span>' : '';
+  return `<div class="it one click"><div class="idx">${i}</div><div class="a">${c.t}</div>${m}</div>`;
+}
+
+// ── 各屏 ───────────────────────────────────────────────────
+const views = {
+  home: () => bar('小说下载', '', [['⚙', "go('src')"]]) + `
+    <div class="body">
+      <div class="sbar" onclick="go('hits')"><span>🔍</span><span class="ph">书名或作者</span></div>
+      <div class="row"><div class="btn filled" onclick="go('hits')">搜索</div></div>
+      <div class="lbl">最近下载</div>
+      ${BOOKS.map(b => item(b.name, `${b.author} · 已下 ${b.done} / ${b.total} 章${b.failed ? ` · 失败 ${b.failed}` : ''}`, { two: true, click: "go('toc')" })).join('')}
+    </div>`,
+
+  hits: () => bar('搜索结果', "go('home')") + `
+    <div class="body">
+      ${HITS.map(h => item(h.name, h.author, { two: false, hl: true, click: "go('toc')" })).join('')}
+    </div>`,
+
+  toc: () => bar('绝世武神', "go('home')", [['⋮', "toast('导出')"]]) + `
+    <div class="body">
+      <div class="card">
+        <div style="font-size:var(--fs-sm);color:var(--on-s-v)">净无痕 · 2500 章 · 免费 2435</div>
+        <div class="trk"><div class="fil" style="width:${dl.on ? dl.pct : 0.4}%"></div></div>
+        <div style="font-size:var(--fs-sm);color:var(--on-s-v)">已下 ${dl.on ? dl.done : 10}　失败 ${dl.failed}</div>
+        <div class="row" style="margin:7px 0 0">
+          <div class="btn filled" onclick="startDL()">${dl.on ? '下载中…' : '继续下载'}</div>
+          <div class="btn tonal" style="flex:0 0 var(--btn)" onclick="toast('导出')">⤓</div>
+        </div>
+      </div>
+      <div class="lbl">章节</div>
+      ${CHAPS.map((c, i) => chap(i + 1, c)).join('')}
+    </div>`,
+
+  dl: () => bar('下载中', "go('toc')") + `
+    <div class="body">
+      <div class="card" style="padding:10px 9px">
+        <div style="font-size:var(--fs-xl);font-weight:500">${dl.done}
+          <span style="font-size:var(--fs-sm);color:var(--on-s-v);font-weight:400">/ 2500</span></div>
+        <div class="trk" style="height:5px;border-radius:3px;margin:6px 0 5px">
+          <div class="fil" style="width:${dl.pct}%"></div></div>
+        <div style="font-size:var(--fs-sm);color:var(--on-s-v)">第 ${dl.done} 章 天地异变</div>
+        <div style="font-size:var(--fs-sm);color:var(--on-s-v);margin-top:2px">已用 ${dl.sec} 秒 · 剩余约 ${Math.max(0, Math.round((2500 - dl.done) * 0.35))} 分</div>
+      </div>
+      <div class="row">
+        <div class="btn outl" onclick="toast('已暂停')">暂停</div>
+        <div class="btn text" onclick="stopDL()">取消</div>
+      </div>
+      <div class="lbl">日志</div>
+      <div style="font-size:9px;line-height:1.9;color:var(--on-s-v);font-family:monospace">
+        <div>${dl.done - 2} ✓ 1.2s</div>
+        <div>${dl.done - 1} ✓ 0.9s</div>
+        ${dl.retry ? `<div style="color:var(--err)">${dl.done} ✗ 503，重试 1/4</div>` : `<div>${dl.done} ✓ 1.1s</div>`}
+      </div>
+    </div>`,
+
+  src: () => bar('书源', "go('home')") + `
+    <div class="body">
+      <div class="card out">
+        <div style="font-size:var(--fs-md)">可用 <b style="color:var(--p)">196</b> 条</div>
+        <div style="font-size:var(--fs-sm);color:var(--on-s-v);margin-top:2px">
+          共 780 条，其余 584 条依赖 JS，本引擎不执行</div>
+      </div>
+      <div class="lbl">来源</div>
+      ${item('10月10号780条.json', '', { two: false, hl: true, trail: '196' })}
+      ${item('shareBookSource.json', '', { two: false, hl: true, trail: '21' })}
+      <div class="lbl">书源</div>
+      ${SOURCES.map(s => item(s.n, '', {
+        two: false,
+        lead: `<span class="mk ${s.m}" style="${s.m === 'fail' ? 'opacity:.5' : ''}">${s.m === 'ok' ? '✓' : '✗'}</span>`,
+        trail: s.note || ''
+      })).join('')}
+    </div>`,
+
+  reader: () => `
+    <div class="bar" style="height:28px">
+      <div class="ico" onclick="go('toc')">←</div>
+      <div style="flex:1;font-size:9px;color:var(--on-s-v);text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">第1章 觉醒的武魂</div>
+      <div class="ico" onclick="toast('字号调整待做')">⋯</div>
+    </div>
+    <div class="body" style="padding:0 11px"><div class="rd"><p>${TEXT.slice(0,60)}</p><p>${TEXT.slice(60,110)}</p><p>${TEXT.slice(110,150)}</p></div></div>
+    <div class="rdfoot"><span>1 / 2500</span><span class="nx" onclick="go('reader')">下一章 ›</span></div>`,
+};
+
+// ── 下载模拟 ────────────────────────────────────────────────
+let dl = { on:false, done:10, failed:0, pct:0.4, sec:0, retry:false, timer:null };
+
+function startDL() {
+  if (dl.on) { go('dl'); return; }
+  dl.on = true; dl.done = 10; dl.pct = 0.4; dl.sec = 0; dl.retry = false;
+  go('dl');
+  dl.timer = setInterval(() => {
+    if (!dl.on) return;
+    dl.sec += 1;
+    // 每 6 步演示一次失败重试
+    if (dl.sec % 6 === 0 && !dl.retry) { dl.retry = true; render(); return; }
+    if (dl.retry) { dl.retry = false; }
+    dl.done += 1;
+    dl.pct = Math.min(100, dl.done / 2500 * 100);
+    if (dl.done >= 30) { stopDL(true); return; }
+    render();
+  }, 400);
+}
+function stopDL(finished) {
+  dl.on = false;
+  if (dl.timer) { clearInterval(dl.timer); dl.timer = null; }
+  if (finished) { toast(`下载结束：成功 ${dl.done} 章`); go('toc'); }
+  else { toast('已取消'); go('toc'); }
+}
+
+// ── 路由 ───────────────────────────────────────────────────
+let cur = 'home';
+function go(v) { cur = v; render(); }
+function render() {
+  document.getElementById('screen').innerHTML =
+    views[cur]() + (cur !== 'dl' && cur !== 'reader' && cur !== 'src' ? navBar() : '');
+}
+function navBar() {
+  const act = cur === 'home' ? 0 : cur === 'toc' ? 1 : -1;
+  return `<div class="nav">
+    <div class="nv ${act === 0 ? 'on' : ''}" onclick="go('home')"><div class="ic">🔍</div><div>搜索</div></div>
+    <div class="nv ${act === 1 ? 'on' : ''}" onclick="go('toc')"><div class="ic">📚</div><div>书架</div></div>
+    <div class="nv ${act === 2 ? 'on' : ''}" onclick="go('dl')"><div class="ic">⬇</div><div>下载</div></div>
+  </div>`;
+}
+let toastTimer = null;
+function toast(msg) {
+  const s = document.getElementById('screen');
+  let el = s.querySelector('.snack');
+  if (el) el.remove();
+  el = document.createElement('div');
+  el.className = 'snack';
+  el.innerHTML = `<span>${msg}</span>`;
+  s.appendChild(el);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.remove(), 1800);
+}
+render();
+</script>
+</body>
+</html>

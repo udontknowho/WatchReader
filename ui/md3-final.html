@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>WatchDownloader · MD3 定稿（189×248dp）</title>
+<style>
+  /* ══════════════════════════════════════════════════════════════
+     OPPO Watch 3 Pro 真实逻辑尺寸（2026-10-16 确认）
+       物理 378 × 496 px @ 326 ppi  →  29.5 × 38.6 mm
+       density 2.0（320 dpi）        →  189 × 248 dp
+     所以本页面所有尺寸按 dp 画，1dp = 2px 在此页面上按 1:2 放大显示
+     ══════════════════════════════════════════════════════════════ */
+
+  :root {
+    /* MD3 深色配色 */
+    --p:        #D0BCFF;  /* primary */
+    --on-p:     #381E72;
+    --p-cont:   #4F378B;
+    --on-p-c:   #EADDFF;
+
+    --s-cont:   #4A4458;  /* secondary container */
+    --on-s-c:   #E8DEF8;
+
+    --surf:     #141218;
+    --surf-1:   #1D1B20;
+    --surf-2:   #211F26;
+    --surf-3:   #2B2930;
+    --surf-4:   #36343B;
+
+    --on-s:     #E6E0E9;
+    --on-s-v:   #CAC4D0;
+    --outline:  #938F99;
+    --out-v:    #49454F;
+    --err:      #F2B8B5;
+    --ok:       #7BD88F;
+
+    /* 屏幕逻辑尺寸 */
+    --W: 189px;
+    --H: 248px;
+
+    /* 紧凑 MD3 尺度（全部按真机 dp 取值，这里 1:1 显示） */
+    --pad:      8px;   /* 页面边距 */
+    --gap:      6px;   /* 纵向间隔 */
+    --topbar:  36px;   /* 应用栏  36dp = 5.6mm */
+    --search:  34px;   /* 搜索框  34dp = 5.3mm */
+    --btn:     34px;   /* 按钮    34dp = 5.3mm */
+    --item:    42px;   /* 列表项  42dp = 6.6mm */
+    --tap:     32px;   /* 点击目标 32dp = 5.0mm */
+    --fs-xl:   17px;   /* 大数（进度） */
+    --fs-lg:   14px;   /* 标题 */
+    --fs-md:   12px;   /* 正文 */
+    --fs-sm:   10px;   /* 次要 */
+    --r-card:  12px;
+    --r-item:  10px;
+  }
+
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body {
+    background:#0a0a0c; color:var(--on-s);
+    font-family:"Roboto","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+    padding:36px 18px 90px;
+    display:flex; flex-direction:column; align-items:center; gap:6px;
+  }
+  h1 { font-size:19px; font-weight:400; margin-bottom:3px; }
+  .sub {
+    font-size:12px; color:#938F99; text-align:center; line-height:1.75;
+    margin-bottom:24px; max-width:460px;
+  }
+  .sub b { color:#CAC4D0; }
+  .sub code { background:#2B2930; padding:1px 5px; border-radius:4px; font-size:11px; }
+
+  /* ── 真机外框 ── */
+  .watch {
+    position:relative;
+    padding:14px;
+    background:linear-gradient(145deg,#3a3a3e,#1c1c1f 55%,#2a2a2e);
+    border-radius:34px;
+    box-shadow:0 0 0 2px #4a4a50, 0 18px 44px rgba(0,0,0,.75),
+               inset 0 1px 1px rgba(255,255,255,.09);
+  }
+  .watch::after {           /* 表冠 */
+    content:""; position:absolute; right:-6px; top:74px;
+    width:6px; height:40px;
+    background:linear-gradient(180deg,#55555c,#2c2c30);
+    border-radius:0 4px 4px 0;
+  }
+
+  .screen {
+    width:var(--W); height:var(--H);
+    background:var(--surf);
+    border-radius:26px;
+    overflow:hidden;
+    display:flex; flex-direction:column;
+    position:relative;
+  }
+
+  .cap {
+    font-size:12px; color:#938F99; margin:9px 0 26px; text-align:center;
+  }
+  .cap b { color:#CAC4D0; font-weight:500; }
+
+  /* ══ MD3 组件 ══ */
+
+  /* 应用栏 */
+  .bar {
+    height:var(--topbar); flex-shrink:0;
+    display:flex; align-items:center; gap:1px;
+    padding:0 calc(var(--pad) * .5);
+  }
+  .bar .t {
+    font-size:var(--fs-lg); font-weight:500; flex:1;
+    padding-left:calc(var(--pad) * .6);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .ico {
+    width:var(--tap); height:var(--tap); border-radius:50%;
+    display:flex; align-items:center; justify-content:center;
+    font-size:calc(var(--fs-md) + 1px); color:var(--on-s-v); flex-shrink:0;
+  }
+
+  .body {
+    flex:1; padding:0 var(--pad) var(--pad);
+    overflow-y:auto; scrollbar-width:none;
+  }
+  .body::-webkit-scrollbar { display:none; }
+
+  /* 搜索框 */
+  .sbar {
+    height:var(--search); border-radius:calc(var(--search) / 2);
+    background:var(--surf-4);
+    display:flex; align-items:center; gap:5px;
+    padding:0 10px;
+    font-size:var(--fs-md); color:var(--on-s-v);
+    margin-bottom:var(--gap);
+    flex-shrink:0;
+  }
+  .sbar .ph { opacity:.7; flex:1; }
+  .cur { width:1.5px; height:calc(var(--fs-md) + 1px); background:var(--p);
+         animation:bk 1.1s steps(1) infinite; }
+  @keyframes bk { 50% { opacity:0; } }
+
+  /* 按钮 */
+  .btn {
+    height:var(--btn); border-radius:calc(var(--btn) / 2);
+    display:flex; align-items:center; justify-content:center; gap:4px;
+    font-size:var(--fs-md); font-weight:500;
+    flex-shrink:0;
+  }
+  .filled { background:var(--p); color:var(--on-p); }
+  .tonal  { background:var(--s-cont); color:var(--on-s-c); }
+  .text   { color:var(--p); }
+  .outl   { border:1px solid var(--outline); color:var(--p); }
+  .row    { display:flex; gap:var(--gap); margin-bottom:var(--gap); }
+  .row .btn { flex:1; }
+
+  /* 分组标题 */
+  .lbl {
+    font-size:var(--fs-sm); font-weight:500; letter-spacing:.5px;
+    color:var(--p); text-transform:uppercase;
+    padding:calc(var(--gap) * .7) 2px calc(var(--gap) * .4);
+  }
+
+  /* 列表项 */
+  .it {
+    min-height:var(--item);
+    padding:calc(var(--gap) * .55) calc(var(--pad) * .75);
+    border-radius:var(--r-item);
+    display:flex; flex-direction:column; justify-content:center; gap:1px;
+    margin-bottom:2px;
+  }
+  .it.hl { background:var(--surf-3); }
+  .it .a { font-size:var(--fs-md); line-height:1.25;
+           white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .it .b { font-size:var(--fs-sm); line-height:1.3; color:var(--on-s-v);
+           white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .it.one { flex-direction:row; align-items:center; gap:7px; }
+  .it.one .a { flex:1; }
+
+  /* 卡片 */
+  .card {
+    background:var(--surf-3); border-radius:var(--r-card);
+    padding:calc(var(--pad) * .9); margin-bottom:var(--gap);
+  }
+  .card.out { background:transparent; border:1px solid var(--out-v); }
+
+  /* 进度条 */
+  .trk { height:3px; border-radius:2px; background:var(--surf-4);
+         overflow:hidden; margin:5px 0 4px; }
+  .fil { height:100%; border-radius:2px; background:var(--p); }
+
+  /* 标记 */
+  .mk { font-size:var(--fs-sm); margin-left:auto; flex-shrink:0; }
+  .ok { color:var(--ok); }
+  .fail { color:var(--err); }
+  .lock { color:var(--on-s-v); opacity:.55; }
+  .chip {
+    font-size:var(--fs-sm); padding:1px 6px; border-radius:8px;
+    background:var(--s-cont); color:var(--on-s-c); flex-shrink:0;
+  }
+
+  /* 底栏 */
+  .nav {
+    height:48px; flex-shrink:0;
+    background:var(--surf-2);
+    display:flex; align-items:center; justify-content:space-around;
+    padding:0 4px;
+  }
+  .nv { display:flex; flex-direction:column; align-items:center; gap:1px;
+        font-size:9px; color:var(--on-s-v); flex:1; }
+  .nv .ic { width:44px; height:22px; border-radius:11px;
+            display:flex; align-items:center; justify-content:center;
+            font-size:12px; }
+  .nv.on { color:var(--on-s-c); }
+  .nv.on .ic { background:var(--s-cont); }
+
+  /* Snackbar */
+  .snack {
+    position:absolute; left:8px; right:8px; bottom:8px;
+    background:var(--surf-4); border-radius:9px;
+    padding:9px 10px; font-size:var(--fs-sm);
+    display:flex; align-items:center; gap:8px;
+    box-shadow:0 3px 12px rgba(0,0,0,.55);
+  }
+  .snack .act { margin-left:auto; color:var(--p); font-weight:500; }
+
+  /* 空状态 */
+  .empty {
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:8px; color:var(--on-s-v); text-align:center;
+    height:100%; padding:0 12px;
+  }
+  .empty .big { font-size:30px; opacity:.3; }
+  .empty .t { font-size:var(--fs-sm); line-height:1.6; }
+
+  /* 阅读器 */
+  .rd { font-size:var(--fs-md); line-height:1.8; color:var(--on-s); text-align:justify; padding:0 2px; }
+  .rd p { text-indent:2em; }
+  .rdfoot {
+    height:22px; flex-shrink:0; display:flex; align-items:center;
+    justify-content:space-between; padding:0 12px;
+    font-size:9px; color:var(--on-s-v);
+  }
+
+  /* 尺子 */
+  .ruler { display:flex; flex-direction:column; gap:3px; margin:8px 0 0; }
+  .rrow { display:flex; align-items:center; gap:8px; font-size:10px; color:#938F99; }
+  .rbar { height:11px; background:#4F378B; border-radius:2px; }
+  .rbar.m3 { background:#633B48; }
+
+  .note {
+    max-width:520px; font-size:12px; line-height:1.75; color:#938F99;
+    border-left:2px solid var(--out-v); padding-left:12px; margin-top:6px;
+  }
+  .note b { color:#CAC4D0; font-weight:500; }
+  .note code { background:#2B2930; padding:1px 5px; border-radius:4px; font-size:11px; }
+  table { border-collapse:collapse; margin:8px 0; font-size:11px; }
+  th,td { border:1px solid #49454F; padding:4px 8px; text-align:left; }
+  th { background:#2B2930; color:#CAC4D0; font-weight:500; }
+</style>
+</head>
+<body>
+
+<h1>WatchDownloader · MD3 定稿</h1>
+<div class="sub">
+  <b>OPPO Watch 3 Pro</b>　378 × 496 px　326 ppi　29.5 × 38.6 mm<br>
+  <b>density 2.0（320 dpi）→ 逻辑 189 × 248 dp</b><br>
+  下面每一屏都按 <code>1dp = 1px</code> 画，即真机所见比例
+</div>
+
+<!-- ═══════════════ 1. 首页 ═══════════════ -->
+<div class="watch"><div class="screen">
+  <div class="bar">
+    <div class="t">小说下载</div>
+    <div class="ico">⚙</div>
+  </div>
+  <div class="body">
+    <div class="sbar"><span>🔍</span><span class="ph">书名或作者</span><span class="cur"></span></div>
+    <div class="row"><div class="btn filled">搜索</div></div>
+    <div class="lbl">最近下载</div>
+    <div class="it hl"><div class="a">绝世武神</div><div class="b">净无痕 · 10 / 2435 章</div></div>
+    <div class="it"><div class="a">万相之王</div><div class="b">天蚕土豆 · 3 / 1930 章</div></div>
+    <div class="it"><div class="a">斗破苍穹</div><div class="b">失败 2 章</div></div>
+    <div class="it"><div class="a">斗破仙穹</div><div class="b">100 / 1347 章</div></div>
+  </div>
+</div></div>
+<div class="cap">① <b>首页</b>　搜索框 34dp + 整宽按钮 34dp + 分组标题 + 列表项 42dp</div>
+
+<!-- ═══════════════ 2. 搜索结果 ═══════════════ -->
+<div class="watch"><div class="screen">
+  <div class="bar">
+    <div class="ico">←</div>
+    <div class="t">搜索结果</div>
+  </div>
+  <div class="body">
+    <div class="it hl one"><div class="a">绝世武神</div><div class="b">净无痕</div></div>
+    <div class="it hl one"><div class="a">斗破仙穹</div><div class="b">青山有路</div></div>
+    <div class="it hl one"><div class="a">穿越成斗气世界萧炎</div><div class="b">十年有鱼</div></div>
+    <div class="it hl one"><div class="a">仙侠完美人生</div><div class="b">不吃番茄酱呐</div></div>
+    <div class="it hl one"><div class="a">万相之王</div><div class="b">天蚕土豆</div></div>
+  </div>
+</div></div>
+<div class="cap">② <b>搜索结果</b>　单行列表项，书名占满，作者靠右</div>
+
+<!-- ═══════════════ 3. 目录 ═══════════════ -->
+<div class="watch"><div class="screen">
+  <div class="bar">
+    <div class="ico">←</div>
+    <div class="t">绝世武神</div>
+    <div class="ico">⋮</div>
+  </div>
+  <div class="body">
+    <div class="card">
+      <div style="font-size:var(--fs-sm);color:var(--on-s-v)">净无痕 · 2500 章 · 免费 2435</div>
+      <div class="trk"><div class="fil" style="width:1%"></div></div>
+      <div style="font-size:var(--fs-sm);color:var(--on-s-v)">已下 10　失败 0</div>
+      <div class="row" style="margin:7px 0 0">
+        <div class="btn filled" style="flex:1">继续下载</div>
+        <div class="btn tonal" style="flex:0 0 34px">⤓</div>
+      </div>
+    </div>
+    <div class="lbl">章节</div>
+    <div class="it one"><div class="a">第1章 觉醒的武魂</div><span class="mk ok">✓</span></div>
+    <div class="it one"><div class="a">第2章 连续突破</div><span class="mk ok">✓</span></div>
+    <div class="it one"><div class="a">第3章 狂放霸道</div></div>
+    <div class="it one"><div class="a">第674章 最后两战</div><span class="mk lock">🔒</span></div>
+  </div>
+</div></div>
+<div class="cap">③ <b>目录</b>　进度卡片 + 下载/导出按钮 + 章节状态标记</div>
+
+<!-- ═══════════════ 4. 下载中 ═══════════════ -->
+<div class="watch"><div class="screen">
+  <div class="bar">
+    <div class="ico">←</div>
+    <div class="t">下载中</div>
+  </div>
+  <div class="body">
+    <div class="card" style="padding:10px 9px">
+      <div style="font-size:var(--fs-xl);font-weight:500">172 <span style="font-size:var(--fs-sm);color:var(--on-s-v);font-weight:400">/ 2435</span></div>
+      <div class="trk" style="height:5px;border-radius:3px;margin:6px 0 5px">
+        <div class="fil" style="width:7%"></div>
+      </div>
+      <div style="font-size:var(--fs-sm);color:var(--on-s-v)">第 172 章 天地异变</div>
+      <div style="font-size:var(--fs-sm);color:var(--on-s-v);margin-top:2px">已用 4 分 12 秒 · 剩余约 52 分</div>
+    </div>
+    <div class="row">
+      <div class="btn outl">暂停</div>
+      <div class="btn text">取消</div>
+    </div>
+    <div class="lbl">日志</div>
+    <div style="font-size:9px;line-height:1.9;color:var(--on-s-v);font-family:monospace">
+      <div>170 ✓ 1.2s</div>
+      <div>171 ✓ 0.9s</div>
+      <div style="color:var(--err)">172 ✗ 503，重试 1/4</div>
+    </div>
+  </div>
+</div></div>
+<div class="cap">④ <b>下载中</b>　进度数字最大，锁屏回来一眼可见</div>
+
+<!-- ═══════════════ 5. 书源 ═══════════════ -->
+<div class="watch"><div class="screen">
+  <div class="bar">
+    <div class="ico">←</div>
+    <div class="t">书源</div>
+  </div>
+  <div class="body">
+    <div class="card out">
+      <div style="font-size:var(--fs-md)">可用 <b style="color:var(--p)">196</b> 条</div>
+      <div style="font-size:var(--fs-sm);color:var(--on-s-v);margin-top:2px">共 780 条，其余 584 条依赖 JS，本引擎不执行</div>
+    </div>
+    <div class="lbl">来源</div>
+    <div class="it one hl"><div class="a">10月10号780条.json</div><span class="b">196</span></div>
+    <div class="it one hl"><div class="a">shareBookSource.json</div><span class="b">21</span></div>
+    <div class="lbl">可用书源</div>
+    <div class="it one"><span class="mk ok">✓</span><div class="a">快眼看书（优+）</div></div>
+    <div class="it one"><span class="mk ok">✓</span><div class="a">殓师灵异（优）</div></div>
+    <div class="it one"><span class="mk fail">✗</span><div class="a" style="opacity:.5">豆瓣读书</div><span class="chip">脚本</span></div>
+  </div>
+</div></div>
+<div class="cap">⑤ <b>书源管理</b></div>
+
+<!-- ═══════════════ 6. 阅读器 ═══════════════ -->
+<div class="watch"><div class="screen">
+  <div class="bar" style="height:28px">
+    <div class="ico">←</div>
+    <div style="flex:1;font-size:9px;color:var(--on-s-v);text-align:center;
+                white-space:nowrap;overflow:hidden;text-overflow:ellipsis">第1章 觉醒的武魂</div>
+    <div class="ico">⋯</div>
+  </div>
+  <div class="body" style="padding:0 11px">
+    <div class="rd">
+      <p>九霄大陆，武道为尊，弱小的武者，都有千、万斤巨力，开碑裂石；而强大的武者，可斩断河流、劈开大山。</p>
+      <p>武道，决定命运，决定生死，弱者，受人欺凌，强者，俯瞰天下。</p>
+      <p>武魂，九霄大陆之人与生俱来的天赋，是武者的魂魄。</p>
+    </div>
+  </div>
+  <div class="rdfoot"><span>7%</span><span>1 / 2435</span></div>
+</div></div>
+<div class="cap">⑥ <b>阅读器</b>　12sp / 行高 1.8 / 首行缩进 2 字</div>
+
+<!-- ═══════════════ 7. 空状态 ═══════════════ -->
+<div class="watch"><div class="screen">
+  <div class="bar"><div class="t">我的书架</div></div>
+  <div class="body">
+    <div class="empty">
+      <div class="big">📖</div>
+      <div class="t">还没有下载过小说<br>在上面搜索书名开始</div>
+    </div>
+  </div>
+  <div class="nav">
+    <div class="nv on"><div class="ic">🔍</div><div>搜索</div></div>
+    <div class="nv"><div class="ic">📚</div><div>书架</div></div>
+    <div class="nv"><div class="ic">⬇</div><div>下载</div></div>
+  </div>
+</div></div>
+<div class="cap">⑦ <b>空状态 + 底部导航</b>　底栏 48dp，3 项</div>
+
+<!-- ═══════════════ 8. Snackbar ═══════════════ -->
+<div class="watch"><div class="screen">
+  <div class="bar"><div class="t">已加入队列</div></div>
+  <div class="body">
+    <div class="it hl one"><div class="a">第1章 觉醒的武魂</div><span class="mk ok">✓</span></div>
+    <div class="it hl one"><div class="a">第2章 连续突破</div><span class="mk ok">✓</span></div>
+    <div class="it hl one"><div class="a">第3章 狂放霸道</div></div>
+  </div>
+  <div class="snack"><span>已加入下载队列</span><span class="act">撤销</span></div>
+</div></div>
+<div class="cap">⑧ <b>Snackbar</b>　底部 8dp</div>
+
+<!-- ═══════════════ 尺寸对照尺 ═══════════════ -->
+<h1 style="margin-top:30px;font-size:16px">尺寸对照</h1>
+<div class="sub" style="margin-bottom:14px">
+  紫色 = 本设计取值　红色 = MD3 标准值。宽度按 dp 等比，可直接看出差多少。
+</div>
+<div style="background:#141218;padding:16px;border-radius:14px;border:1px solid #49454F">
+  <div class="ruler">
+    <div class="rrow"><div class="rbar m3" style="width:56px"></div>应用栏 MD3 56dp = 8.7mm</div>
+    <div class="rrow"><div class="rbar" style="width:36px"></div>应用栏 本设计 36dp = 5.6mm</div>
+    <div style="height:6px"></div>
+    <div class="rrow"><div class="rbar m3" style="width:48px"></div>搜索框 MD3 48dp = 7.5mm</div>
+    <div class="rrow"><div class="rbar" style="width:34px"></div>搜索框 本设计 34dp = 5.3mm</div>
+    <div style="height:6px"></div>
+    <div class="rrow"><div class="rbar m3" style="width:56px"></div>列表项 MD3 56dp = 8.7mm</div>
+    <div class="rrow"><div class="rbar" style="width:42px"></div>列表项 本设计 42dp = 6.6mm</div>
+    <div style="height:6px"></div>
+    <div class="rrow"><div class="rbar m3" style="width:40px"></div>按钮 MD3 40dp = 6.2mm</div>
+    <div class="rrow"><div class="rbar" style="width:34px"></div>按钮 本设计 34dp = 5.3mm</div>
+  </div>
+</div>
+
+<div class="note" style="margin-top:24px">
+  <b>为什么按紧凑版取值</b><br>
+  屏高只有 248dp。MD3 标准的「应用栏 56 + 搜索框 48 + 按钮 40」= 144dp，占 <b>58%</b>，只剩 104dp 放内容 —— 一屏看不到 3 条记录。
+  按本设计「36 + 34 + 34」= 104dp，占 42%，剩 144dp 放内容，一屏 3~4 条。
+</div>
+
+<div class="note" style="margin-top:14px">
+  <b>取舍清单</b>
+  <table>
+    <tr><th>项</th><th>取值</th><th>理由</th></tr>
+    <tr><td>字号下限</td><td>10sp</td><td>再小在 326ppi 上要凑近看，走路时危险</td></tr>
+    <tr><td>正文</td><td>12sp / 行高 1.8</td><td>手表阅读距离近，行距不足易串行</td></tr>
+    <tr><td>点击目标</td><td>≥32dp（5.0mm）</td><td>指尖在表盘上的有效精度下限</td></tr>
+    <tr><td>整宽按钮</td><td>不用 FAB</td><td>方屏右下角放 FAB 会挡住列表末项</td></tr>
+    <tr><td>深色主题</td><td>默认</td><td>AMOLED 深色省电，手表续航敏感</td></tr>
+    <tr><td>圆角</td><td>26dp</td><td>对齐真机四边等宽方屏的物理圆角</td></tr>
+    <tr><td>列表项</td><td>42dp</td><td>两行文本 + 上下各 ~5dp 内边距，刚好不挤</td></tr>
+  </table>
+</div>
+
+<div class="note" style="margin-bottom:40px">
+  <b>还没确认的一件事</b><br>
+  density 2.0 是按 320dpi 推算的。若真机是别的档（如 213dpi → 284 × 373dp），
+  本设计只会显得偏小，<b>不会坏</b>；反之若按 MD3 标准画而真机是 320dpi，就会被裁掉。<br>
+  所以布局一律用 dp 写、尺寸取偏紧的一档，是两种情况下都安全的选择。
+</div>
+
+</body>
+</html>

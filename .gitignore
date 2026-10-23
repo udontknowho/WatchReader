@@ -1,0 +1,28 @@
+# 签名材料：私钥泄露等于别人能给你的用户发更新包
+*.keystore
+keystore-info.txt
+
+# 抓包响应：可能含账号、cookie、设备指纹
+fq_app2.json
+fq_web.json
+fqsearch_resp.json
+test-yiove.json
+test-yiove-live.json
+nya_plain.json
+
+# 书源数据：体积大、与源码无关，单独分发
+10月10号780条书源.json
+shareBookSource.json
+candidates/
+
+# 编译产物
+build/
+*.apk
+*.idsig
+
+# 第三方依赖的原始包（保留 libs/rhino-slim.jar 即可）
+vendor/
+
+# 本机杂项
+*.log
+.DS_Store

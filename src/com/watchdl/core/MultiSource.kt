@@ -1,0 +1,209 @@
+package com.watchdl.core
+
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+
+/**
+ * 多源聚合搜索。
+ *
+ * 并发跑一组 [BookSource]，合并结果，单个源失败/超时静默跳过。
+ *
+ * 参数取值理由（手表端）：
+ * - 并发 5：同时打 54 个源会把手表拖垮，5 个能在 15 秒内覆盖大部分
+ * - 总超时 15 秒：用户等不起更久，先拿到快的
+ * - 失败静默但计数：某个源挂掉不该影响整体，但要让用户知道「有几个没响应」
+ */
+class MultiSource(
+    /** 参与搜索的源。 */
+    private val sources: List<NamedSource>,
+    /**
+     * 全部可用源（含不参与搜索的）。[pickFor] 在这里找。
+     *
+     * 搜索受并发与超时限制只能跑一部分，但**目录与正文得能从任何一个源取**：
+     * 搜索结果里的源名一定在搜索集内，而换源重试需要更大的池。
+     */
+    private val pool: List<NamedSource> = sources,
+    private val concurrency: Int = 5,
+    private val timeoutMs: Long = 15_000,
+) : BookSource {
+
+    /** 带名字的源。[name] 用于结果标注与失败统计。 */
+    data class NamedSource(val name: String, val source: BookSource)
+
+    /** 一次聚合搜索的结果。 */
+    data class Result(
+        val hits: List<BookHit>,
+        /** 参与搜索的源数量。 */
+        val total: Int,
+        /** 有响应的源数量（返回了非空结果）。 */
+        val responded: Int,
+        /** 失败或超时的源名。 */
+        val failed: List<String>,
+    )
+
+    /** 可搜索的源总数（含尚未轮到的那批）。换一批源时用来自增起点。 */
+    val searchable: Int get() = pool.size
+
+    /** 兼容 [BookSource] 接口：只要命中列表。 */
+    override fun search(keyword: String, page: Int): List<BookHit> = searchDetailed(keyword, page).hits
+
+    /**
+     * 本轮要搜的源：从 [offset] 开始按 [sources] 的顺序取 [sources].size 个，绕回开头。
+     *
+     * 默认配置下 [sources] 是取前 MAX_SOURCES 个，所以 offset 为 0 时就是原来的行为。
+     */
+    private fun rotation(offset: Int): List<NamedSource> {
+        if (pool.isEmpty()) return sources
+        val start = ((offset % pool.size) + pool.size) % pool.size
+        if (start == 0) return sources
+        val shifted = pool.drop(start) + pool.take(start)
+        return shifted.take(sources.size)
+    }
+
+    /**
+     * 带回统计的搜索。失败源不抛异常，只记名。
+     *
+     * [onProgress] 每有一个源跑完就回调一次（已完成数, 总数）。
+     * 多源搜索实测要 15~20 秒，界面不吭声用户会以为卡死（P1-2）。
+     * 回调可能在任意线程上发生，UI 层自己切主线程。
+     */
+    fun searchDetailed(
+        keyword: String,
+        page: Int = 1,
+        onProgress: ((done: Int, total: Int) -> Unit)? = null,
+        /** 从第几个源开始取本轮集合（换一批源）。 */
+        offset: Int = 0,
+    ): Result {
+        val sources = rotation(offset)
+        if (sources.isEmpty()) return Result(emptyList(), 0, 0, emptyList())
+
+        val runner = Executors.newFixedThreadPool(minOf(concurrency, sources.size))
+        val finished = java.util.concurrent.atomic.AtomicInteger(0)
+        val failed = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val collected = java.util.Collections.synchronizedList(mutableListOf<BookHit>())
+
+        try {
+            val tasks = sources.map { ns ->
+                Callable {
+                    runCatching { ns.source.search(keyword, page) }
+                        .onSuccess { hits ->
+                            // 源自己没填来源名时，用我们在 MultiSource 里登记的名字补上。
+                            // 这样界面无论从哪条路都拿得到来源标注。
+                            hits.forEach { h ->
+                                collected.add(if (h.sourceName.isBlank()) h.copy(sourceName = ns.name) else h)
+                            }
+                        }
+                        .onFailure { failed.add(ns.name) }
+                    // 跑完一条报一次进度（成功失败都算）。
+                    onProgress?.invoke(finished.incrementAndGet(), sources.size)
+                }
+            }
+            val futures = runner.invokeAll(tasks, timeoutMs, TimeUnit.MILLISECONDS)
+            // invokeAll 超时后会把没跑完的 future cancel 掉，这里补记成失败
+            futures.forEachIndexed { i, f ->
+                if (f.isCancelled) {
+                    failed.add(sources[i].name)
+                    // 被取消的源不会再走到上面的回调，这里补报，否则进度条永远不到 100%。
+                    onProgress?.invoke(finished.incrementAndGet(), sources.size)
+                }
+            }
+        } finally {
+            runner.shutdownNow()
+        }
+
+        val hits = dedupe(collected)
+        return Result(
+            hits = hits,
+            total = sources.size,
+            responded = sources.size - failed.size,
+            failed = failed.toList(),
+        )
+    }
+
+    /**
+     * 去重 + 混排。
+     *
+     * 平权：不按源排序，只按「书名完全一致」合并。同一本书在多站命中时保留
+     * 第一条，并把其它来源追加到它的 `sourceName` 里（`甲/乙`），
+     * 让人知道这书在哪几个站有。
+     *
+     * 只按书名+作者去重，**不按 URL**：不同站的 URL 天然不同，
+     * 按 URL 去重等于没去重。
+     */
+    /**
+     * 去重 + 保留每个源的独立行。
+     *
+     * **不再按书名合并**（原先是把多源命中并成一条、源名拼成 `甲/乙`）。
+     * 用户要从列表里直接看到「这本书哪几个源有」，并在列表上就能换源 ——
+     * 合并成一行后，界面上根本看不出有几个源可选。
+     *
+     * 去重键改成「书名 + 作者 + 源名」：同一个源重复返回同一本书仍然要去掉，
+     * 但不同源的同名书**各占一行**。
+     */
+    private fun dedupe(hits: List<BookHit>): List<BookHit> {
+        val byKey = LinkedHashMap<String, BookHit>()
+        for (raw in hits) {
+            // 先洗再比：各源书名常带 `<em>` 高亮，不剥的话界面直接刺出来。
+            val h = clean(raw)
+            val src = tidySourceName(h.sourceName)
+            // 书名空的结果没有辨识度，单独留一条
+            if (h.name.isBlank()) {
+                byKey["\u0000" + h.bookId] = h.copy(sourceName = src)
+                continue
+            }
+            val key = h.name.trim() + "\u0001" + h.author.trim() + "\u0001" + src
+            if (!byKey.containsKey(key)) byKey[key] = h.copy(sourceName = src)
+        }
+        return byKey.values.toList()
+    }
+
+    /**
+     * 源名清洗。
+     *
+     * 书源自带的 `bookSourceName` 经常夹前后空格和装饰符号，例如
+     * `"  ●QB  qq女榜"`。直接透传到界面会多出奇怪空白，而源名是用户
+     * 选择「用哪个源下载」的唯一依据，必须能一眼读清。
+     */
+    private fun tidySourceName(raw: String): String {
+        val s = raw.replace(Regex("\\s+"), " ").trim()
+        // 去掉开头的装饰符号（● ○ ◆ ◇ ■ ▲ ★ 等），保留字母数字中文
+        return s.trimStart { it in "●○◆◇■▲★☆◎※·•-—" }.trim()
+    }
+
+    /**
+     * 洗掉搜索结果的 HTML 痕迹。
+     *
+     * 各站搜索页会把关键词用 `<em>`/`<font color=red>` 高亮，规则若直接取
+     * `text()` 就会连标签一起拿到。界面显示 `重生<em>1980</em>` 就这么来的。
+     * 这里统一剥掉标签并还原实体，**不能指望每条书源规则自己处理**。
+     */
+    private fun clean(h: BookHit): BookHit {
+        val n = stripTags(h.name)
+        val a = stripTags(h.author)
+        return if (n == h.name && a == h.author) h else h.copy(name = n, author = a)
+    }
+
+    /** 单行文本去标签。不能用 HtmlText.plain —— 它会把 `<br>` 变换行，书名不需要。 */
+    private fun stripTags(s: String): String = Downloader.stripTags(s)
+
+    override fun toc(bookId: String, name: String, author: String): BookInfo =
+        throw UnsupportedOperationException("多源模式下需先确定来源源（见 pickFor）")
+
+    override fun open(hit: BookHit): BookInfo = toc(hit.bookId, hit.name, hit.author)
+
+    override fun content(itemId: String, bookId: String): String =
+        throw UnsupportedOperationException("多源模式下需先确定来源源（见 pickFor）")
+
+    /** 按来源名找出能处理这本书的具体源。找不到返回 null。 */
+    fun pickFor(hit: BookHit): BookSource? {
+        // 现在一条结果只对应一个源（不再拼 `甲/乙`），直接精确匹配。
+        // 仍保留按 `/` 拆分的兼容：旧作业或外部传入的拼接名还能用。
+        val names = hit.sourceName.split('/').map { it.trim() }.filter { it.isNotEmpty() }
+        if (names.isEmpty()) return null
+        for (n in names) {
+            pool.firstOrNull { tidySourceName(it.name) == n || it.name == n }?.let { return it.source }
+        }
+        return null
+    }
+}

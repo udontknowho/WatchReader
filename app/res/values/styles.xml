@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      深色主题。界面本身是程序化绘制的 MD3 深色，这里只负责窗口底色调性，
+      避免启动时闪白、以及状态栏/导航栏与内容不一致。
+
+      不用 Material 库的主题：项目走手工构建链，没有依赖 aapt2 之外的主题资源。
+      所以「MD3 化」只能靠覆盖平台主题属性：光标色、对话框面板、按钮强调色。
+    -->
+    <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@color/surface</item>
+        <item name="android:colorBackground">@color/surface</item>
+        <item name="android:statusBarColor">@color/surface</item>
+        <item name="android:navigationBarColor">@color/surface</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+
+        <!-- 平台控件跟随 MD3 紫。不设的话输入框光标和对话框按钮是 OEM 绿。 -->
+        <item name="android:colorAccent">@color/md_primary</item>
+        <item name="android:colorControlActivated">@color/md_primary</item>
+        <item name="android:colorControlNormal">@color/md_outline</item>
+        <item name="android:textColorHighlight">@color/md_primary</item>
+        <item name="android:colorEdgeEffect">@color/md_primary</item>
+        <item name="android:alertDialogTheme">@style/Md3DialogTheme</item>
+        <item name="android:datePickerDialogTheme">@style/Md3DialogTheme</item>
+        <item name="android:timePickerDialogTheme">@style/Md3DialogTheme</item>
+    </style>
+
+    <!-- 对话框：MD3 的 surface container high + 28 dp 圆角 -->
+    <style name="Md3DialogTheme" parent="@android:style/Theme.DeviceDefault.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/dialog_surface</item>
+        <item name="android:colorAccent">@color/md_primary</item>
+        <item name="android:colorControlActivated">@color/md_primary</item>
+        <item name="android:textColorPrimary">@color/md_on_primary</item>
+        <item name="android:windowMinWidthMajor">80%</item>
+        <item name="android:windowMinWidthMinor">80%</item>
+    </style>
+</resources>

@@ -1,0 +1,211 @@
+package com.watchdl.core
+
+import java.net.URLEncoder
+
+/**
+ * 榜单取数：番茄推荐榜、起点月票榜/畅销榜。
+ *
+ * 两个站都**不需要签名**，走网页端公开接口（不是 APP 签名链路）。
+ * 详见笔记本页 `watchreader-discover-api`（2026-10-18 实测）。
+ *
+ * 榜单条目复用 [BookHit]：点进去走的是既有的「按书名多源搜索」，
+ * 榜单本身不负责下载 —— 起点没有对应的 [BookSource]，番茄榜单的书也未必能直接取目录。
+ */
+object RankSource {
+    private const val UA =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+
+    private const val FQ_HOST = "https://fanqienovel.com"
+
+    /** 起点榜单代号。用不了的 `newsignlist` 不列进来。 */
+    val QIDIAN_BOARDS = listOf("yuepiaolist" to "月票榜", "hotsaleslist" to "畅销榜")
+
+    /**
+     * 按云端配置里的 [RankConfig.Rank] 取一页。
+     *
+     * 发现页的推荐流全部走这个入口，不直接调具体的站。
+     */
+    fun fetch(
+        rank: RankConfig.Rank,
+        gender: String,
+        page: Int,
+        /** 本批的绝对死线。三处必须共用同一个起点，否则 3 次重试各自计时。 */
+        deadline: Long = System.currentTimeMillis() + PAGE_BUDGET_MS,
+    ): List<BookHit> = when (rank.kind) {
+        RankConfig.Kind.FANQIE -> fanqie(deadline)
+        RankConfig.Kind.FANQIE_UPDATE -> fanqieUpdate(page, deadline)
+        RankConfig.Kind.QIDIAN -> qidian(rank.board, gender, page, deadline)
+    }
+
+    /**
+     * 单个榜的取数预算。
+     *
+     * 原来是每个榜 3 次重试 × 20 秒超时 —— 一个站挂住能吃掉 45 秒（含退避），
+     * 首发四条榜串行跑完要一分钟以上，界面只能一直空着。
+     */
+    const val PAGE_BUDGET_MS = 12_000L
+
+    /** 番茄更新榜每页 20 条，服务端 `total` 固定 100，即 5 页。 */
+    const val FQ_UPDATE_PAGE = 20
+
+    // ── 番茄 ──────────────────────────────────────────────
+    /**
+     * 番茄推荐榜，固定 9 条、不可翻页。
+     *
+     * 按分类的 `/api/rank/category/list` 恒返回空（参数与官方 JS 一致也不出数据），
+     * 所以只剩这一条流水可用。
+     */
+    fun fanqie(deadline: Long = System.currentTimeMillis() + PAGE_BUDGET_MS): List<BookHit> = retry(deadline) {
+        val body = Http.fetch(
+            "$FQ_HOST/api/rank/recommend/list", "GET", null,
+            mapOf("Accept" to "application/json"), referer = "$FQ_HOST/",
+            timeoutMs = left(deadline),
+        ).body
+        val ids = TinyJson.arrayField(body, "data.list", "bookId")
+        val names = TinyJson.arrayField(body, "data.list", "bookName")
+        val authors = TinyJson.arrayField(body, "data.list", "author")
+        val abstracts = TinyJson.arrayField(body, "data.list", "abstract")
+        ids.mapIndexed { i, id ->
+            BookHit(
+                bookId = id,
+                name = names.getOrNull(i) ?: "",
+                author = authors.getOrNull(i) ?: "",
+                abstractText = abstracts.getOrNull(i) ?: "",
+                sourceName = "番茄",
+            )
+        }.filter { it.name.isNotBlank() }
+    }
+
+    /**
+     * 番茄更新榜，实时变动，[page] 从 1 起，共 5 页。
+     *
+     * 与推荐榜的区别：这条**真会变化**，每次进来都是新书，所以它兼顾了「刷新」。
+     * `gender` 与 `category_id` 服务端都不认，别白传。
+     * 后几页会和前页有重叠（实时排序会漂），调用方自己去重。
+     */
+    fun fanqieUpdate(
+        page: Int,
+        deadline: Long = System.currentTimeMillis() + PAGE_BUDGET_MS,
+    ): List<BookHit> = retry(deadline) {
+        val offset = (page - 1).coerceAtLeast(0) * FQ_UPDATE_PAGE
+        val body = Http.fetch(
+            "$FQ_HOST/api/rank/recent/update/list?app_id=2503" +
+                "&offset=$offset&limit=$FQ_UPDATE_PAGE",
+            "GET", null,
+            mapOf("Accept" to "application/json"), referer = "$FQ_HOST/",
+            timeoutMs = left(deadline),
+        ).body
+        val ids = TinyJson.arrayField(body, "data.data", "bookId")
+        val names = TinyJson.arrayField(body, "data.data", "bookName")
+        val authors = TinyJson.arrayField(body, "data.data", "author")
+        val cats = TinyJson.arrayField(body, "data.data", "category")
+        ids.mapIndexed { i, id ->
+            val cat = cats.getOrNull(i).orEmpty()
+            val auth = authors.getOrNull(i).orEmpty()
+            BookHit(
+                bookId = id,
+                name = names.getOrNull(i) ?: "",
+                // 列表副标题拼的是作者，分类只能借道这里带出去（没有单独的分类字段）。
+                author = listOf(auth, cat).filter { it.isNotBlank() }.joinToString(" · "),
+                abstractText = cat,
+                sourceName = "番茄",
+            )
+        }.filter { it.name.isNotBlank() }
+    }
+
+    // ── 起点 ──────────────────────────────────────────────
+    /**
+     * 起点榜单。[board] 取 [QIDIAN_BOARDS] 的代号，[gender] 是 `male`/`female`，[page] 从 1 起。
+     *
+     * 必须走 `m.qidian.com`：`www.qidian.com` 有 WAF，回 HTTP 202 + 挑战脚本，取不到数据。
+     * `majax` 接口要 `_csrfToken`，值从榜单页的 Set-Cookie 拿，且要和 cookie 一起发。
+     */
+    fun qidian(
+        board: String,
+        gender: String,
+        page: Int,
+        deadline: Long = System.currentTimeMillis() + PAGE_BUDGET_MS,
+    ): List<BookHit> = retry(deadline) {
+        val url = "https://m.qidian.com/majax/rank/$board" +
+            "?gender=$gender&pageNum=$page&_csrfToken=" + enc(token())
+        val body = Http.fetch(
+            url, "GET", null,
+            mapOf(
+                "Cookie" to "_csrfToken=${token()}",
+                "Accept" to "application/json, text/plain, */*",
+            ),
+            referer = "https://m.qidian.com/rank/yuepiao", timeoutMs = left(deadline),
+        ).body
+        val ids = TinyJson.arrayField(body, "data.records", "bid")
+        val names = TinyJson.arrayField(body, "data.records", "bName")
+        val authors = TinyJson.arrayField(body, "data.records", "bAuth")
+        val abstracts = TinyJson.arrayField(body, "data.records", "desc")
+        ids.mapIndexed { i, id ->
+            BookHit(
+                bookId = id,
+                name = names.getOrNull(i) ?: "",
+                author = authors.getOrNull(i) ?: "",
+                abstractText = abstracts.getOrNull(i) ?: "",
+                sourceName = "起点",
+            )
+        }.filter { it.name.isNotBlank() }
+    }
+
+    /** 起点的 csrf token。一年有效，进程内缓存一次就够。 */
+    @Volatile
+    private var cachedToken: String? = null
+
+    private fun token(): String {
+        cachedToken?.let { return it }
+        val raw = Http.fetchRaw(
+            "https://m.qidian.com/rank/yuepiao", "GET", null, null,
+            emptyMap(), UA, timeoutMs = 20_000,
+        )
+        // HttpURLConnection 把多个 Set-Cookie 折叠成一个逗号分隔的值，
+        // 而 cookie 的 Expires 属性本身带逗号（"Mon, 18-Oct-2027"），
+        // 所以不能按逗号切 —— 用正则直接找 _csrfToken 的值。
+        val t = Regex("_csrfToken=([^;,\\s]+)")
+            .find(raw.headers["set-cookie"].orEmpty())
+            ?.groupValues?.get(1)
+        require(!t.isNullOrEmpty()) { "起点没下发 _csrfToken" }
+        cachedToken = t
+        return t
+    }
+
+    // ── 小工具 ────────────────────────────────────────────
+    /**
+     * 两个站都会偶发软失败：HTTP 200 但正文不是 JSON（或字段缺失）。
+     * 番茄的目录接口也有同样的毛病，重试就过了。token 过期时清掉重取。
+     */
+    /**
+     * 带死线重试。**预算用完就不再试** —— 否则退避和重试会把整批拖成分钟级。
+     */
+    private fun retry(
+        deadline: Long,
+        times: Int = 3,
+        block: () -> List<BookHit>,
+    ): List<BookHit> {
+        var last: Exception? = null
+        for (i in 0 until times) {
+            if (left(deadline) < 500) break
+            try {
+                val r = block()
+                if (r.isNotEmpty()) return r
+            } catch (e: Exception) {
+                last = e
+                cachedToken = null
+            }
+            val wait = minOf(600L * (i + 1), (left(deadline) - 500).coerceAtLeast(0).toLong())
+            if (i < times - 1 && wait > 0) Thread.sleep(wait)
+        }
+        if (last != null) throw last
+        return emptyList()
+    }
+
+    /** 死线剩下的毫秒数，给 [Http.fetch] 当超时。至少给 1 秒，别传 0 下去。 */
+    private fun left(deadline: Long): Int =
+        (deadline - System.currentTimeMillis()).coerceAtLeast(1_000L).toInt()
+
+    private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
+}
