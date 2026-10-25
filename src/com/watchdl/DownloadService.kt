@@ -125,7 +125,24 @@ class DownloadService : Service() {
                 // 工作线程收尾前不释放槽位，主线程不等待 join。
                 if (worker.get() != null) {
                     createChannel()
-                    startForeground(NOTIFY_ID, buildNotification("下载任务尚未结束", 0, 0, 0, true))
+                    // N10：以前这里固定打 0/0，正在下的书进度条被抹成零，
+                    // 看着像卡住或重新开始了。改成读当前作业的真实进度。
+                    // 如果是**另一本书**，就明说，不让用户以为点了没反应。
+                    val running = currentBookId.get()
+                    val existing = running?.let {
+                        runCatching {
+                            Downloader.restore(JobStore(File(filesDir, "jobs")), it)
+                        }.getOrNull()
+                    }
+                    val d = existing?.count(ChapterStatus.DONE) ?: 0
+                    val f = existing?.count(ChapterStatus.FAILED) ?: 0
+                    val t = existing?.total ?: 0
+                    val title = when {
+                        running == null -> "下载任务尚未结束"
+                        running == bookId -> "下载任务尚未结束"
+                        else -> "正在下载另一本，请稍候"
+                    }
+                    startForeground(NOTIFY_ID, buildNotification(title, d, f, t, true))
                     return START_NOT_STICKY
                 }
                 createChannel()
@@ -230,15 +247,19 @@ class DownloadService : Service() {
                 .withStatuses(existing.statuses)
         } else existing
 
-        var done = job.count(ChapterStatus.DONE)
-        var failed = job.count(ChapterStatus.FAILED)
+        // N10：onChapter 是从多个下载线程调进来的（Downloader 起 lanes 条线程），
+        // 以前是普通 Int 自增，计数会丢。用原子变量。
+        val done = java.util.concurrent.atomic.AtomicInteger(job.count(ChapterStatus.DONE))
+        val failed = java.util.concurrent.atomic.AtomicInteger(job.count(ChapterStatus.FAILED))
         val total = job.total
         fun publish(title: String, finished: Boolean = false, current: Int = -1) {
-            notify(buildNotification(title, done, failed, total, !finished, current))
+            val d = done.get()
+            val f = failed.get()
+            notify(buildNotification(title, d, f, total, !finished, current))
             sendBroadcast(Intent(ACTION_PROGRESS).apply {
                 setPackage(packageName)
-                putExtra(EXTRA_DONE, done)
-                putExtra(EXTRA_FAILED, failed)
+                putExtra(EXTRA_DONE, d)
+                putExtra(EXTRA_FAILED, f)
                 putExtra(EXTRA_TOTAL, total)
                 putExtra(EXTRA_TITLE, title)
                 putExtra(EXTRA_FINISHED, finished)
@@ -262,8 +283,8 @@ class DownloadService : Service() {
             )
             dl.onChapter = { _, status, title ->
                 when (status) {
-                    ChapterStatus.DONE -> done++
-                    ChapterStatus.FAILED -> failed++
+                    ChapterStatus.DONE -> done.incrementAndGet()
+                    ChapterStatus.FAILED -> failed.incrementAndGet()
                     else -> {}
                 }
                 if (!cancelFlag.get()) publish(title)
@@ -285,7 +306,9 @@ class DownloadService : Service() {
                 r.success == 0 -> "$head，无新增"
                 else -> "$head，本次 +${r.success}"
             }
-            publish(msg, finished = true)
+            // N10：取消时 dl.run() 是正常返回，以前无条件报「下载完成」，
+            // finally 再补一句「已取消」，界面先看到完成再看到取消。
+            if (!cancelFlag.get()) publish(msg, finished = true)
         } catch (e: Exception) {
             publish("下载中断：${e.message}", finished = true)
         } finally {
