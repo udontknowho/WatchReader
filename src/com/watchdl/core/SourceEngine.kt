@@ -461,7 +461,11 @@ class SourceEngine(
         val visited = HashSet<String>().apply { add(firstUrl) }
         var curRaw = firstRaw
         var pages = 1
-        while (pages < MAX_PAGES) {
+        // 7.3 小项：以前只有页数上限（30 页 × 每页约 32 秒 ≈ 16 分钟），
+        // 慢站会把单章正文拖到十几分钟，用户只会以为卡死。
+        // 加整体预算，超了就用已拿到的部分 —— 半章正文也比等 16 分钟强。
+        val deadline = System.currentTimeMillis() + PAGE_BUDGET_MS
+        while (pages < MAX_PAGES && System.currentTimeMillis() < deadline) {
             // 链接相对**当前页**求值（legado 语义）。取不到就结束。
             val next = runCatching { nextRule.eval(curRaw, jsLib = rule.jsLib).firstOrNull() }
                 .getOrNull()?.trim().orEmpty()
@@ -542,6 +546,9 @@ class SourceEngine(
     companion object {
         /** 正文分页上限。防站点「下一页」指回自身造成死循环。 */
         private const val MAX_PAGES = 30
+
+        /** 单章正文分页抓取的总时限（7.3 小项）。 */
+        private const val PAGE_BUDGET_MS = 20_000L
 
         /** 目录请求总预算，包含书籍页与分页。分页超时保留已取得的章节。 */
         private const val TOC_BUDGET_MS = 25_000L

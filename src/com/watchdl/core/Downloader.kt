@@ -100,7 +100,7 @@ class Downloader(
         persist(job, statuses, resume = true)
         while (cursor < todo.size && !cancelled()) {
             val batch = todo.subList(cursor, minOf(cursor + size, todo.size))
-            val done = mutableListOf<Int>()
+            // 7.3 小项：这里原本还有个 `done` 列表，只 add 从不读，纯占内存。
             var batchFailed = false
 
             // 本批分给几个线程。批次小的时候（缩批后）自然退回串行。
@@ -144,9 +144,7 @@ class Downloader(
                                 if (attempt < Backoff.MAX_ATTEMPTS - 1) pause(Backoff.delayMs(attempt))
                             }
                         }
-                        if (success) {
-                            synchronized(lock) { done.add(i) }
-                        } else if (!cancelled()) {
+                        if (!success && !cancelled()) {
                             synchronized(lock) {
                                 statuses[i] = ChapterStatus.FAILED
                                 fail++

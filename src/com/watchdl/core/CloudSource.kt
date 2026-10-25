@@ -68,7 +68,10 @@ object CloudSource {
      *
      * @param dir 书源目录（`filesDir/sources`）
      * @param base 仓库基地址，末尾不带 `/`
-     * @param force 为真时忽略版本号强制覆盖
+     * @param force 为真时忽略版本号强制覆盖。
+     *   **会同时绕过「不按条数降级」的保护**，云端只剩 42 条时也照换。
+     *   生产代码目前没有调用点（只有测试用）；真要接一个「强制刷新」按钮，
+     *   得先想清楚怎么避免把用户已有的源换少。
      * @param onProgress 给 UI 打状态用，可空
      */
     fun update(
