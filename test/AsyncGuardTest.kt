@@ -1,3 +1,4 @@
+import com.watchdl.core.shouldDeliverCallback
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -16,10 +17,13 @@ private class Guarded {
     var destroyed = false
     var finished = false
 
-    /** 与 MainActivity.postAlive 同一套判据。 */
+    /**
+     * S20：以前这里写着「与 MainActivity.postAlive 同一套判据」，
+     * 实际是本文件自己重写的一份，`postAlive` 改坏了测试照样全绿。
+     * 现在直接调 core 的真实现。
+     */
     fun post(owner: String, body: () -> Unit) {
-        if (destroyed || finished) return
-        if (current != owner) return
+        if (!shouldDeliverCallback(destroyed || finished, owner, current)) return
         ran.set(true)
         body()
     }

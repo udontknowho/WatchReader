@@ -117,7 +117,14 @@ class DownloadService : Service() {
                     }
                 }
                 worker.get()?.interrupt()
-                if (worker.get() == null) stopSelf()
+                // S14：没有工作线程时直接退出，但两个「正在跑哪本」的状态要一起清，
+                // 否则界面读 runningBookId 会一直以为后台还在跑，
+                // 「继续下载」按钮点了永远走不到真正启动。
+                if (worker.get() == null) {
+                    runningBookId = null
+                    currentBookId.set(null)
+                    stopSelf()
+                }
                 return START_NOT_STICKY
             }
             ACTION_START -> {
@@ -350,10 +357,30 @@ class DownloadService : Service() {
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setOngoing(ongoing)
+            // S13：以前没设点击意图，有通知权限时点了也没反应，
+            // 而界面明确叫用户「进度看通知」。
+            .setContentIntent(openAppIntent())
+            .setAutoCancel(!ongoing)
         if (ongoing && total > 0) {
             b.setProgress(total, pos.coerceIn(0, total), false)
         }
         return b.build()
+    }
+
+    /** 点通知回到 App 的进度屏。 */
+    private fun openAppIntent(): android.app.PendingIntent {
+        val i = android.content.Intent(this, com.watchdl.MainActivity::class.java).apply {
+            action = android.content.Intent.ACTION_MAIN
+            addCategory(android.content.Intent.CATEGORY_LAUNCHER)
+            flags = android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+            // 服务可能在下另一本书时被点到，带上 bookId 让界面知道往哪跳。
+            currentBookId.get()?.let { putExtra(EXTRA_BOOK_ID, it) }
+        }
+        val flag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        else android.app.PendingIntent.FLAG_UPDATE_CURRENT
+        return android.app.PendingIntent.getActivity(this, 0, i, flag)
     }
 
     private fun notify(n: Notification) {

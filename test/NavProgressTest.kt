@@ -1,3 +1,4 @@
+import com.watchdl.core.*
 /**
  * 导航与阅读进度：两条全靠人肉守的规则。
  *
@@ -65,11 +66,12 @@ fun main() {
         val SEG_BASE = 1000
         val pos = mutableMapOf<String, Int>()
         val last = mutableMapOf<String, Long>()
+        // S20：以前这里重写了一份换算，MainActivity.readProgress 改坏了测试照样全绿。
+        // 现在调 core 的真实现。
         fun readProgress(book: String): Int {
-            val raw = pos[book] ?: return 0
-            if (last.containsKey(book)) return raw
-            val fixed = if (raw >= SEG_BASE) raw / SEG_BASE else raw
-            pos[book] = fixed; last[book] = 0L
+            val raw = pos[book] ?: -1
+            val (fixed, writeBack) = resolveStoredIndex(raw, last.containsKey(book), SEG_BASE)
+            if (writeBack) { pos[book] = fixed; last[book] = 0L }
             return fixed
         }
         pos["old"] = 55000

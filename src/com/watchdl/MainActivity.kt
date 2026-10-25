@@ -101,71 +101,6 @@ class MainActivity : Activity() {
     private lateinit var root: LinearLayout
     private lateinit var input: EditText
 
-    /** 当前屏。手表一次只显示一屏内容。 */
-    private sealed interface Screen {
-        object Home : Screen
-        data class Hits(
-            val keyword: String,
-            val hits: List<BookHit>,
-            /** 本轮从第几个源开始搜的（换一批源）。 */
-            val offset: Int = 0,
-            /** 本轮跑了几条源，还没跑的源为换源留钩子。 */
-            val searchedSources: Int = 0,
-        ) : Screen
-        data class Toc(val info: BookInfo, val src: BookSource? = null) : Screen
-        data class Reader(
-            val info: BookInfo,
-            val index: Int,
-            val text: String,
-            val src: BookSource? = null,
-        ) : Screen
-        object Sources : Screen
-        /** 设置页。目前只有阅读显示与导出目录两块，都是本地项。 */
-        object Settings : Screen
-        /**
-         * 发现页（榜单）。
-         *
-         * `key` 标识当前看的是哪个榜，`hits` 是已拉到的条目（空表示还在拉）。
-         * 只带榜单代号与性别，重进这一屏时不缓存数据 —— 榜单本来就要新数据。
-         */
-        data class Discover(
-            /** 站点：`fq` / `qd`。 */
-            val site: String = "fq",
-            val gender: String = "male",
-            /** 选中的榜；空串表示还没选，只显示选择器。 */
-            val rankKey: String = "",
-            /** 这个榜拉到的条目。空表示正在拉或没选。 */
-            val hits: List<BookHit> = emptyList(),
-            /** 取数失败原因；空串表示没失败。 */
-            val error: String = "",
-        ) : Screen
-        /** 书源市场（yiove）。`hits` 为拉到的列表，`page` 为已拉到的页码。 */
-        data class Market(val hits: List<YioveSource.Item>, val total: Int, val page: Int) : Screen
-        data class Progress(val info: BookInfo) : Screen
-    }
-
-    /**
-     * 屏幕的**业务身份**：同一屏在不同时刻数据不同，但身份不变。
-     *
-     * 后台回调只能拿它比对，不能比整个 [Screen] —— `data class` 的 `equals`
-     * 连数据一起比，而回调发起时手里的往往是「还没数据」的空白版，
-     * 和屏上带着结果的那个永远不相等，回调就全被丢掉了。
-     */
-    private fun screenId(s: Screen?): String = when (s) {
-        null -> "?"
-        Screen.Home -> "home"
-        Screen.Sources -> "sources"
-        Screen.Settings -> "settings"
-        is Screen.Hits -> "hits:${s.keyword}"
-        // 目录屏身份用**书名**而不是 bookId：loadToc 时 bookId 还不确知（可能试多个源，
-        // 每条源返回的 id 不同），拿 bookId 做身份会让回调认不出自己。
-        is Screen.Toc -> "toc:${s.info.name}${s.info.author}"
-        is Screen.Reader -> "reader:${s.info.bookId}"
-        is Screen.Progress -> "progress:${s.info.bookId}"
-        is Screen.Discover -> "discover:${s.site}:${s.gender}:${s.rankKey}"
-        is Screen.Market -> "market:${s.page}"
-    }
-
     private var screen: Screen = Screen.Home
 
     /** 切屏统一入口。换屏就意味着上一屏的后台任务全部作废。 */
@@ -222,8 +157,8 @@ class MainActivity : Activity() {
      */
     private fun postAlive(ownerId: String, body: () -> Unit) {
         runOnUiThread {
-            if (isGone()) return@runOnUiThread
-            if (screenId(screen) != ownerId) return@runOnUiThread
+            // S20：判据抽到 core 的 shouldDeliverCallback，测试调的是真实现。
+            if (!shouldDeliverCallback(isGone(), ownerId, screenId(screen))) return@runOnUiThread
             body()
         }
     }
@@ -298,7 +233,6 @@ class MainActivity : Activity() {
             else -> showHome()
         }
     }
-    private var downloading = false
     private var progressDone = 0
     private var progressFailed = 0
     private var progressStartedAt = 0L
@@ -334,17 +268,16 @@ class MainActivity : Activity() {
      * 0 表示没记录过（和「读到第一章」等价，不影响使用）。
      */
     private fun readProgress(bookId: String): Int {
-        val raw = readIndex(bookId)
-        if (raw < 0) return 0
-        // 旧版分节存档是 `章号 * 1000 + 节号`，而 last_ 是新版才写的。
-        // 所以「有 last_」就说明存的已是纯章号，不能再用 1000 去猜大小。
-        // 靠数值大小判断会把第 1001 章当成旧值，直接扇回第 1 章。
         val tag = bookId.take(64)
         val prefs = getSharedPreferences("reader", MODE_PRIVATE)
-        if (prefs.contains("last_$tag")) return raw
+        // S20：换算逻辑抽到 core 的 resolveStoredIndex，测试调的是真实现。
+        val (fixed, writeBack) = resolveStoredIndex(
+            raw = readIndex(bookId),
+            lastSeen = prefs.contains("last_$tag"),
+            segBase = SEG_BASE,
+        )
         // 没有 last_ 就是没见过新版代码。先把它标上，下次不再走这条路。
-        val fixed = if (raw >= SEG_BASE) raw / SEG_BASE else raw
-        prefs.edit().putInt("pos_$tag", fixed).putLong("last_$tag", 0L).apply()
+        if (writeBack) prefs.edit().putInt("pos_$tag", fixed).putLong("last_$tag", 0L).apply()
         return fixed
     }
 
@@ -447,8 +380,25 @@ class MainActivity : Activity() {
         root = Widgets.screenRoot(this)
         setContentView(root)
         cleanDirtyJobs()
-        showHome()
+        ensureNotifyPermission()
+        // S19：进程被回收后重建时回到原来那一屏，别让用户重搜书名。
+        if (!restoreScreen(savedInstanceState)) showHome()
         syncSourcesOnStart()
+    }
+
+    /**
+     * 申请通知权限（S13）。
+     *
+     * manifest 早就声明了 `POST_NOTIFICATIONS`，但代码里从来没有申请过：
+     * Android 13+ 首启后通知栏是空的，而进度屏明确叫用户「进度看通知」。
+     * 下载是前台服务，没有这个权限连前台通知都看不到。
+     */
+    private fun ensureNotifyPermission() {
+        if (Build.VERSION.SDK_INT < 33) return
+        val p = android.Manifest.permission.POST_NOTIFICATIONS
+        if (checkSelfPermission(p) == android.content.pm.PackageManager.PERMISSION_GRANTED) return
+        runCatching { requestPermissions(arrayOf(p), 4022) }
+            .onFailure { DevLog.log("WatchDL", "通知权限申请失败：${it.message}") }
     }
 
     /**
@@ -547,7 +497,8 @@ class MainActivity : Activity() {
                 // 用 job.json 里的**原始 bookId**，不能用目录名 ——
                 // 目录名是 safeDirName 净化过的，再拿去 restore 会被二次净化，对不上。
                 if (id.isBlank()) continue
-                val job = Downloader.restore(jobsStore(), id) ?: continue
+                // M8：首页只要总数和已下载数，用轻量读法跳过 chapters.jsonl。
+                val job = Downloader.restoreLight(jobsStore(), id) ?: continue
                 shown++
                 val done = job.count(ChapterStatus.DONE)
                 val failed = job.count(ChapterStatus.FAILED)
@@ -567,6 +518,12 @@ class MainActivity : Activity() {
         }
         root.addView(body)
     }
+
+    /** 目录页一次渲染多少章（M8）。1600 章的书分 16 段，不再一次建 6400 个 View。 */
+    private val TOC_WINDOW = 100
+
+    /** 目录页当前窗口的起始章下标。进目录时按上次读到的那章重置。 */
+    private var tocWinStart = 0
 
     /** 匹配度打分，越小越靠前。 */
 
@@ -699,6 +656,12 @@ class MainActivity : Activity() {
         // 源跟着屏幕走：预览/下载要从同一个源取正文，否则多源下会串源。
         val useSrc = src ?: tocSrc
         tocSrc = useSrc
+        // M8：从别的屏进来时把窗口挪回上次读到的那章附近。
+        // 翻页时调用方会自己设好 tocWinStart 再进来，这里只在换书或从别处进来时重置。
+        val entering = (screen as? Screen.Toc)?.info?.bookId != info.bookId
+        if (entering) {
+            tocWinStart = (readProgress(info.bookId) - TOC_WINDOW / 2).coerceAtLeast(0)
+        }
         setScreen(Screen.Toc(info, useSrc))
         root.removeAllViews()
         root.addView(Widgets.topBar(this, info.name, onBack = { goBackToPrevious() },
@@ -764,7 +727,20 @@ class MainActivity : Activity() {
         col.addView(card)
 
         col.addView(Widgets.sectionLabel(this, "章节"))
-        info.chapters.forEachIndexed { i, ch ->
+        // M8：以前一次性给全部章节建 View，1600 章约 6400 个，直接 ANR。
+        // 现在只渲染一个以 [tocWinStart] 为起点的窗口，两端给「往前/往后」按钮，
+        // 点了换窗口重绘整个列表 —— 不做增量插入，索引不会错。
+        val listAnchor = col.childCount
+        val winStart = tocWinStart.coerceIn(0, (info.chapters.size - 1).coerceAtLeast(0))
+        val winEnd = (winStart + TOC_WINDOW - 1).coerceAtMost(info.chapters.lastIndex)
+        if (winStart > 0) {
+            col.addView(Widgets.button(this, "↑ 前面还有 $winStart 章", "text") {
+                tocWinStart = (winStart - TOC_WINDOW).coerceAtLeast(0)
+                showToc(info, src)
+            })
+        }
+        for (i in winStart..winEnd) {
+            val ch = info.chapters[i]
             val st = job?.statuses?.get(i)
             val (mark, color) = when {
                 ch.locked -> "锁" to Md3.onSurfaceVariant
@@ -776,17 +752,36 @@ class MainActivity : Activity() {
                 if (ch.locked) toast("这是付费章，取不到正文") else preview(info, i)
             })
         }
+        val rest = info.chapters.size - 1 - winEnd
+        if (rest > 0) {
+            col.addView(Widgets.button(this, "↓ 后面还有 $rest 章", "text") {
+                tocWinStart = winEnd + 1
+                showToc(info, src)
+            })
+        }
         // 直接滚到上次读到的那章：五百章的书手动滑到第 300 章是不可能的事。
-        if (lastRead > 0) {
-            val target = (col.getChildAt(col.childCount - info.chapters.size + lastRead)) as? android.view.View
+        if (lastRead in winStart..winEnd) {
+            val target = col.getChildAt(listAnchor + (lastRead - winStart))
             body.post { target?.let { body.smoothScrollTo(0, it.top) } }
         }
         root.addView(body)
     }
 
     /** ④ 下载中。 */
+    /**
+     * 进度屏。**已经在这一屏时不重建**（M8）。
+     *
+     * 以前每次进来都 `removeAllViews()` 全套重建，还在这里读 `job.json`
+     * 和整个 `chapters.jsonl`。进度广播每章发两次，一本 3000 章的书
+     * 就是每秒数次整屏重建 + 数 MB 读盘，手表上直接掉帧。
+     * 现在只在换书或首次进入时重建，之后走 [refreshProgressLive] 只改文字。
+     */
     private fun showProgress(info: BookInfo) {
+        val same = (screen as? Screen.Progress)?.info?.bookId == info.bookId &&
+            progressNum != null
         setScreen(Screen.Progress(info))
+        if (same) { refreshProgressLive(); return }
+        progressNum = null
         root.removeAllViews()
         root.addView(Widgets.topBar(this, "下载中", onBack = { showToc(info) }))
 
@@ -823,6 +818,44 @@ class MainActivity : Activity() {
 
         col.addView(Md3.text(this, "下载在前台服务里跑，锁屏不会断", Md3.FS_SM, Md3.onSurfaceVariant))
         root.addView(body)
+
+        // M8：留下三个要随进度变的 View，广播时只改它们。
+        progressNum = num
+        progressCard = card
+        progressSub = card.getChildAt(2) as? android.widget.TextView
+        progressTotal = total
+    }
+
+    /** 进度屏的三处可变 View。为 null 表示进度屏没在显示。 */
+    private var progressNum: android.widget.TextView? = null
+    private var progressCard: LinearLayout? = null
+    private var progressSub: android.widget.TextView? = null
+    private var progressTotal = 0
+
+    /**
+     * 只刷新进度文字与进度条，不重建视图（M8）。
+     *
+     * 不读盘：`Downloader.restore` 留给「这次下载结束」那一次，
+     * 每章两次的刷新里读整个 chapters.jsonl 是卡顿的主因。
+     */
+    private fun refreshProgressLive() {
+        val num = progressNum ?: return
+        val card = progressCard ?: return
+        val sub = progressSub ?: return
+        val total = progressTotal
+        num.text = android.text.SpannableStringBuilder("$progressDone").apply {
+            append("  / $total")
+        }
+        // 进度条是两条带权重的 View，改比例得重建 —— 只有这一个控件，代价可忽略。
+        card.removeViewAt(1)
+        card.addView(Widgets.progressBar(this, if (total > 0) progressDone.toFloat() / total else 0f, 5), 1)
+        progressSub = card.getChildAt(2) as? android.widget.TextView
+        val elapsed = if (progressStartedAt > 0)
+            ((System.currentTimeMillis() - progressStartedAt) / 1000).coerceAtLeast(1) else 0
+        val speed = if (elapsed > 0) " · ${progressDone * 60 / elapsed} 章/分" else ""
+        val remain = if (progressDone > 0 && total > progressDone)
+            " · 约 ${(total - progressDone) * elapsed / progressDone} 秒" else ""
+        sub.text = "已下载 $progressDone 章，失败 $progressFailed 章$speed$remain"
     }
 
     /** ⑤ 书源管理。 */
@@ -1821,8 +1854,18 @@ class MainActivity : Activity() {
     }
 
     private fun startDownload(info: BookInfo) {
-        if (downloading) { showProgress(info); return }
-        downloading = true
+        // S14：以前用内存里的 `downloading` 标志，唯一复位点在 [progressReceiver] 里，
+        // 而接收器只在 onResume~onPause 之间注册。点下载 → 退回目录 → 按 Home（注销接收器）
+        // → 服务被杀 → 回 App，标志还是 true，点「继续下载」直接 return，
+        // 界面停在「下载中 0 章」再不动，只能杀进程。
+        // 现在只看服务端的真实状态，进程被回收也不会残留。
+        val running = DownloadService.runningBookId
+        if (running != null) {
+            // 已经在下另一本书：不能悄悄排队，也不能假装开始了。
+            if (running != info.bookId) toast("正在下载另一本，请稍候")
+            showProgress(info)
+            return
+        }
         progressDone = Downloader.restore(jobsStore(), info.bookId)?.count(ChapterStatus.DONE) ?: 0
         progressFailed = 0
         progressStartedAt = System.currentTimeMillis()
@@ -2191,7 +2234,6 @@ class MainActivity : Activity() {
             val finished = intent.getBooleanExtra(DownloadService.EXTRA_FINISHED, false)
             val info = (screen as? Screen.Progress)?.info
             if (finished) {
-                downloading = false
                 toast("下载结束：成功 $progressDone，失败 $progressFailed")
                 info?.let { showToc(it) }
             } else if (info != null) {
@@ -2215,6 +2257,59 @@ class MainActivity : Activity() {
         runCatching { unregisterReceiver(progressReceiver) }
         // 退到后台、切走、被杀之前，先把读到哪存下来。
         saveReaderPosNow()
+    }
+
+    /**
+     * 记住当前屏，进程被系统回收后能回来（S19）。
+     *
+     * `configChanges` 挡得住旋转，挡不住内存回收：读到第 300 章，切出去十分钟被杀，
+     * 回来落在首页，要重新搜书名进目录才轮得到「继续读」。
+     *
+     * 只存 bookId 不存 [BookInfo]：目录动辄几千章，
+     * N9 量过 6000 章就是 1 MB，超过 Binder 的 1 MB 上限会直接崩。
+     */
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        when (val s = screen) {
+            is Screen.Reader -> {
+                outState.putString("screen", "reader")
+                outState.putString("bookId", s.info.bookId)
+                outState.putInt("index", s.index)
+            }
+            is Screen.Toc -> {
+                outState.putString("screen", "toc")
+                outState.putString("bookId", s.info.bookId)
+            }
+            is Screen.Progress -> {
+                outState.putString("screen", "progress")
+                outState.putString("bookId", s.info.bookId)
+            }
+            else -> {}
+        }
+    }
+
+    /**
+     * 重建被回收前的屏。目录从 `job.json` 读回，读不到就退到书库首页。
+     *
+     * 返回 true 表示已恢复，[onCreate] 不再走 `showHome`。
+     */
+    private fun restoreScreen(state: Bundle?): Boolean {
+        val kind = state?.getString("screen") ?: return false
+        val bookId = state.getString("bookId")?.takeIf { it.isNotBlank() } ?: return false
+        val job = runCatching { Downloader.restore(jobsStore(), bookId) }.getOrNull()
+            ?: return false
+        if (job.chapters.isEmpty()) return false
+        val info = BookInfo(job.bookId, job.name, job.author, job.chapters)
+        when (kind) {
+            "reader" -> {
+                val idx = state.getInt("index", readProgress(bookId)).coerceIn(0, info.chapters.lastIndex)
+                preview(info, idx)
+            }
+            "toc" -> showToc(info)
+            "progress" -> showProgress(info)
+            else -> return false
+        }
+        return true
     }
 
     @Deprecated("手表没有返回手势，按返回键回上一层")

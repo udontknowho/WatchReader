@@ -435,6 +435,41 @@ class Downloader(
             return BookJob(bookId, name, author, chapters, recoveredState).withStatuses(statuses)
         }
 
+        /**
+         * 首页列表用的轻量读法（M8）：**只读 job.json，不碰 chapters.jsonl**。
+         *
+         * [restore] 会把整个 chapters.jsonl 读一遍并逐章比对，一本 3000 章的书
+         * 就是数千行。首页一次要列 8 本，8 次全量读盘直接白屏数秒。
+         * 列表只需要总数和已下载数，`job.json` 里的 status 字段就够了。
+         *
+         * 代价：进程被杀时没来得及写 DONE 的章会被算成未完成。
+         * 首页显示的是粗略进度，点进目录时会走 [restore] 拿到准确值。
+         */
+        fun restoreLight(store: JobStore, bookId: String): BookJob? {
+            val raw = store.readJob(bookId) ?: return null
+            val name = TinyJson.path(raw, "name") ?: bookId
+            val author = TinyJson.path(raw, "author") ?: ""
+            val state = runCatching { JobState.valueOf(TinyJson.path(raw, "state") ?: "PENDING") }
+                .getOrDefault(JobState.PENDING)
+            val objs = TinyJson.objects(raw, "chapters")
+            val chapters = objs.mapNotNull { o ->
+                val id = TinyJson.path(o, "itemId") ?: return@mapNotNull null
+                ChapterRef(
+                    itemId = id,
+                    title = TinyJson.path(o, "title") ?: "",
+                    locked = TinyJson.path(o, "locked") == "true",
+                )
+            }
+            val statuses = HashMap<Int, ChapterStatus>()
+            objs.forEachIndexed { i, o ->
+                TinyJson.path(o, "status")?.let { s ->
+                    runCatching { statuses[i] = ChapterStatus.valueOf(s) }
+                }
+            }
+            val recovered = if (state == JobState.RUNNING) JobState.PAUSED else state
+            return BookJob(bookId, name, author, chapters, recovered).withStatuses(statuses)
+        }
+
         /** 导出纯文本。正文存的是 XHTML，导出时才转文本。 */
         /**
          * 把一本已下载的书导出为纯文本。
