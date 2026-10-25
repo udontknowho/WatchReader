@@ -112,6 +112,14 @@ object Http {
      */
     data class Raw(val bytes: ByteArray, val headers: Map<String, String>, val code: Int)
 
+    /**
+     * 带硬超时的原始字节抓取。
+     *
+     * S12：以前 `fetchRaw` 只有 connect/read 超时，没有 [fetch] 那套 FutureTask 外壳。
+     * 慢速吐字的服务器单次 read 永不超时，于是设备注册这一步卡住，
+     * 整本书停在「准备下载」；`ACTION_CANCEL` 的 interrupt 也打不断阻塞的 socket 读。
+     * 这一步在 [com.watchdl.core.Downloader.run] 之前，章超时管不到它。
+     */
     fun fetchRaw(
         url: String,
         method: String = "GET",
@@ -121,8 +129,41 @@ object Http {
         userAgent: String? = null,
         timeoutMs: Int = 15_000,
         probe: Boolean = true,
+        totalTimeoutMs: Int? = null,
     ): Raw {
-        val conn = URL(if (probe) upscale(url) else url).openConnection() as HttpURLConnection
+        require(totalTimeoutMs == null || totalTimeoutMs > 0)
+        val budget = totalTimeoutMs?.toLong() ?: (timeoutMs.toLong() * TOTAL_FACTOR + 2_000)
+        val probeOk = probe && budget > PROBE_TIMEOUT_MS * 2L
+        val target = if (probeOk) upscale(url) else url
+        val task = java.util.concurrent.FutureTask {
+            fetchRawNow(target, method, body, contentType, headers, userAgent, timeoutMs)
+        }
+        POOL.execute(task)
+        return try {
+            task.get(budget, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (e: java.util.concurrent.TimeoutException) {
+            task.cancel(true)
+            throw java.io.IOException("请求超时（${budget}ms，含 DNS）")
+        } catch (e: java.util.concurrent.ExecutionException) {
+            throw (e.cause as? Exception) ?: e
+        } catch (e: InterruptedException) {
+            task.cancel(true)
+            Thread.currentThread().interrupt()
+            throw java.io.IOException("请求被取消")
+        }
+    }
+
+    /** [fetchRaw] 的实体，跑在池线程里。 */
+    private fun fetchRawNow(
+        url: String,
+        method: String,
+        body: ByteArray?,
+        contentType: String?,
+        headers: Map<String, String>,
+        userAgent: String?,
+        timeoutMs: Int,
+    ): Raw {
+        val conn = URL(url).openConnection() as HttpURLConnection
         conn.instanceFollowRedirects = false
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs

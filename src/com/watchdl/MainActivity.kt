@@ -1152,7 +1152,9 @@ class MainActivity : Activity() {
 
         val gender = if (r.gender == RankConfig.Gender.FEMALE) "female" else "male"
         val deadline = System.currentTimeMillis() + RankSource.PAGE_BUDGET_MS * 2
-        val pages = if (r.kind == RankConfig.Kind.QIDIAN) r.pages.coerceIn(1, 10) else 1
+        // S18：以前非起点榜一律 1 页，配置里写 pages:5 也无效。
+        // 现在按配置走，0 表示不可翻页。
+        val pages = r.pages.coerceIn(0, 10).coerceAtLeast(1)
         val out = LinkedHashMap<String, BookHit>()
         for (p in 1..pages) {
             if (System.currentTimeMillis() > deadline) break

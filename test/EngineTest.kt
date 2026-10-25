@@ -696,6 +696,76 @@ fun linkCheck() {
         check("下一页指回自身时不无限循环", hits <= 2, "实际请求 $hits 次")
     }
 
+    // ── S18：区分「接口变了」与「今天没数据」；pages 缺省 ──
+    println("[S18] 榜单空表与页数")
+    run {
+        val miss = """{"data":{"other":[{"bookId":"1"}]}}"""
+        val empty = """{"data":{"list":[]}}"""
+        val ok = """{"data":{"list":[{"bookId":"9","bookName":"书"}]}}"""
+
+        check("路径缺失返回 null（可判接口变更）",
+            TinyJson.arrayFieldOrThrow(miss, "data.list", "bookId") == null, "返回了非 null")
+        check("空数组返回空表（真的没数据）",
+            TinyJson.arrayFieldOrThrow(empty, "data.list", "bookId") == emptyList<String>(),
+            "返回了 null")
+        check("正常能取到",
+            TinyJson.arrayFieldOrThrow(ok, "data.list", "bookId") == listOf("9"), "取不到")
+
+        // 旧签名语义保持：都不会崩
+        check("arrayField 对缺失也返回空表",
+            TinyJson.arrayField(miss, "data.list", "bookId").isEmpty(), "")
+    }
+    run {
+        check("起点缺省 10 页", RankConfig.defaultPages(RankConfig.Kind.QIDIAN) == 10,
+            "实际 ${RankConfig.defaultPages(RankConfig.Kind.QIDIAN)}")
+        check("番茄更新缺省 5 页",
+            RankConfig.defaultPages(RankConfig.Kind.FANQIE_UPDATE) == 5,
+            "实际 ${RankConfig.defaultPages(RankConfig.Kind.FANQIE_UPDATE)}")
+        check("番茄推荐缺省不可翻页",
+            RankConfig.defaultPages(RankConfig.Kind.FANQIE) == 0,
+            "实际 ${RankConfig.defaultPages(RankConfig.Kind.FANQIE)}")
+
+        // 配置里没写 pages 时，解析结果应采用 kind 缺省值
+        val cfg = """{"version":1,"ranks":[
+            {"key":"q","kind":"qidian","board":"yuepiaolist","name":"起点"},
+            {"key":"u","kind":"fanqieUpdate","name":"更新"}]}"""
+        val ranks = RankConfig.parseVersioned(cfg).second
+        val q = ranks.firstOrNull { it.key == "q" }
+        val u = ranks.firstOrNull { it.key == "u" }
+        check("起点榜解析出 10 页", q?.pages == 10, "实际 ${q?.pages}")
+        check("番茄更新解析出 5 页", u?.pages == 5, "实际 ${u?.pages}")
+
+        // 显式写了 pages 仍以配置为准
+        val cfg2 = """{"version":1,"ranks":[{"key":"u","kind":"fanqieUpdate","name":"更新","pages":3}]}"""
+        check("显式 pages:3 生效",
+            RankConfig.parseVersioned(cfg2).second.firstOrNull()?.pages == 3, "被缺省值盖掉")
+    }
+
+    // ── S15：导入的大小与深度上限 ──
+    println("[S15] 导入上限")
+    run {
+        // 深嵌套：以前抛 StackOverflowError，catch(Exception) 接不住，
+        // 界面报「解析出 0 条（多半拉到了 404 页面）」，真实原因被掩盖。
+        val deep = "[".repeat(500) + "]".repeat(500)
+        val r = runCatching { JsonParser.parse(deep) }
+        check("深嵌套被拒（不是 StackOverflowError）", r.isFailure, "居然解析成功")
+        check("抛的是可捕获的异常", r.exceptionOrNull() is Exception,
+            r.exceptionOrNull()?.let { it::class.simpleName } ?: "null")
+        check("原因说得清", r.exceptionOrNull()?.message?.contains("嵌套") == true,
+            r.exceptionOrNull()?.message ?: "")
+
+        // 深度以内的正常输入不受影响
+        val shallow = "[".repeat(50) + "]".repeat(50)
+        check("50 层正常解析", runCatching { JsonParser.parse(shallow) }.isSuccess, "被误拒")
+
+        // 超 8 MB 直接拒绝，不进 clean()
+        val huge = "x".repeat(JsonParser.MAX_INPUT + 1)
+        val r2 = runCatching { JsonParser.parse(huge) }
+        check("超 8 MB 被拒", r2.isFailure, "居然接受了")
+        check("原因说明是文件过大",
+            r2.exceptionOrNull()?.message?.contains("过大") == true, r2.exceptionOrNull()?.message ?: "")
+    }
+
     // ── N8：云端榜单配置的版本与原子写 ──
     println("[N8] 榜单配置版本")
     run {

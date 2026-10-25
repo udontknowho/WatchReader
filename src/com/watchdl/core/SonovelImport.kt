@@ -156,7 +156,20 @@ object SonovelImport {
  */
 object JsonParser {
 
-    fun parse(text: String): Any? = Parser(clean(text)).parseValue()
+    /**
+     * 输入上限 8 MB。
+     *
+     * S15：几 MB 输入会同时存在原文、[clean] 输出、去尾逗号输出三份字符串，
+     * 手表上再大就真要 OOM 了。真实书源文件是几百 KB 量级，8 MB 足够宽松。
+     */
+    const val MAX_INPUT = 8 * 1024 * 1024
+
+    fun parse(text: String): Any? {
+        if (text.length > MAX_INPUT) {
+            throw IllegalArgumentException("文件过大（${text.length / 1024 / 1024} MB，上限 8 MB）")
+        }
+        return Parser(clean(text)).parseValue()
+    }
 
     /**
      * 去行注释、块注释、尾逗号。
@@ -224,20 +237,32 @@ object JsonParser {
         return out.toString()
     }
 
+    /** 嵌套深度上限。JSON 本身很少超过 20 层，200 足够宽松又能挡住恶意的深嵌套。 */
+    private const val MAX_DEPTH = 200
+
     private class Parser(private val s: String) {
         private var i = 0
+        private var depth = 0
 
         fun parseValue(): Any? {
             skipWs()
             if (i >= s.length) return null
-            return when (s[i]) {
-                '{' -> parseObject()
-                '[' -> parseArray()
-                '"' -> parseString()
-                't' -> { i += 4; true }
-                'f' -> { i += 5; false }
-                'n' -> { i += 4; null }
-                else -> parseNumber()
+            // S15：深度不设限时，5 万层嵌套抛 StackOverflowError，
+            // 而 catch (e: Exception) 接不住 Error，用户看到的是「0 条」。
+            if (depth > MAX_DEPTH) throw IllegalArgumentException("嵌套过深（上限 $MAX_DEPTH 层）")
+            depth++
+            try {
+                return when (s[i]) {
+                    '{' -> parseObject()
+                    '[' -> parseArray()
+                    '"' -> parseString()
+                    't' -> { i += 4; true }
+                    'f' -> { i += 5; false }
+                    'n' -> { i += 4; null }
+                    else -> parseNumber()
+                }
+            } finally {
+                depth--
             }
         }
 

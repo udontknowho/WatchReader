@@ -114,13 +114,23 @@ object TinyJson {
      * 以前的版本用外层深度计数，遇到 `[[{…},{…}],[…]]` 这种双层嵌套只认得第一层，
      * 2500 章只抽出 75 章。现在改为把所有顶层对象都扫一遍，只看对象的直接字段。
      */
-    fun arrayField(json: String, arrayPath: String, field: String): List<String> {
+    fun arrayField(json: String, arrayPath: String, field: String): List<String> =
+        arrayFieldOrThrow(json, arrayPath, field) ?: emptyList()
+
+    /**
+     * 同 [arrayField]，但**区分「路径不存在」与「空数组」**。
+     *
+     * S18：站点改字段名后 `arrayField` 返回空表，上层判成「今天没榜」，
+     * 界面显示「暂无推荐」，与真的没数据无从区分。
+     * 路径缺失返回 null（调用方据此判定「接口变了」），空数组返回空表。
+     */
+    fun arrayFieldOrThrow(json: String, arrayPath: String, field: String): List<String>? {
         // 走路径拿**偏移**，不要拿值段再 indexOf 回来 ——
         // 那样会命中同名键，拿到别的数组。
         val at = pathOffset(json, arrayPath)
-        if (at < 0) return emptyList()
+        if (at < 0) return null
         val open = skipWs(json, at)
-        if (open >= json.length || json[open] != '[') return emptyList()
+        if (open >= json.length || json[open] != '[') return null
         val out = mutableListOf<String>()
         var i = open + 1
         while (i < json.length) {

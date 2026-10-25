@@ -110,6 +110,13 @@ object RankConfig {
         }
     }
 
+    /** 各 kind 的缺省页数，与内置清单一致。 */
+    fun defaultPages(kind: Kind): Int = when (kind) {
+        Kind.QIDIAN -> 10       // 每页 20 本，10 页 = 内置的 200 本
+        Kind.FANQIE_UPDATE -> 5
+        else -> 0               // 番茄推荐/分类榜不可翻页
+    }
+
     const val FILE_NAME = "ranks.json"
 
     /**
@@ -240,8 +247,11 @@ object RankConfig {
                     site = if (kind == Kind.QIDIAN) Site.QIDIAN else Site.FANQIE,
                     board = board,
                     // 页数封顶：云端写个 10000 会让人一直翻下去，也等于放大抓取。
-                    pages = (TinyJson.path(obj, "pages")?.toDoubleOrNull()?.toInt() ?: 0)
-                        .coerceIn(0, 10),
+                    // S18：以前缺省 0，而调用方对非起点榜强制 pages=1，
+                    // 于是照文档示例写「番茄更新 pages:5」的配置也只出 20 条。
+                    // 缺省按 kind 给内置值：起点 10 页、番茄更新 5 页、其余 0。
+                    pages = (TinyJson.path(obj, "pages")?.toDoubleOrNull()?.toInt()
+                        ?: defaultPages(kind)).coerceIn(0, 10),
                     gendered = TinyJson.path(obj, "gendered") == "true",
                     category = category,
                     rankType = (TinyJson.path(obj, "rankType")?.toDoubleOrNull()?.toInt() ?: 2)

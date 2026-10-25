@@ -131,7 +131,10 @@ object RankSource {
             mapOf("Accept" to "application/json"), referer = "$FQ_HOST/",
             timeoutMs = left(deadline),
         ).body
-        val ids = TinyJson.arrayField(body, "data.list", "bookId")
+        // S18：ids 是主字段。路径对不上说明接口改了，抛错让 retry 重试，
+        // 别把它当成「今天没数据」。
+        val ids = TinyJson.arrayFieldOrThrow(body, "data.list", "bookId")
+            ?: error("番茄推荐接口字段变了（缺 data.list）")
         val names = TinyJson.arrayField(body, "data.list", "bookName")
         val authors = TinyJson.arrayField(body, "data.list", "author")
         val abstracts = TinyJson.arrayField(body, "data.list", "abstract")
@@ -165,7 +168,9 @@ object RankSource {
             mapOf("Accept" to "application/json"), referer = "$FQ_HOST/",
             timeoutMs = left(deadline),
         ).body
-        val ids = TinyJson.arrayField(body, "data.data", "bookId")
+        // S18：同上，主字段缺失视为接口变更。
+        val ids = TinyJson.arrayFieldOrThrow(body, "data.data", "bookId")
+            ?: error("番茄分类榜接口字段变了（缺 data.data）")
         val names = TinyJson.arrayField(body, "data.data", "bookName")
         val authors = TinyJson.arrayField(body, "data.data", "author")
         val cats = TinyJson.arrayField(body, "data.data", "category")
@@ -206,7 +211,9 @@ object RankSource {
             ),
             referer = "https://m.qidian.com/rank/yuepiao", timeoutMs = left(deadline),
         ).body
-        val ids = TinyJson.arrayField(body, "data.records", "bid")
+        // S18：同上。起点用 bid。
+        val ids = TinyJson.arrayFieldOrThrow(body, "data.records", "bid")
+            ?: error("起点榜接口字段变了（缺 data.records）")
         val names = TinyJson.arrayField(body, "data.records", "bName")
         val authors = TinyJson.arrayField(body, "data.records", "bAuth")
         val abstracts = TinyJson.arrayField(body, "data.records", "desc")
