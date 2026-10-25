@@ -695,6 +695,51 @@ fun linkCheck() {
         check("下一页指回自身时不无限循环", hits <= 2, "实际请求 $hits 次")
     }
 
+    // ── N5：正文选择器失效不能把整页 HTML 当正文存下 ──
+    println("[N5] 正文取空时必须返空串，不返整页")
+    run {
+        val page = "<html><body><nav>首页 目录 排行</nav>" +
+            "<div class='wrong'>站点改版后的结构</div>" +
+            "<footer>版权所有</footer></body></html>"
+        val eng = SourceEngine(BookSourceRule(
+            name = "broken", host = "https://b.example",
+            search = SearchRule(url = "/s", name = FieldRule.parse(""), link = FieldRule.parse("")),
+            toc = TocRule(url = "/t", name = FieldRule.parse(""), link = FieldRule.parse("")),
+            // 选择器存在，但页面里没有这个元素 —— 就是站点改版的形态
+            content = ContentRule(url = "", content = FieldRule.parse("#gone")),
+        )) { _, _, _, _ -> page }
+        val body = eng.content("https://b.example/1.html")
+        check("取空时返回空串", body.isEmpty(), "得到 ${body.length} 字符：${body.take(40)}")
+        // 上层靠这个判断记 FAILED（Downloader:125 `if (html.isBlank()) error("正文为空")`）
+        check("因此会被记成失败而不是成功", body.isBlank())
+        check("没有把导航/页脚当正文", !body.contains("版权所有"))
+    }
+    run {
+        // 对照组：选择器命中时必须照常返回，不能被这条改动误伤
+        val page = "<html><body><div id='c'>真正的正文</div><footer>版权所有</footer></body></html>"
+        val eng = SourceEngine(BookSourceRule(
+            name = "ok", host = "https://o.example",
+            search = SearchRule(url = "/s", name = FieldRule.parse(""), link = FieldRule.parse("")),
+            toc = TocRule(url = "/t", name = FieldRule.parse(""), link = FieldRule.parse("")),
+            content = ContentRule(url = "", content = FieldRule.parse("#c")),
+        )) { _, _, _, _ -> page }
+        val body = eng.content("https://o.example/1.html")
+        check("选择器命中时正常返回", body.contains("真正的正文"), body.take(40))
+        check("仍然排除页脚", !body.contains("版权所有"), body.take(60))
+    }
+    run {
+        // 纯脚本源（选择器为空、内容靠脚本产出）：必须原样返回 raw，不走这条改动
+        val page = "脚本产出的正文"
+        val eng = SourceEngine(BookSourceRule(
+            name = "js", host = "https://j.example",
+            search = SearchRule(url = "/s", name = FieldRule.parse(""), link = FieldRule.parse("")),
+            toc = TocRule(url = "/t", name = FieldRule.parse(""), link = FieldRule.parse("")),
+            content = ContentRule(url = "", content = FieldRule.parse("")),
+        )) { _, _, _, _ -> page }
+        val body = eng.content("https://j.example/1.html")
+        check("选择器为空时原样返回（脚本源不受影响）", body == page, body.take(40))
+    }
+
     // ── 回归：目录分页（nextTocUrl）总页数封顶（2026-10-22）──
     // 以前只封了内层链式循环，外层 `pending` 有多少就请求多少次。
     // `.pagination a@href` 返回全部页码时，一本书能联网几百次，界面卡在「正在取目录…」。

@@ -226,19 +226,32 @@ class Downloader(
     /** 单章取数超时。单独列一个类型，好跟网络错误区分开 —— 超时不重试。 */
     private class ChapterTimeoutException(msg: String) : Exception(msg)
 
-    private val fetchPool = java.util.concurrent.Executors.newCachedThreadPool { r ->
-        Thread(r, "chapter-fetch").apply { isDaemon = true }
-    }
+
+    /**
+     * 单章取数的线程池。
+     *
+     * 以前是 cached pool：来一个新任务就建一条线程。超时走 `f.cancel(true)`，
+     * 而 socket 阻塞中的线程中断不掉，于是每条超时的章都留下一条仍在跑的线程，
+     * 同时存活的线程数只增不减。一本书 3000 章碰 200 个慢章，200 条线程 + 各自的
+     * 响应缓冲，手表上直接 OutOfMemoryError: unable to create native thread。
+     *
+     * 改固定上限 + 有界队列：满了就由调用方线程自己跑（降级为串行）。
+     * 宁可慢，也不把线程数堆到爆炸。
+     */
+    private val fetchPool = java.util.concurrent.ThreadPoolExecutor(
+        MAX_FETCH_THREADS, MAX_FETCH_THREADS, 30, java.util.concurrent.TimeUnit.SECONDS,
+        java.util.concurrent.ArrayBlockingQueue(MAX_FETCH_THREADS * 2),
+        { r -> Thread(r, "chapter-fetch").apply { isDaemon = true } },
+        // 满队列时不抛异常，交给提交它的线程执行 —— 即降级为串行。
+        java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy(),
+    )
 
     /**
      * 带硬上限跑一次取数。
      *
      * 超时就放弃等待并抛 [ChapterTimeoutException]。**被放弃的线程还在飞**：
      * Java 无法可靠地中断阻塞中的 socket 读，`cancel(true)` 多半无效。
-     * 这比整本书卡死好：那些线程终会被 Http 自己的 30 秒总时限收掉。
-     *
-     * 线程池是共享的（不是每章新建）—— 一章建一个池在手表上开销太大。
-     * 池用 cached，卡住的线程不会占住其他章的位置。
+     * 这比整本书卡死好：那些线程终会被 Http 自己的总时限收掉。
      */
     private fun withChapterTimeout(ms: Long, block: () -> String): String {
         if (ms <= 0) return block()
@@ -254,6 +267,9 @@ class Downloader(
         } catch (e: java.util.concurrent.ExecutionException) {
             // 取数本身抛的错，原样往外传，让上层决定要不要重试。
             throw (e.cause as? Exception) ?: e
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            // 池已关（作业收尾中），退化为直接跑。
+            block()
         }
     }
 
@@ -297,6 +313,46 @@ class Downloader(
     }
 
     companion object {
+        /**
+         * 取数线程上限。
+         *
+         * 用户可选并发 1–8 路（DownloadService.DEFAULT_LANES = 3）。池给 16 条：
+         * 8 路正常取数 + 8 条留在飞上的超时线程。再多就会在手表上撞
+         * `OutOfMemoryError: unable to create native thread`。
+         */
+        const val MAX_FETCH_THREADS = 16
+
+        /**
+         * 把目录落进 job.json，供下载服务自己读。
+         *
+         * N9：整份目录以前塞在 Intent extra 里走 Binder（1 MB 硬上限），
+         * 书源 itemId 是完整 URL，6000 章就超限，startForegroundService
+         * 在主线程抛 TransactionTooLargeException —— 点下载直接闪退。
+         *
+         * 已有作业时**不覆盖章节**：目录可能已经变过，而 chapters.jsonl
+         * 里的正文是按旧 itemId 存的，换掉章节列表会让已下的正文对不上号。
+         * 只补元数据。
+         */
+        fun saveCatalog(store: JobStore, info: BookInfo) {
+            if (store.readJob(info.bookId) != null) return
+            val sb = StringBuilder()
+            sb.append("{\"bookId\":").append(quote(info.bookId))
+            sb.append(",\"name\":").append(quote(info.name))
+            sb.append(",\"author\":").append(quote(info.author))
+            sb.append(",\"state\":\"PENDING\"")
+            sb.append(",\"total\":").append(info.chapters.size)
+            sb.append(",\"chapters\":[")
+            info.chapters.forEachIndexed { i, ch ->
+                if (i > 0) sb.append(',')
+                sb.append("{\"itemId\":").append(quote(ch.itemId))
+                sb.append(",\"title\":").append(quote(ch.title))
+                sb.append(",\"locked\":").append(ch.locked)
+                sb.append(",\"status\":\"PENDING\"}")
+            }
+            sb.append("]}")
+            store.writeJob(info.bookId, sb.toString())
+        }
+
         /** JSON 字符串转义。正文里引号、换行、反斜杠都很常见，必须转。 */
         fun quote(s: String): String {
             val sb = StringBuilder(s.length + 16)
@@ -403,7 +459,10 @@ class Downloader(
             }
 
             var n = 0
-            RandomAccessFile(out, "rw").use { raf ->
+            // 写 .tmp 再改名：以前直接在目标文件上 setLength(0) 后逐段写，
+            // 写到一半进程被杀就留下半截文件，而原来的完整导出已经被清空。
+            val tmp = File(out.absolutePath + ".tmp")
+            RandomAccessFile(tmp, "rw").use { raf ->
                 raf.setLength(0)
                 // UTF-8 BOM：不加的话 Windows 记事本按 GBK 猜，全篇乱码。
                 raf.write(byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()))
@@ -413,6 +472,12 @@ class Downloader(
                     raf.write(b.toByteArray(Charsets.UTF_8))
                     n++
                 }
+            }
+            // 原子替换：rename 在 Linux 上是原子的，用户要么拿到旧文件要么拿到新的。
+            if (!tmp.renameTo(out)) {
+                // 跨文件系统等情况下 rename 失败，退化为直接写（总比不写强）
+                tmp.copyTo(out, overwrite = true)
+                tmp.delete()
             }
             return n
         }

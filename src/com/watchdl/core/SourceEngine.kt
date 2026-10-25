@@ -431,7 +431,11 @@ class SourceEngine(
     private fun contentBody(raw: String): String {
         val rule = rule.content.content
         val all = runCatching { rule.eval(raw, list = true) }.getOrNull().orEmpty()
-        if (all.isEmpty()) return raw
+        // 规则给了选择器却一条没命中，返回空串，让上层记 FAILED。
+        // 以前返回 raw，于是站点改版/选择器失效时每章都把整页 HTML
+        //（导航、广告、版权）存下，并且因为 html.isBlank() 不成立而记 DONE。
+        // 结果是全书「成功 N 失败 0」，导出文本全是菜单，用户要打开文件才发现。
+        if (all.isEmpty()) return ""
         if (all.size == 1) return all[0]
         // 选的是链接/图片地址就只取第一个，拼起来没有意义。
         // 不能只看规则原文（可能是 `href` 后的脚本），看结果长相更准。

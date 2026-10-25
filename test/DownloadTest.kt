@@ -91,6 +91,30 @@ fun main() {
         check("全角缩进", text.contains("　　正文"), "无缩进")
         check("标题在首行", text.startsWith("第1章 标题"), text.take(40))
 
+        // N2：导出写失败或中断时，原来的完整导出不能被毁。
+        run {
+            val keep = File(root, "keep.txt")
+            keep.writeText("上一次的完整导出")
+            val before = keep.readText()
+            // 目标目录被占成一个文件，导出必然失败
+            val blockedDir = File(root, "blocked").apply { mkdirs() }
+            val bad = File(blockedDir, "sub")
+            val realParent = File(root, "ro").apply { mkdirs() }
+            val tmpTarget = File(realParent, "x.txt")
+            // 用一个会失败的 out：父目录不存在
+            val r = runCatching {
+                Downloader.exportText(store, "b1", File(root, "no-such-dir/y.txt"))
+            }
+            check("导出到不存在的目录会报错而不是静默", r.isFailure || r.getOrNull() == 0)
+            check("失败的导出没有碰别的文件", keep.readText() == before, keep.readText().take(20))
+            // 正常导出后不应留下 .tmp 残留
+            val prev = File(root, "prev.txt")
+            Downloader.exportText(store, "b1", prev)
+            check("成功后不留 .tmp 残留",
+                !File(prev.absolutePath + ".tmp").exists())
+            check("目标文件确实被替换成新内容", prev.length() > 100, "长度 ${prev.length()}")
+        }
+
         // 导出文件规范（2026-10-21 用户定）：BOM + 章节序号。
         check("导出带 UTF-8 BOM", out.readBytes().take(3) == listOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()),
             out.readBytes().take(3).toString())
@@ -251,6 +275,83 @@ fun main() {
         val weird = "含\"引号\"和\n换行\\反斜杠"
         val ok = TinyJson.path("{\"k\":${Downloader.quote(weird)}}", "k")
         check("转义后可被解析回", ok == weird, "得到 $ok")
+
+    // ══════ N1：取数线程池必须有上限 ══════
+    println("[N1] 超时线程不会无限堆积")
+    run {
+        // cached pool 时 60 个慢任务会造出 60 条线程。现在固定上限 16。
+        val peak = java.util.concurrent.atomic.AtomicInteger(0)
+        val cur = java.util.concurrent.atomic.AtomicInteger(0)
+        val dl = Downloader(
+            store = JobStore(File(root, "n1").apply { mkdirs() }),
+            fetchChapter = {
+                val c = cur.incrementAndGet()
+                peak.updateAndGet { p -> maxOf(p, c) }
+                try { Thread.sleep(600) } finally { cur.decrementAndGet() }
+                "x"
+            },
+            log = { },
+            sleep = { },
+            concurrency = 8,
+            chapterTimeoutMs = 100,   // 远小于 600ms 的取数，全部会超时
+        )
+        val chs = (1..60).map { ChapterRef("c$it", "第 $it 章", false) }
+        val job = BookJob("n1book", "线程测试", "a", chs)
+        // 单章 100ms 超时，远小于 600ms 的取数 —— 全部会超时
+        runCatching { dl.run(job) }
+        val p = peak.get()
+        println("    峰值线程 ${p}（上限 16）")
+        check("峰值线程不超过 16", p <= 16, "实际 $p")
+        check("确实跑了并发（不是退化成串行）", p >= 2, "实际 $p")
+    }
+
+    // ══════ N9：目录不再送 Intent extra ══════
+    println("[N9] 长目录落 job.json，不走 Binder")
+    run {
+        val dir = File(root, "n9").apply { mkdirs() }
+        val store = JobStore(dir)
+        // 模拟通用书源：itemId 是完整 URL，6000 章。
+        // 旧实现把它们 join 成一个字符串塞进 Intent，超 Binder 1 MB 上限。
+        val many = (1..6000).map {
+            ChapterRef("https://www.example-source.com/book/123456/chapter-$it.html",
+                "第 $it 章 标题", false)
+        }
+        val bid = "https://www.example-source.com/book/123456"
+        Downloader.saveCatalog(store, BookInfo(bid, "长书", "作者", many))
+        val back = Downloader.restore(store, bid)
+        check("job.json 能读回 6000 章", back?.chapters?.size == 6000, "实际 ${back?.chapters?.size}")
+        check("itemId 首尾都对", back?.chapters?.first()?.itemId == many.first().itemId &&
+            back?.chapters?.last()?.itemId == many.last().itemId)
+        check("中文标题带空格也完整", back?.chapters?.last()?.title == many.last().title,
+            back?.chapters?.last()?.title ?: "空")
+
+        // 实测门槛，不靠估算。Binder 上限 1 MB，按 UTF-16 算每个字符 2 字节，
+        // 一行约 8 字符开销（两个 \u0001、\n、布尔值）。
+        fun binderBytes(chs: List<ChapterRef>) = chs.joinToString("\n") {
+            "${it.itemId}\u0001${it.title}\u0001${it.locked}"
+        }.toByteArray(Charsets.UTF_16).size
+        val n6000 = binderBytes(many)
+        println("    6000 章 / 短标题：$n6000 字节（${n6000 / 1024} KB，上限 1024 KB）")
+        // 短标题 6000 章就已经逼近上限；真实书源的标题更长，会越过。
+        check("6000 章短标题已超过 800 KB", n6000 > 800 * 1024, "$n6000 字节")
+        // 用真实形态再算一次：长标题 + 更长的 itemId
+        val realistic = (1..6000).map {
+            ChapterRef("https://www.example-source.com/book/123456/chapter-$it.html",
+                "第 $it 章 开局签到荒古圣体，万族林立我为尊", false)
+        }
+        val nReal = binderBytes(realistic)
+        println("    6000 章 / 真实标题：$nReal 字节（${nReal / 1024} KB）")
+        check("真实标题形态确实溢出 Binder 1 MB", nReal > 1024 * 1024, "$nReal 字节")
+        // 这正是修复的意义：新路径下目录不经过 Binder，字节数再大也不影响
+        Downloader.saveCatalog(store, BookInfo(bid, "长书", "作者", realistic))
+        check("真实形态 6000 章也能完整读回",
+            Downloader.restore(store, bid)?.chapters?.size == 6000)
+
+        // 已有作业时不覆盖章节：chapters.jsonl 里的正文按旧 itemId 存
+        Downloader.saveCatalog(store, BookInfo(bid, "长书", "作者", many.take(3)))
+        check("重跑不把已有目录缩成 3 章",
+            Downloader.restore(store, bid)?.chapters?.size == 6000)
+    }
     } finally {
         root.deleteRecursively()
     }

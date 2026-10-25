@@ -59,7 +59,7 @@ class DownloadService : Service() {
         const val EXTRA_BOOK_ID = "bookId"
         const val EXTRA_NAME = "name"
         const val EXTRA_AUTHOR = "author"
-        const val EXTRA_CHAPTERS = "chapters"     // "itemId\u0001title\u0001locked" 用 \n 连接
+        const val EXTRA_CHAPTERS = "chapters"     // 旧协议："itemId\u0001title\u0001locked" 用 \n 连接
         const val EXTRA_FREE_ONLY = "freeOnly"
 
         /** 进度广播，Activity 在线时直接刷新界面。 */
@@ -71,15 +71,19 @@ class DownloadService : Service() {
         const val EXTRA_FINISHED = "finished"
 
         fun start(ctx: Context, info: BookInfo, freeOnly: Boolean = true) {
+            // 章节不再走 Intent。整份目录 join 成字符串走 Binder，硬上限 1 MB：
+            // 通用书源 itemId 是完整 URL（60–90 字符），6000 章就超限，
+            // startForegroundService 在主线程抛 TransactionTooLargeException，
+            // 表现为「点下载就闪退」。改成把目录落进 job.json，服务自己读。
+            runCatching {
+                Downloader.saveCatalog(JobStore(File(ctx.filesDir, "books")), info)
+            }
             val i = Intent(ctx, DownloadService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_BOOK_ID, info.bookId)
                 putExtra(EXTRA_NAME, info.name)
                 putExtra(EXTRA_AUTHOR, info.author)
                 putExtra(EXTRA_FREE_ONLY, freeOnly)
-                putExtra(EXTRA_CHAPTERS, info.chapters.joinToString("\n") {
-                    "${it.itemId}\u0001${it.title.replace('\n', ' ')}\u0001${it.locked}"
-                })
             }
             ctx.startForegroundService(i)
         }
@@ -192,7 +196,7 @@ class DownloadService : Service() {
         val bookId = intent.getStringExtra(EXTRA_BOOK_ID) ?: ""
         val name = intent.getStringExtra(EXTRA_NAME) ?: bookId
         val author = intent.getStringExtra(EXTRA_AUTHOR) ?: ""
-        val chapters = (intent.getStringExtra(EXTRA_CHAPTERS) ?: "")
+        val fromIntent = (intent.getStringExtra(EXTRA_CHAPTERS) ?: "")
             .lineSequence()
             .filter { it.isNotBlank() }
             .mapNotNull { line ->
@@ -201,6 +205,10 @@ class DownloadService : Service() {
                 else ChapterRef(p[0], p[1], p[2] == "true")
             }
             .toList()
+        // 章节优先从 job.json 读（start() 已落盘）。旧协议传来的 extra 仍兼容。
+        val chapters = fromIntent.ifEmpty {
+            Downloader.restore(JobStore(File(filesDir, "books")), bookId)?.chapters ?: emptyList()
+        }
         return BookInfo(bookId, name, author, chapters)
     }
 
@@ -211,8 +219,11 @@ class DownloadService : Service() {
         val source: BookSource = resolveSource(info.bookId)
 
         val existing = Downloader.restore(store, info.bookId)
-        val job = if (existing == null) {
-            BookJob(info.bookId, info.name, info.author, info.chapters)
+        val job = if (existing == null || existing.chapters.isEmpty()) {
+            // 旧库章节为空时用新目录：否则会拿到一个 0 章的作业，
+            // 下载直接「完成」，用户看不到任何反应。
+            val base = BookJob(info.bookId, info.name, info.author, info.chapters)
+            if (existing == null) base else base.withStatuses(existing.statuses)
         } else if (existing.name.isBlank() || existing.author.isBlank()) {
             // 旧版本可能已经落了空元数据，新的目录信息应补回作业快照。
             BookJob(info.bookId, info.name.ifBlank { existing.name }, info.author.ifBlank { existing.author }, existing.chapters)
