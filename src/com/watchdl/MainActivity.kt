@@ -230,6 +230,7 @@ class MainActivity : Activity() {
             // 隔几分钟回来还显示旧列表，用户看不出它已过期。
             is Screen.Discover -> showDiscover(s.site, s.gender, s.rankKey)
             is Screen.Settings -> showSettings()
+            Screen.Shelf -> showShelf()
             else -> showHome()
         }
     }
@@ -462,14 +463,21 @@ class MainActivity : Activity() {
         ).apply { bottomMargin = Md3.dp(this@MainActivity, Md3.GAP * 2) }
         col.addView(searchRow)
 
-        // 发现页入口用文字按钮，不用图标：首屏已经有搜索框和搜索按钮，
-        // 再放一个放大镜会让人分不清哪个是「搜书」哪个是「看榜」。
+        // 发现页与书架并成一行：两者都是「去别的屏」，各占一半宽度。
+        // 竖着排会和搜索行一起把首屏占满，往下滑才看得到最近下载。
+        val navRow = Md3.row(this)
         val discoverBtn = Widgets.button(this, "发现榜单", "tonal") { showDiscover() }
         discoverBtn.contentDescription = "发现榜单"
-        discoverBtn.layoutParams = Md3.lpDp(this, null, Md3.BTN).apply {
-            bottomMargin = Md3.dp(this@MainActivity, Md3.GAP * 2)
-        }
-        col.addView(discoverBtn)
+        navRow.addView(discoverBtn, LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f))
+        val shelfBtn = Widgets.button(this, "书架", "tonal") { showShelf() }
+        shelfBtn.contentDescription = "书架"
+        navRow.addView(shelfBtn, LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f).apply {
+            leftMargin = Md3.dp(this@MainActivity, Md3.GAP)
+        })
+        navRow.layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, Md3.BTN),
+        ).apply { bottomMargin = Md3.dp(this@MainActivity, Md3.GAP * 2) }
+        col.addView(navRow)
 
         // 首页不放「设置」按钮：用户嫌碍事（2026-10-21）。
         // 字号/行距/背景在阅读页的 ⚙ 里都有，功能不丢；书源页从「发现」旁的入口进。
@@ -478,28 +486,13 @@ class MainActivity : Activity() {
         // 只认真正含 job.json 的目录。
         // 以前只看「是目录」—— 空的、导出的、脏 bookId 留下的都会进列表，
         // 而 restore 全返回 null，于是有分组标题、下面却空空如也。
-        // 先按 job.json 里的原始 bookId 取阅读时间，没有阅读记录的才退回目录修改时间。
-        // 列表要 restore 才拿得到 bookId，所以这一步提前做，排序才有依据。
-        val books = jobsDir().listFiles()
-            ?.filter { it.isDirectory && File(it, "job.json").isFile }
-            ?.map { dir -> dir to runCatching { File(dir, "job.json").readText() }.getOrNull()
-                ?.let { com.watchdl.core.TinyJson.path(it, "bookId") }.orEmpty() }
-            ?.sortedByDescending { (dir, id) -> readTime(id).takeIf { it > 0 } ?: dir.lastModified() }
-            ?: emptyList()
+        val books = shelfBooks()
         // 导出目录挪到 files/export，不再混在作业目录里（见 exportTxt）。
         if (books.isEmpty()) {
             col.addView(Widgets.emptyState(this, "▤", "还没有下载过\n搜索书名即可开始"))
         } else {
             col.addView(Widgets.sectionLabel(this, "最近下载"))
-            var shown = 0
-            for ((dir, id) in books) {
-                if (shown >= 8) break
-                // 用 job.json 里的**原始 bookId**，不能用目录名 ——
-                // 目录名是 safeDirName 净化过的，再拿去 restore 会被二次净化，对不上。
-                if (id.isBlank()) continue
-                // M8：首页只要总数和已下载数，用轻量读法跳过 chapters.jsonl。
-                val job = Downloader.restoreLight(jobsStore(), id) ?: continue
-                shown++
+            for (job in books.take(8)) {
                 val done = job.count(ChapterStatus.DONE)
                 val failed = job.count(ChapterStatus.FAILED)
                 // 副标题统一两段：作者 · 进度。字段数固定，列表才能纵向扫读。
@@ -515,13 +508,141 @@ class MainActivity : Activity() {
                     onTrailingClick = { showJobMenu(job) },
                 ) { openBook(job.bookId, job.name.ifBlank { displayName }, job.author) })
             }
+            // 首页只露 8 本，其余全在书架页 —— 否则下载多了以后首页要滑很久
+            // 才够得到搜索框。少于 8 本时不显入口，上面「书架」按钮已够用。
+            if (books.size > 8) {
+                col.addView(Widgets.button(this, "全部 ${books.size} 本", "text") { showShelf() },
+                    Md3.lpDp(this, null, Md3.BTN).apply { topMargin = Md3.dp(this@MainActivity, Md3.GAP) })
+            }
         }
         root.addView(body)
     }
 
+    /**
+     * 书架数据：已下载的书，最近读过的在前。
+     *
+     * 首页的「最近下载」和书架页共用这一份读取 —— 两边各写一遍的话，
+     * 目录过滤、排序依据、restoreLight 的选型迟早会不一致。
+     *
+     * 用 [Downloader.restoreLight]：只要书名、作者、章节数与进度，
+     * 不解析 chapters.jsonl（真实数据 1.5 MB，实测 12 ms，且是主线程）。
+     */
+    private fun shelfBooks(): List<BookJob> {
+        // 先按 job.json 里的原始 bookId 取阅读时间，没有阅读记录的才退回目录修改时间。
+        val dirs = jobsDir().listFiles()
+            ?.filter { it.isDirectory && File(it, "job.json").isFile }
+            ?.map { dir -> dir to runCatching { File(dir, "job.json").readText() }.getOrNull()
+                ?.let { com.watchdl.core.TinyJson.path(it, "bookId") }.orEmpty() }
+            ?.sortedByDescending { (dir, id) -> readTime(id).takeIf { it > 0 } ?: dir.lastModified() }
+            ?: return emptyList()
+        // 用 job.json 里的**原始 bookId**，不能用目录名 ——
+        // 目录名是 safeDirName 净化过的，再拿去 restore 会被二次净化，对不上。
+        return dirs.mapNotNull { (_, id) ->
+            id.takeIf { it.isNotBlank() }?.let { Downloader.restoreLight(jobsStore(), it) }
+        }
+    }
+
+    /**
+     * 书架：已下载的书，两列封面墙。
+     *
+     * 书源不提供封面 —— `job.json` 只存书名/作者/章节/进度，`Downloader.persist`
+     * 没有 cover 字段。所以封面是**生成的占位卡片**：书名首字 + 按书名定的固定配色。
+     * 同一本书每次进来颜色一致，靠颜色区分书籍，不靠图片。
+     *
+     * 只给两列：手表屏宽约 189 dp，减掉两侧边距后每张卡还有 ~85 dp，
+     * 一首字刚好放得下；三列就只剩 50 dp，书名两个字都显示不下。
+     */
+    private fun showShelf() {
+        setScreen(Screen.Shelf)
+        root.removeAllViews()
+        root.addView(Widgets.topBar(this, "书架", onBack = { goBackToPrevious() }))
+
+        val body = Widgets.scrollBody(this, crownStep, crownGlide)
+        val col = Widgets.contentColumn(body)
+        val books = shelfBooks()
+        if (books.isEmpty()) {
+            col.addView(Widgets.emptyState(this, "▤", "书架是空的\n搜索书名即可开始"))
+            root.addView(body)
+            return
+        }
+
+        // 两列排：每行两个卡片，高度由内容决定，纵向滚动。
+        for (chunk in books.chunked(2)) {
+            val row = Md3.row(this)
+            row.gravity = android.view.Gravity.TOP
+            for (job in chunk) {
+                row.addView(shelfCard(job), LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    // 行间距交给卡片自己的下边距；列间距只给左边那张。
+                    if (row.childCount > 0) leftMargin = Md3.dp(this@MainActivity, Md3.GAP)
+                })
+            }
+            // 奇数本时补个空位，否则最后一张卡会撑满整行。
+            if (chunk.size == 1) row.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+            col.addView(row, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                .apply { bottomMargin = Md3.dp(this@MainActivity, Md3.GAP * 2) })
+        }
+        root.addView(body)
+    }
+
+    /** 书架占位色卡可用色。都取 Md3 里的容器色，在白/黑背景下都能读。 */
+    private fun shelfCard(job: BookJob): LinearLayout {
+        val card = Md3.column(this)
+        card.isClickable = true
+        card.isFocusable = true
+        val displayName = job.name.ifBlank { "未命名" }
+        // 点击后进目录（与首页列表一致）
+        card.setOnClickListener { openBook(job.bookId, displayName, job.author) }
+        card.contentDescription = "$displayName，${job.author.ifBlank { "未知作者" }}"
+
+        // 封面区：颜色按书名哈希定，同一本书颜色稳定。
+        val cover = Md3.text(this, coverGlyph(job), 26f, Md3.onPrimaryContainer, bold = true).apply {
+            gravity = android.view.Gravity.CENTER
+            background = Md3.bg(shelfColor(job), Md3.R_CARD.toFloat())
+        }
+        card.addView(cover, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, 58)))
+
+        // 书名两行封顶，下方作者一行截断。
+        val title = Md3.text(this, displayName, Md3.FS_SM, Md3.onSurface).apply {
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(0, Md3.dp(this@MainActivity, Md3.GAP), 0, 0)
+        }
+        card.addView(title)
+        val done = job.count(ChapterStatus.DONE)
+        card.addView(Md3.ellipsize(Md3.text(this,
+            if (job.author.isBlank()) "$done/${job.total} 章" else job.author,
+            /* sizeSp = */ 9f, Md3.onSurfaceVariant)))
+
+        // 触控区不够大时补高（Md3.TAP = 34 dp），否则手表上不好点。
+        card.minimumHeight = Md3.dp(this, Md3.TAP)
+        return card
+    }
+
+    /**
+     * 占位封面上显示的字：书名首字。
+     *
+     * 取第一个非空白字符。书名以标点开头（《》「」）时跳过，
+     * 否则整墙的封面全是同一个括号。
+     */
+    private fun coverGlyph(job: BookJob): String {
+        val src = job.name.ifBlank { "未" }
+        // 书名以标点开头（《》「」）时跳过，否则整墙封面全是同一个括号。
+        return src.firstOrNull { it.isLetterOrDigit() }?.toString() ?: src.take(1)
+    }
+
+    /** 占位色：取几个容器色，按书名哈希固定选一个。 */
+    private fun shelfColor(job: BookJob): Int {
+        val palette = intArrayOf(
+            Md3.primaryContainer, Md3.secondaryContainer, Md3.surface4, Md3.outlineVariant,
+        )
+        return palette[Math.floorMod(job.name.hashCode(), palette.size)]
+    }
+
     /** 目录页一次渲染多少章（M8）。1600 章的书分 16 段，不再一次建 6400 个 View。 */
     private val TOC_WINDOW = 100
-
     /** 目录页当前窗口的起始章下标。进目录时按上次读到的那章重置。 */
     private var tocWinStart = 0
 
@@ -2344,6 +2465,7 @@ class MainActivity : Activity() {
                 Screen.Settings -> showSettings()
                 // 配置变更重建**不刷新**：这里只是重画，联网会让旋转/展开后卡一下。
                 is Screen.Discover -> showDiscover(s.site, s.gender, s.rankKey)
+                Screen.Shelf -> showShelf()
             }
         }
     }
@@ -2358,6 +2480,7 @@ class MainActivity : Activity() {
             is Screen.Market -> showSources()
             is Screen.Progress -> showToc(s.info)
             is Screen.Discover -> goBackToPrevious()
+            Screen.Shelf -> goBackToPrevious()
             Screen.Settings -> goBackToPrevious()
         }
     }

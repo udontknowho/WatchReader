@@ -49,6 +49,13 @@ sealed interface Screen {
     ) : Screen
     /** 书源市场（yiove）。`hits` 为拉到的列表，`page` 为已拉到的页码。 */
     data class Market(val hits: List<YioveSource.Item>, val total: Int, val page: Int) : Screen
+    /**
+     * 书架：已下载书籍的封面墙。
+     *
+     * 不带数据 —— 书架的内容全在本地 `books/` 目录里，每次进屏现读。
+     * 下载完成、删除、重命名之后回来就能看到新状态，不用比对缓存。
+     */
+    object Shelf : Screen
     data class Progress(val info: BookInfo) : Screen
 }
 
@@ -64,6 +71,7 @@ fun screenId(s: Screen?): String = when (s) {
     Screen.Home -> "home"
     Screen.Sources -> "sources"
     Screen.Settings -> "settings"
+    Screen.Shelf -> "shelf"
     is Screen.Hits -> "hits:${s.keyword}"
     // 目录屏身份用**书名**而不是 bookId：loadToc 时 bookId 还不确知（可能试多个源，
     // 每条源返回的 id 不同），拿 bookId 做身份会让回调认不出自己。
