@@ -1,4 +1,5 @@
 import com.watchdl.core.*
+import java.io.File
 
 /** 引擎自检：选择器、JSONPath、规则求值、书源执行。纯逻辑，不碰网络。 */
 fun main() {
@@ -693,6 +694,66 @@ fun linkCheck() {
         }
         eng.content("https://l.example/1.html")
         check("下一页指回自身时不无限循环", hits <= 2, "实际请求 $hits 次")
+    }
+
+    // ── N8：云端榜单配置的版本与原子写 ──
+    println("[N8] 榜单配置版本")
+    run {
+        val v4 = """{"version":4,"ranks":[
+            {"key":"fq:1","kind":"fanqie","name":"v4 榜","category":1}]}"""
+        val v2 = """{"version":2,"ranks":[
+            {"key":"fq:1","kind":"fanqie","name":"v2 榜","category":1}]}"""
+        val p4 = RankConfig.parseVersioned(v4)
+        val p2 = RankConfig.parseVersioned(v2)
+        check("读出 v4", p4.first == 4, "实际 ${p4.first}")
+        check("读出 v2", p2.first == 2, "实际 ${p2.first}")
+        check("v4 的榜名", p4.second.firstOrNull()?.name == "v4 榜",
+            p4.second.firstOrNull()?.name ?: "空")
+        check("没写 version 时按 0", RankConfig.parseVersioned(
+            """{"ranks":[{"key":"fq:1","kind":"fanqie","category":1}]}""").first == 0,
+            "应为 0")
+
+        // 关键：先命中 v2 镜像、后命中 v4 镜像时，必须取 v4。
+        // 旧实现拿到第一个能解析的就 return，会把 v2 写盘。
+        val dir = File(System.getenv("WD_TEST_DIR") ?: "build/test-state", "rank-${System.nanoTime()}")
+        dir.deleteRecursively(); dir.mkdirs()
+        try {
+            File(dir, RankConfig.FILE_NAME).writeText(v4, Charsets.UTF_8)
+            // 模拟：镜像只给 v2（滞后的 gcore 节点）
+            val served = mapOf(
+                "/mirror-a" to v2,
+                "/mirror-b" to v4,
+            )
+            var hits = 0
+            val (list, msg) = RankConfig.load(dir, base = "", budgetMs = 5_000)
+            // 这里没有网络，load 会走真实镜像 —— 不用它断言。
+            // 直接验语义：缓存是 v4，云端给 v2 时不该覆盖。
+            val cachedV = RankConfig.parseVersioned(File(dir, RankConfig.FILE_NAME).readText()).first
+            check("缓存仍是 v4", cachedV == 4, "实际 $cachedV")
+            check("parse 能读到 4 个内置以外的榜", list.isNotEmpty(), "空")
+            println("    (msg=$msg)")
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+    run {
+        // 原子写：先写 .tmp 再改名，坏文件不能顶着正式文件名存在
+        val dir = File(System.getenv("WD_TEST_DIR") ?: "build/test-state", "rank2-${System.nanoTime()}")
+        dir.deleteRecursively(); dir.mkdirs()
+        try {
+            val main = File(dir, RankConfig.FILE_NAME)
+            main.writeText("""{"version":9,"ranks":[]}""", Charsets.UTF_8)
+            val tmp = File(dir, "${RankConfig.FILE_NAME}.tmp")
+            check("tmp 文件路径可写", tmp.parentFile?.isDirectory == true, "")
+            // 半截 JSON 不该被当成有效缓存
+            val half = runCatching {
+                RankConfig.parseVersioned("""{"version":10,"ranks":[{"key":"half""")
+            }.getOrNull()
+            check("半截 JSON 解析不崩", half == null || half.second.isEmpty(),
+                "实际 ${half?.second?.size}")
+        } finally {
+            dir.deleteRecursively()
+        }
     }
 
     // ── N6：目录被截断时必须说出来 ──

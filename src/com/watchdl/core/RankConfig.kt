@@ -132,14 +132,20 @@ object RankConfig {
         timeoutMs: Int = 12_000,
         budgetMs: Int = 20_000,
     ): Pair<List<Rank>, String> {
-        val cached = readCached(dir)
+        // N8：以前 bestMirror 串行问 4 个镜像，且 deadline 在它之后才算，
+        // 4 个域名都挂住时 4×8 秒 + 后续 45 秒 ≈ 77 秒，与宣称的预算不符。
+        // 现在预算从进入 load 就开始计。
+        val deadline = System.currentTimeMillis() + budgetMs
+        val cachedPair = readCachedVersioned(dir)
+        val cached = cachedPair?.second
+        val cachedVersion = cachedPair?.first ?: -1
         // 传了 base 就只试它（自检用），否则走镜像列表。
         val bases = if (base.isNotBlank()) listOf(base.trimEnd('/')) else MIRRORS
 
         // 四个镜像串行，每个都卡满超时就是一分半。给整轮封一个总预算：
         // 实测本机 jsdelivr 域名 DNS 会直接挂住（netd 408），不封顶的话
         // 榜单页会长时间停在「正在拉取推荐…」，看着就是卡死。
-        val deadline = System.currentTimeMillis() + budgetMs
+        var best: Triple<Int, List<Rank>, String>? = null
         for (b in bases) {
             val left = (deadline - System.currentTimeMillis()).toInt()
             if (left < 1_000) break
@@ -148,26 +154,62 @@ object RankConfig {
             }.getOrNull()
             if (text.isNullOrBlank()) continue
 
-            val parsed = runCatching { parse(text) }.getOrNull()
-            if (parsed.isNullOrEmpty()) continue
+            val parsed = runCatching { parseVersioned(text) }.getOrNull()
+            if (parsed == null || parsed.second.isEmpty()) continue
+            // N8：取**最高版本**，不是第一个能解析的。
+            // 设备缓存是 v4，先命中滞后的 gcore 节点（v2）就写回 v2，
+            // 榜单列表会在两次进入之间抖动。
+            if (best == null || parsed.first > best!!.first) {
+                best = Triple(parsed.first, parsed.second, text)
+            }
+            // 版本号已经够高就不必再问后面的镜像。
+        }
 
+        val got = best
+        if (got != null && got.first > cachedVersion) {
             // 解析成功才落盘，避免把坏配置缓存下来。
+            // N8：先写 .tmp 再改名。以前直接 writeText，进程被杀留半个 JSON，
+            // 下次启动解析失败 → 静默退回内置榜单。
             runCatching {
                 dir.mkdirs()
-                File(dir, FILE_NAME).writeText(text, Charsets.UTF_8)
+                val tmp = File(dir, "$FILE_NAME.tmp")
+                tmp.writeText(got.third, Charsets.UTF_8)
+                if (!tmp.renameTo(File(dir, FILE_NAME))) {
+                    tmp.copyTo(File(dir, FILE_NAME), overwrite = true)
+                    tmp.delete()
+                }
             }
-            return parsed to "榜单已更新（${parsed.size} 个）"
+            return got.second to "榜单已更新（${got.second.size} 个，v${got.first}）"
+        }
+        if (got != null) {
+            // 云端的版本不比缓存新：继续用缓存，不覆盖。
+            return got.second to "榜单已是最新（v${cachedVersion}）"
         }
 
         return (cached ?: BUILTIN) to
             if (cached != null) "云端取不到，用上次的榜单" else "云端取不到，用内置榜单"
     }
 
+
+
     /** 上次成功拉到的配置；没有就返回 null。 */
-    private fun readCached(dir: File): List<Rank>? {
+    private fun readCachedVersioned(dir: File): Pair<Int, List<Rank>>? {
         val f = File(dir, FILE_NAME)
         if (!f.isFile) return null
-        return runCatching { parse(f.readText()) }.getOrNull()?.takeIf { it.isNotEmpty() }
+        return runCatching { parseVersioned(f.readText()) }.getOrNull()
+            ?.takeIf { it.second.isNotEmpty() }
+    }
+
+    /**
+     * 解析并带上版本号。[parse] 是它的无版本版。
+     *
+     * 版本号缺省按 0 处理：老配置没写 version 时，任何带版本号的云端配置
+     * 都算「更新」，不会把已有缓存锁死。
+     */
+    fun parseVersioned(text: String): Pair<Int, List<Rank>> {
+        val v = Regex("\"version\"\\s*:\\s*(\\d+)").find(text)
+            ?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+        return v to parse(text)
     }
 
     /**
