@@ -242,7 +242,10 @@ object RankConfig {
             val kindStr = TinyJson.path(obj, "kind")?.takeIf { it.isNotBlank() } ?: continue
             val kind = when (kindStr) {
                 "fanqie" -> Kind.FANQIE
-                "fanqieUpdate" -> Kind.FANQIE_UPDATE
+                // 「番茄更新」（fanqieUpdate）已从产品中移除，用户要求不要。
+                // 枚举值保留：已落到设备上的旧 ranks.json 里还有它，
+                // 删除枚举会让那整份配置解析失败，连带丢掉别的榜。
+                "fanqieUpdate" -> continue
                 "fanqieRank" -> Kind.FANQIE_RANK
                 "qidian" -> Kind.QIDIAN
                 else -> continue          // 未知 kind 一律拒绝，不给远程加新逻辑的口子

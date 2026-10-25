@@ -775,18 +775,20 @@ fun linkCheck() {
             RankConfig.defaultPages(RankConfig.Kind.FANQIE) == 0,
             "实际 ${RankConfig.defaultPages(RankConfig.Kind.FANQIE)}")
 
-        // 配置里没写 pages 时，解析结果应采用 kind 缺省值
+        // 配置里没写 pages 时，解析结果应采用 kind 缺省值。
+        // 样本原先用「番茄更新」，该榜已从产品移除（见 RankConfig.parse），
+        // 再拿它当样本只会测到「被丢弃」。换起点：同样有非 0 缺省页数。
         val cfg = """{"version":1,"ranks":[
             {"key":"q","kind":"qidian","board":"yuepiaolist","name":"起点"},
-            {"key":"u","kind":"fanqieUpdate","name":"更新"}]}"""
+            {"key":"q2","kind":"qidian","board":"collectlist","name":"起点二"}]}"""
         val ranks = RankConfig.parseVersioned(cfg).second
         val q = ranks.firstOrNull { it.key == "q" }
-        val u = ranks.firstOrNull { it.key == "u" }
+        val q2 = ranks.firstOrNull { it.key == "q2" }
         check("起点榜解析出 10 页", q?.pages == 10, "实际 ${q?.pages}")
-        check("番茄更新解析出 5 页", u?.pages == 5, "实际 ${u?.pages}")
+        check("同一 kind 的另一个榜也是 10 页", q2?.pages == 10, "实际 ${q2?.pages}")
 
         // 显式写了 pages 仍以配置为准
-        val cfg2 = """{"version":1,"ranks":[{"key":"u","kind":"fanqieUpdate","name":"更新","pages":3}]}"""
+        val cfg2 = """{"version":1,"ranks":[{"key":"q","kind":"qidian","board":"yuepiaolist","name":"起点","pages":3}]}"""
         check("显式 pages:3 生效",
             RankConfig.parseVersioned(cfg2).second.firstOrNull()?.pages == 3, "被缺省值盖掉")
     }

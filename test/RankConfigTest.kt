@@ -11,12 +11,12 @@ fun main() {
     val ok = RankConfig.parse("""
         {"version":2,"ranks":[
           {"key":"fanqie","name":"番茄推荐","kind":"fanqie"},
-          {"key":"fqup","name":"番茄更新","kind":"fanqieUpdate","pages":5},
+          {"key":"fqup","name":"番茄某榜","kind":"fanqie","pages":5},
           {"key":"qd:x","name":"起点某榜","kind":"qidian","board":"yuepiaolist","pages":3,"gendered":true}
         ]}
     """)
     check("三条全解析", ok.size == 3, "实际 ${ok.size}")
-    check("名字正确", ok[1].name == "番茄更新")
+    check("名字正确", ok[1].name == "番茄某榜")
     check("页码正确", ok[1].pages == 5)
     check("起点 board 带上", ok[2].board == "yuepiaolist")
     check("gendered 读成 true", ok[2].gendered)
@@ -94,6 +94,24 @@ fun main() {
         check("有缓存就用缓存", cached.size == 1 && cached[0].key == "only",
             "实际 ${cached.map { it.key }}")
         emptyDir.deleteRecursively()
+    }
+
+    println("[RankConfig] 「番茄更新」榜要被丢弃")
+    // 用户要求不要「番茄最新更新」。它不在内置表里，但可以经由云端配置下发 ——
+    // 设备上真实存在过一份 ranks.json 第一条就是它，所以必须挡在 parse 里。
+    run {
+        val withUpd = RankConfig.parse("""
+            {"version":1,"ranks":[
+              {"key":"fqup","name":"番茄更新","kind":"fanqieUpdate","pages":5},
+              {"key":"fanqie","name":"番茄推荐","kind":"fanqie"},
+              {"key":"qd:yuepiaolist","name":"起点月票","kind":"qidian","board":"yuepiaolist"}
+            ]}
+        """)
+        check("番茄更新被丢弃", withUpd.none { it.kind == RankConfig.Kind.FANQIE_UPDATE },
+            "还有 ${withUpd.count { it.kind == RankConfig.Kind.FANQIE_UPDATE }} 个")
+        // 关键：挡掉一条不能把整份配置弄坏，其它榜得照旧能解析。
+        check("其它榜不受连带影响", withUpd.map { it.key } == listOf("fanqie", "qd:yuepiaolist"),
+            "实际 ${withUpd.map { it.key }}")
     }
 
     if (failures == 0) println("\n全部通过") else { println("\n失败 $failures 项"); kotlin.system.exitProcess(1) }
