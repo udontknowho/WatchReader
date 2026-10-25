@@ -800,6 +800,9 @@ class MainActivity : Activity() {
         val speed = if (elapsed > 0) " · ${progressDone * 60 / elapsed} 章/分" else ""
         val remain = if (progressDone > 0 && total > progressDone) " · 约 ${(total - progressDone) * elapsed / progressDone} 秒" else ""
         card.addView(Md3.text(this, "已下载 $progressDone 章，失败 $progressFailed 章$speed$remain", Md3.FS_SM, Md3.onSurfaceVariant))
+        // shortcut: 进度屏首次进入时在主线程完整读一次，用来列出失败章。
+        // 按章数线性增长：167 章实测 10.6 ms，3000 章约 190 ms（超一帧）。
+        // 真要治得把失败章列表挪进后台线程或单独存文件，等有 3000 章的真实抱怨再说。
         val currentJob = Downloader.restore(jobsStore(), info.bookId)
         if (currentJob?.failedIndexes?.isNotEmpty() == true) {
             card.addView(Md3.text(this, "失败：" + currentJob.failedIndexes.take(5).joinToString { currentJob.chapters[it].title }, Md3.FS_SM, Md3.error))
@@ -1861,12 +1864,14 @@ class MainActivity : Activity() {
         // 现在只看服务端的真实状态，进程被回收也不会残留。
         val running = DownloadService.runningBookId
         if (running != null) {
-            // 已经在下另一本书：不能悄悄排队，也不能假装开始了。
-            if (running != info.bookId) toast("正在下载另一本，请稍候")
+            // 已经在下**另一本**：不能悄悄排队，也不能假装开始了，
+            // 更不能把这本书的进度屏顶出来（会显示别的书的章数）。
+            if (running != info.bookId) { toast("正在下载另一本，请稍候"); return }
             showProgress(info)
             return
         }
-        progressDone = Downloader.restore(jobsStore(), info.bookId)?.count(ChapterStatus.DONE) ?: 0
+        // M8：主线程只读 job.json。restore 会解析整个 chapters.jsonl。
+        progressDone = Downloader.restoreLight(jobsStore(), info.bookId)?.count(ChapterStatus.DONE) ?: 0
         progressFailed = 0
         progressStartedAt = System.currentTimeMillis()
         showProgress(info)
@@ -2296,7 +2301,10 @@ class MainActivity : Activity() {
     private fun restoreScreen(state: Bundle?): Boolean {
         val kind = state?.getString("screen") ?: return false
         val bookId = state.getString("bookId")?.takeIf { it.isNotBlank() } ?: return false
-        val job = runCatching { Downloader.restore(jobsStore(), bookId) }.getOrNull()
+        // M8：恢复走轻量读法。这是 onCreate 主线程，完整读法要解析整个
+        // chapters.jsonl（真实数据 1.5 MB / 167 章，实测 12 ms；3000 章会到百毫秒级），
+        // 正好是这次要消掉的卡顿。章节表本身完整，恢复阅读够用。
+        val job = runCatching { Downloader.restoreLight(jobsStore(), bookId) }.getOrNull()
             ?: return false
         if (job.chapters.isEmpty()) return false
         val info = BookInfo(job.bookId, job.name, job.author, job.chapters)
@@ -2306,7 +2314,13 @@ class MainActivity : Activity() {
                 preview(info, idx)
             }
             "toc" -> showToc(info)
-            "progress" -> showProgress(info)
+            "progress" -> {
+                // S19 × S14：只有服务真在跑这本书才回进度屏。
+                // 进程被回收时服务也一起没了，硬跳回去会停在「下载中」永远不动 ——
+                // 比落回目录更糟，用户会以为卡死。落回目录还能点「继续下载」。
+                if (DownloadService.runningBookId != info.bookId) return false
+                showProgress(info)
+            }
             else -> return false
         }
         return true

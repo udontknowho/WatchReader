@@ -696,6 +696,56 @@ fun linkCheck() {
         check("下一页指回自身时不无限循环", hits <= 2, "实际请求 $hits 次")
     }
 
+    // ── M8：首页轻量读法与完整读法必须一致 ──
+    println("[M8] restoreLight 与 restore 一致")
+    run {
+        val root = File(System.getenv("WD_TEST_DIR") ?: "build/fixture-books")
+        val store = com.watchdl.core.JobStore(root)
+        val bookId = "7665193065501445145"
+        if (!File(root, bookId).isDirectory) {
+            // 真实数据没拷进来就跳过，不让 CI 挂在一个不存在的目录上
+            println("  (跳过：$root/$bookId 不存在)")
+        } else {
+            val full = com.watchdl.core.Downloader.restore(store, bookId)
+            val light = com.watchdl.core.Downloader.restoreLight(store, bookId)
+            check("两者都读到了", full != null && light != null, "full=$full light=$light")
+            if (full != null && light != null) {
+                check("书名一致", full.name == light.name, "${full.name} vs ${light.name}")
+                check("作者一致", full.author == light.author, "${full.author} vs ${light.author}")
+                check("章节数一致", full.chapters.size == light.chapters.size,
+                    "${full.chapters.size} vs ${light.chapters.size}")
+                check("目录非空", light.chapters.isNotEmpty(), "0 章")
+                check("itemId 一致",
+                    full.chapters.map { it.itemId } == light.chapters.map { it.itemId }, "对不上")
+                check("标题一致",
+                    full.chapters.map { it.title } == light.chapters.map { it.title }, "对不上")
+
+                // 关键：已下载数不能差太多。restore 会读 chapters.jsonl 把存在正文的章
+                // 标成 DONE，restoreLight 只信 job.json 的 status 字段。
+                val dFull = full.count(com.watchdl.core.ChapterStatus.DONE)
+                val dLight = light.count(com.watchdl.core.ChapterStatus.DONE)
+                println("    完整读法 DONE=$dFull，轻量读法 DONE=$dLight，共 ${full.chapters.size} 章")
+                check("轻量读法不会漏报大量已下载", dLight >= dFull - full.chapters.size / 10,
+                    "轻量 $dLight 比完整 $dFull 少太多")
+                check("轻量读法不会多报", dLight <= dFull, "轻量 $dLight 多于完整 $dFull")
+
+                // 性能：轻量读法不该碰 chapters.jsonl
+                val jl = File(root, "$bookId/chapters.jsonl")
+                if (jl.exists()) {
+                    val t0 = System.nanoTime()
+                    repeat(20) { com.watchdl.core.Downloader.restoreLight(store, bookId) }
+                    val lightMs = (System.nanoTime() - t0) / 1_000_000.0 / 20
+                    val t1 = System.nanoTime()
+                    repeat(3) { com.watchdl.core.Downloader.restore(store, bookId) }
+                    val fullMs = (System.nanoTime() - t1) / 1_000_000.0 / 3
+                    println("    费时：轻量 %.2f ms/次，完整 %.2f ms/次（chapters.jsonl %.1f MB）"
+                        .format(lightMs, fullMs, jl.length() / 1024.0 / 1024.0))
+                    check("轻量读法明显更快", lightMs < fullMs, "轻量 $lightMs ms 不比重 $fullMs ms 快")
+                }
+            }
+        }
+    }
+
     // ── S18：区分「接口变了」与「今天没数据」；pages 缺省 ──
     println("[S18] 榜单空表与页数")
     run {
