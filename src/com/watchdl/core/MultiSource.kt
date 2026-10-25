@@ -85,7 +85,12 @@ class MultiSource(
 
         val runner = Executors.newFixedThreadPool(minOf(concurrency, sources.size))
         val finished = java.util.concurrent.atomic.AtomicInteger(0)
-        val failed = java.util.Collections.synchronizedList(mutableListOf<String>())
+        // N6：以前是 List，同一源会被记两次（onFailure 一次、invokeAll 取消后又一次），
+        // 于是 responded = size - failed.size 可能变成负数。
+        // 用 Set 去重，responded 单独计数。
+        val failed = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+        // 有响应的源数（成功返回，不管有没有结果）。
+        val respondedCount = java.util.concurrent.atomic.AtomicInteger(0)
         val collected = java.util.Collections.synchronizedList(mutableListOf<BookHit>())
 
         try {
@@ -93,6 +98,7 @@ class MultiSource(
                 Callable {
                     runCatching { ns.source.search(keyword, page) }
                         .onSuccess { hits ->
+                            respondedCount.incrementAndGet()
                             // 源自己没填来源名时，用我们在 MultiSource 里登记的名字补上。
                             // 这样界面无论从哪条路都拿得到来源标注。
                             hits.forEach { h ->
@@ -121,7 +127,7 @@ class MultiSource(
         return Result(
             hits = hits,
             total = sources.size,
-            responded = sources.size - failed.size,
+            responded = respondedCount.get(),
             failed = failed.toList(),
         )
     }

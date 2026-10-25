@@ -654,7 +654,16 @@ class MainActivity : Activity() {
         setScreen(hitsScreen)
 
         if (hits.isEmpty()) {
-            col.addView(Widgets.emptyState(this, "∅", "没有找到「$keyword」\n换个关键词试试"), Md3.lpWeight(1f))
+            // N6：15 个源全挂（断网、DNS 挂了）时，说「换个关键词」是错的建议 ——
+            // 用户会去改关键词，而问题在网络。responded 为 0 说明一条源都没回话。
+            val msg = when {
+                stat != null && stat.responded == 0 && stat.total > 0 ->
+                    "所有源都没有响应\n检查网络后再试"
+                stat != null && stat.responded < stat.total ->
+                    "没有找到「$keyword」\n${stat.total - stat.responded} 个源没响应，可换一批"
+                else -> "没有找到「$keyword」\n换个关键词试试"
+            }
+            col.addView(Widgets.emptyState(this, "∅", msg), Md3.lpWeight(1f))
         } else {
             for (h in hits) {
                 // 第二行显示作者 + 来源站名。源名放最后，因为它是用户挑源要看的。
@@ -1706,6 +1715,11 @@ class MainActivity : Activity() {
             val pair = res.getOrNull()
             if (pair != null && pair.second.chapters.isNotEmpty()) {
                 if (tried > 0) toast("已换到 ${hit.sourceName}")
+                // N6：目录被预算/超时截断时必须说一声。不说的话用户以为
+                // 目录就这么长，下载完标 DONE，书悄悄少几十章。
+                if (pair.second.truncated) {
+                    toast("目录可能不完整（${pair.second.chapters.size} 章），可稍后重试")
+                }
                 showToc(pair.second, pair.first)
             } else {
                 loadToc(name, author, candidates, tried + 1)

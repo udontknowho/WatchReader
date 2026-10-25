@@ -276,7 +276,16 @@ class DownloadService : Service() {
             val targets = if (freeOnly) job.chapters.indices.filter { !job.chapters[it].locked }
                           else job.chapters.indices.toList()
             val r = dl.run(job, targets)
-            publish("下载完成：成功 ${r.success}，失败 ${r.failed}", finished = true)
+            // N3：本次只下 5 章时，说「成功 5」会让人以为全书只有 5 章。
+            // 分成两句：全书进度 + 本次增量。
+            val head = "已下载 ${r.doneTotal}/${r.total}" +
+                if (r.lockedTotal > 0) "（${r.lockedTotal} 章需登录）" else ""
+            val msg = when {
+                r.failTotal > 0 -> "$head，失败 ${r.failTotal} 章"
+                r.success == 0 -> "$head，无新增"
+                else -> "$head，本次 +${r.success}"
+            }
+            publish(msg, finished = true)
         } catch (e: Exception) {
             publish("下载中断：${e.message}", finished = true)
         } finally {

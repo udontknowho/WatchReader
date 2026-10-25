@@ -695,6 +695,71 @@ fun linkCheck() {
         check("下一页指回自身时不无限循环", hits <= 2, "实际请求 $hits 次")
     }
 
+    // ── N6：目录被截断时必须说出来 ──
+    println("[N6] 目录截断")
+    run {
+        // 站点有 3 页目录，第 2 页请求失败。以前只 break，
+        // toc() 返回前 1 页的章节，上层当成完整目录，书少几十章没人知道。
+        var page = 0
+        val eng = SourceEngine(BookSourceRule(
+            name = "cut", host = "https://c.example",
+            search = SearchRule(url = "/s", name = FieldRule.parse(""), link = FieldRule.parse("")),
+            toc = TocRule(
+                url = "/book/1",
+                name = FieldRule.parse("#list a@text"),
+                link = FieldRule.parse("#list a@href"),
+                nextTocUrl = FieldRule.parse("#next@href"),
+            ),
+            content = ContentRule(url = "", content = FieldRule.parse("#c")),
+        )) { url, _, _, _ ->
+            when {
+                url.endsWith("/book/1") ->
+                    "<div id='list'><a href='/c1'>第1章</a></div><a id='next' href='/book/1?p=2'>下页</a>"
+                url.endsWith("p=2") -> error("模拟第 2 页请求失败")
+                else -> ""
+            }
+        }
+        val info = eng.toc("https://c.example/book/1")
+        check("拿到第 1 页的章节", info.chapters.isNotEmpty(), "${info.chapters.size} 章")
+        check("标记为不完整", info.truncated, "truncated=${info.truncated}")
+    }
+    run {
+        // 对照组：正常取全时不能误报不完整
+        val eng = SourceEngine(BookSourceRule(
+            name = "full", host = "https://f.example",
+            search = SearchRule(url = "/s", name = FieldRule.parse(""), link = FieldRule.parse("")),
+            toc = TocRule(
+                url = "/book/1",
+                name = FieldRule.parse("#list a@text"),
+                link = FieldRule.parse("#list a@href"),
+            ),
+            content = ContentRule(url = "", content = FieldRule.parse("#c")),
+        )) { _, _, _, _ -> "<div id='list'><a href='/c1'>第1章</a></div>" }
+        val info = eng.toc("https://f.example/book/1")
+        check("正常目录不报截断", !info.truncated, "truncated=${info.truncated}")
+        check("正常目录有章节", info.chapters.size == 1, "${info.chapters.size} 章")
+    }
+    run {
+        // 全部源无响应时，MultiSource 的 responded 必须是 0，不能是负数或错值。
+        val sources = (1..3).map { i ->
+            MultiSource.NamedSource("坏源$i", object : BookSource {
+                override fun search(keyword: String, page: Int): List<BookHit> =
+                    throw java.io.IOException("断网")
+                override fun toc(bookId: String, name: String, author: String) =
+                    throw java.io.IOException("断网")
+                override fun open(hit: BookHit) = toc(hit.bookId, hit.name, hit.author)
+                override fun content(itemId: String, bookId: String): String =
+                    throw java.io.IOException("断网")
+            }, "https://bad$i.example")
+        }
+        val ms = MultiSource(sources, timeoutMs = 2_000)
+        val r = ms.searchDetailed("测试")
+        check("全部无响应时 responded 为 0", r.responded == 0, "实际 ${r.responded}")
+        check("responded 不为负", r.responded >= 0, "实际 ${r.responded}")
+        check("失败源去重后 3 条", r.failed.size == 3, "实际 ${r.failed.size}: ${r.failed}")
+        check("total 是源数", r.total == 3, "实际 ${r.total}")
+    }
+
     // ── N7：重名源必须按 host 消歧 ──
     println("[N7] 重名源")
     run {

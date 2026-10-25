@@ -54,8 +54,16 @@ fun main() {
         println("[Downloader] 续传不重复下载")
         // 注意：必须用新计数器测新实例——用旧变量会读到第一次那个 lambda 的值
         var resumeCalls = 0
-        Downloader(store, fetchChapter = { resumeCalls++; "<p>补下载</p>" }, log = {}, sleep = {}).run(restored)
+        val rr = Downloader(store, fetchChapter = { resumeCalls++; "<p>补下载</p>" }, log = {}, sleep = {})
+            .run(restored)
         check("只补失败的章", resumeCalls == 1, "实际请求 $resumeCalls 次")
+
+        // N3：续传时本次只下 1 章，但全书已下 29 章。
+        // 旧实现只报「成功 1」，用户以为全书只有 1 章。
+        check("本次增量是 1", rr.success == 1, "实际 ${rr.success}")
+        check("全书已完成数按 statuses 算", rr.doneTotal == 30, "实际 ${rr.doneTotal}")
+        check("全书口径与 total 一致", rr.doneTotal <= rr.total, "${rr.doneTotal}/${rr.total}")
+        check("全书失败数清零", rr.failTotal == 0, "实际 ${rr.failTotal}")
 
         println("[Downloader] 续传后状态转为完成")
         val after = Downloader.restore(store, "b1")!!

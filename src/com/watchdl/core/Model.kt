@@ -37,6 +37,14 @@ data class BookInfo(
     val name: String,
     val author: String,
     val chapters: List<ChapterRef>,
+    /**
+     * 目录可能不完整（翻页预算耗尽或被超时截断）。
+     *
+     * 为真时上层应提示用户，并把这本书标成「目录不完整」而不是正常完成 ——
+     * 以前截断只 `break`，`toc()` 照常返回已有章节，后续章节标 DONE，
+     * 书悄悄少几十章（N6）。
+     */
+    val truncated: Boolean = false,
 )
 
 /** 下载任务状态。字段名保持稳定，写进 job.json 后不要随意改。 */

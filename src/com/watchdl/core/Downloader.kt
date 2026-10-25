@@ -208,7 +208,21 @@ class Downloader(
             finished -> JobState.DONE
             else -> JobState.FAILED
         })
-        return Result(ok, fail, job.chapters.size)
+        // N3：ok/fail 只是**本次运行**的增量。续传时只下 5 章会报
+        // 「成功 5 失败 0」，而书里已有 1200 章 —— 用户以为只下了 5 章。
+        // 全书口径单独给：doneTotal / lockedTotal 从 statuses 数。
+        val all = statuses.values
+        val doneTotal = all.count { it == ChapterStatus.DONE }
+        val lockedTotal = all.count { it == ChapterStatus.LOCKED || it == ChapterStatus.SKIPPED }
+        val failTotal = all.count { it == ChapterStatus.FAILED }
+        return Result(
+            success = ok,
+            failed = fail,
+            total = job.chapters.size,
+            doneTotal = doneTotal,
+            lockedTotal = lockedTotal,
+            failTotal = failTotal,
+        )
     }
 
     /** interrupt 只用于取消：别让它把 run() 打穿，取消要走到落盘那一步。 */
@@ -221,7 +235,18 @@ class Downloader(
         }
     }
 
-    data class Result(val success: Int, val failed: Int, val total: Int)
+    /**
+     * [success]/[failed] 是**本次运行**的增量；[doneTotal]/[failTotal] 是全书口径。
+     * 续传后两者差别很大，界面文案要分清（N3）。
+     */
+    data class Result(
+        val success: Int,
+        val failed: Int,
+        val total: Int,
+        val doneTotal: Int = success,
+        val lockedTotal: Int = 0,
+        val failTotal: Int = failed,
+    )
 
     /** 单章取数超时。单独列一个类型，好跟网络错误区分开 —— 超时不重试。 */
     private class ChapterTimeoutException(msg: String) : Exception(msg)

@@ -218,6 +218,8 @@ class SourceEngine(
     fun toc(book: String): BookInfo = toc(book, TOC_BUDGET_MS)
 
     internal fun toc(book: String, budgetMs: Long): BookInfo {
+        // N6：目录被预算/超时截断的标志。以前截断只 break，上层当成完整目录。
+        var tocCut = false
         val tocDeadline = System.nanoTime() + budgetMs * 1_000_000
         fun remainingMs(): Int = ((tocDeadline - System.nanoTime()) / 1_000_000)
             .coerceIn(0, Int.MAX_VALUE.toLong()).toInt()
@@ -318,11 +320,13 @@ class SourceEngine(
                 var chain = 0
                 // 单值分支：继续链式翻页；多值分支：每页只取其自身列表，不再递归。
                 while (nextUrl.isNotEmpty() && nextUrl !in visited && chain < MAX_PAGES) {
-                    if (budget-- <= 0 || remainingMs() <= 0) break
+                    // N6：预算或时间耗尽时要记下来。以前只有 break，
+                    // 上层拿到的是「目录就这么多章」，后续标 DONE，书少几十章没人知道。
+                    if (budget-- <= 0 || remainingMs() <= 0) { tocCut = true; break }
                     visited += nextUrl
                     val pageRaw = runCatching {
                         request(nextUrl)
-                    }.getOrNull() ?: break
+                    }.getOrNull() ?: run { tocCut = true; null } ?: break
                     val n2 = rule.toc.name.eval(pageRaw, list = true)
                     if (n2.isEmpty()) break
                     names += n2
@@ -356,7 +360,11 @@ class SourceEngine(
             ChapterRef(itemId = link, title = title)
         }
         // 按章节号排序 + 去重，见 ChapterOrder 的注释。
-        return BookInfo(bookId = book, name = "", author = "", chapters = ChapterOrder.normalise(chapters))
+        return BookInfo(
+            bookId = book, name = "", author = "",
+            chapters = ChapterOrder.normalise(chapters),
+            truncated = tocCut,
+        )
     }
 
     /**
