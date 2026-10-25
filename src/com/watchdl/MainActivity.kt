@@ -486,13 +486,14 @@ class MainActivity : Activity() {
         // 只认真正含 job.json 的目录。
         // 以前只看「是目录」—— 空的、导出的、脏 bookId 留下的都会进列表，
         // 而 restore 全返回 null，于是有分组标题、下面却空空如也。
-        val books = shelfBooks()
+        val books = shelfBooks(limit = 8)
+        val bookCount = shelfBookCount()
         // 导出目录挪到 files/export，不再混在作业目录里（见 exportTxt）。
         if (books.isEmpty()) {
             col.addView(Widgets.emptyState(this, "▤", "还没有下载过\n搜索书名即可开始"))
         } else {
             col.addView(Widgets.sectionLabel(this, "最近下载"))
-            for (job in books.take(8)) {
+            for (job in books) {
                 val done = job.count(ChapterStatus.DONE)
                 val failed = job.count(ChapterStatus.FAILED)
                 // 副标题统一两段：作者 · 进度。字段数固定，列表才能纵向扫读。
@@ -510,8 +511,8 @@ class MainActivity : Activity() {
             }
             // 首页只露 8 本，其余全在书架页 —— 否则下载多了以后首页要滑很久
             // 才够得到搜索框。少于 8 本时不显入口，上面「书架」按钮已够用。
-            if (books.size > 8) {
-                col.addView(Widgets.button(this, "全部 ${books.size} 本", "text") { showShelf() },
+            if (bookCount > 8) {
+                col.addView(Widgets.button(this, "全部 $bookCount 本", "text") { showShelf() },
                     Md3.lpDp(this, null, Md3.BTN).apply { topMargin = Md3.dp(this@MainActivity, Md3.GAP) })
             }
         }
@@ -527,7 +528,7 @@ class MainActivity : Activity() {
      * 用 [Downloader.restoreLight]：只要书名、作者、章节数与进度，
      * 不解析 chapters.jsonl（真实数据 1.5 MB，实测 12 ms，且是主线程）。
      */
-    private fun shelfBooks(): List<BookJob> {
+    private fun shelfBooks(limit: Int = Int.MAX_VALUE): List<BookJob> {
         // 先按 job.json 里的原始 bookId 取阅读时间，没有阅读记录的才退回目录修改时间。
         val dirs = jobsDir().listFiles()
             ?.filter { it.isDirectory && File(it, "job.json").isFile }
@@ -537,10 +538,24 @@ class MainActivity : Activity() {
             ?: return emptyList()
         // 用 job.json 里的**原始 bookId**，不能用目录名 ——
         // 目录名是 safeDirName 净化过的，再拿去 restore 会被二次净化，对不上。
-        return dirs.mapNotNull { (_, id) ->
-            id.takeIf { it.isNotBlank() }?.let { Downloader.restoreLight(jobsStore(), it) }
-        }
+        // 排序只用到 bookId 与时间，所以先排完再 restore —— 首页只要 8 本，
+        // 剩下的书不必为「看不见的卡片」付一次读盘。
+        return dirs.asSequence()
+            .mapNotNull { (_, id) ->
+                id.takeIf { it.isNotBlank() }?.let { Downloader.restoreLight(jobsStore(), it) }
+            }
+            .take(limit)
+            .toList()
     }
+
+    /**
+     * 书架上的书总数。首页要显示「全部 N 本」，但只渲染 8 本，
+     * 不能拿渲染结果的长度当总数。
+     */
+    private fun shelfBookCount(): Int =
+        jobsDir().listFiles()
+            ?.count { it.isDirectory && File(it, "job.json").isFile }
+            ?: 0
 
     /**
      * 书架：已下载的书，两列封面墙。
@@ -612,9 +627,11 @@ class MainActivity : Activity() {
         }
         card.addView(title)
         val done = job.count(ChapterStatus.DONE)
+        // 字号走 Md3.FS_SM 而不是硬编码 9sp：MD3 的 labelSmall 下限是 11sp，
+        // 9sp 在手表上已经难读；FS_SM 还会随屏宽档位放大。
         card.addView(Md3.ellipsize(Md3.text(this,
             if (job.author.isBlank()) "$done/${job.total} 章" else job.author,
-            /* sizeSp = */ 9f, Md3.onSurfaceVariant)))
+            Md3.FS_SM, Md3.onSurfaceVariant)))
 
         // 触控区不够大时补高（Md3.TAP = 34 dp），否则手表上不好点。
         card.minimumHeight = Md3.dp(this, Md3.TAP)
@@ -630,7 +647,11 @@ class MainActivity : Activity() {
     private fun coverGlyph(job: BookJob): String {
         val src = job.name.ifBlank { "未" }
         // 书名以标点开头（《》「」）时跳过，否则整墙封面全是同一个括号。
-        return src.firstOrNull { it.isLetterOrDigit() }?.toString() ?: src.take(1)
+        src.firstOrNull { it.isLetterOrDigit() }?.let { return it.toString() }
+        // 兜底不能取 take(1)：书名以 emoji 开头时它是代理对，截半个会显示成方块。
+        // 用码点切，保证切出的是完整字符。
+        val cp = src.codePointAt(0)
+        return String(Character.toChars(cp))
     }
 
     /** 占位色：取几个容器色，按书名哈希固定选一个。 */
@@ -1329,8 +1350,17 @@ class MainActivity : Activity() {
      */
     private var rankCache: List<RankConfig.Rank>? = null
 
-    /** 云端刷新只跑一次；拉过了就不再重复问镜像。 */
+    /**
+     * 云端刷新**成功过**就不再重复问镜像。
+     *
+     * 不能在发起前置位：`bg` 的任务会随切屏被 [cancelTasks] interrupt，
+     * 那时 `then` 根本不执行。若发起前就置真，用户点开发现页、立刻返回，
+     * 本次进程就再也不会刷新云端配置了 —— 内置表里的榜会一直用到重启。
+     */
     private var rankRefreshed = false
+
+    /** 已有一个刷新任务在跑。**发起时置真、回调里清假**，与 [rankRefreshed] 分工不同。 */
+    private var rankRefreshing = false
 
     /**
      * 当前可用的榜单。**已缓存的纯内存读，首次也只读磁盘和内置表，都不联网。**
@@ -1354,18 +1384,19 @@ class MainActivity : Activity() {
      * 重渲染前已经靠 [postAlive] 核过屏身份 —— 用户已经走了就不重画。
      */
     private fun refreshRanks(owner: Screen, rerender: () -> Unit) {
-        if (rankRefreshed) return
-        rankRefreshed = true
+        if (rankRefreshing) return
+        rankRefreshing = true
         bg(owner, { RankConfig.load(File(filesDir, "sources")) }) { res ->
+            rankRefreshing = false
             val got = res.getOrNull()?.first ?: return@bg
             if (got.isEmpty()) return@bg
+            rankRefreshed = true
             val before = rankCache
             rankCache = got
             // 内容没变就不重画，避免回到发现页时闪一下。
             if (got != before) rerender()
         }
     }
-
     private fun showMarket(page: Int, accumulated: List<YioveSource.Item>) {
         setScreen(Screen.Market(accumulated, 0, page))
         root.removeAllViews()
