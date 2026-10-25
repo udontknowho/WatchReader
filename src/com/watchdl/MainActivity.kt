@@ -9,6 +9,7 @@ import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.*
 import com.watchdl.core.*
@@ -59,7 +60,7 @@ class MainActivity : Activity() {
                         im.rule?.let { list += MultiSource.NamedSource(im.name, LegadoSource.of(it)) }
                     }
                 }
-            }.onFailure { android.util.Log.e("WatchDL", "载入书源 ${f.name} 失败", it) }
+            }.onFailure { DevLog.log("WatchDL", "载入书源 ${f.name} 失败：${it.message}") }
         }
         // 只搜前 MAX_SOURCES 个源。
         //
@@ -71,9 +72,9 @@ class MainActivity : Activity() {
         // 否则从搜索结果里点进去时找不到源，只能退回番茄——那就会取不到目录。
         val pooled = list.drop(MAX_SOURCES)
         if (pooled.isNotEmpty()) {
-            android.util.Log.i("WatchDL", "源共 ${list.size} 个，搜索用前 $MAX_SOURCES 个，其余 ${pooled.size} 个仅备用")
+            DevLog.log("WatchDL", "源共 ${list.size} 个，搜索用前 $MAX_SOURCES 个，其余 ${pooled.size} 个仅备用")
         }
-        android.util.Log.i("WatchDL", "多源搜索就绪：${minOf(list.size, MAX_SOURCES)} 个源（并发 $CONCURRENCY）")
+        DevLog.log("WatchDL", "多源搜索就绪：${minOf(list.size, MAX_SOURCES)} 个源（并发 $CONCURRENCY）")
         return MultiSource(list.take(MAX_SOURCES), pool = list, concurrency = CONCURRENCY)
     }
 
@@ -97,7 +98,12 @@ class MainActivity : Activity() {
             val searchedSources: Int = 0,
         ) : Screen
         data class Toc(val info: BookInfo, val src: BookSource? = null) : Screen
-        data class Reader(val info: BookInfo, val index: Int, val text: String, val src: BookSource? = null) : Screen
+        data class Reader(
+            val info: BookInfo,
+            val index: Int,
+            val text: String,
+            val src: BookSource? = null,
+        ) : Screen
         object Sources : Screen
         /** 设置页。目前只有阅读显示与导出目录两块，都是本地项。 */
         object Settings : Screen
@@ -108,14 +114,15 @@ class MainActivity : Activity() {
          * 只带榜单代号与性别，重进这一屏时不缓存数据 —— 榜单本来就要新数据。
          */
         data class Discover(
-            /** 分类过滤：`all` / `fq` / `qd`。 */
-            val filter: String = "all",
+            /** 站点：`fq` / `qd`。 */
+            val site: String = "fq",
             val gender: String = "male",
+            /** 选中的榜；空串表示还没选，只显示选择器。 */
+            val rankKey: String = "",
+            /** 这个榜拉到的条目。空表示正在拉或没选。 */
             val hits: List<BookHit> = emptyList(),
-            /** 已拉了几批。流式加载靠它算下一页。 */
-            val cursor: Int = 0,
-            /** 已经没更多了。 */
-            val exhausted: Boolean = false,
+            /** 取数失败原因；空串表示没失败。 */
+            val error: String = "",
         ) : Screen
         /** 书源市场（yiove）。`hits` 为拉到的列表，`page` 为已拉到的页码。 */
         data class Market(val hits: List<YioveSource.Item>, val total: Int, val page: Int) : Screen
@@ -140,7 +147,7 @@ class MainActivity : Activity() {
         is Screen.Toc -> "toc:${s.info.name}${s.info.author}"
         is Screen.Reader -> "reader:${s.info.bookId}"
         is Screen.Progress -> "progress:${s.info.bookId}"
-        is Screen.Discover -> "discover:${s.filter}:${s.gender}"
+        is Screen.Discover -> "discover:${s.site}:${s.gender}:${s.rankKey}"
         is Screen.Market -> "market:${s.page}"
     }
 
@@ -221,6 +228,8 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        // onPause 之后可能直接被杀，这里再兜一次。
+        saveReaderPosNow()
         cancelTasks()
         super.onDestroy()
     }
@@ -269,7 +278,7 @@ class MainActivity : Activity() {
             is Screen.Progress -> showProgress(s.info)
             // 发现页返回时**清空旧数据**重新拉：推荐流是时效内容，
             // 隔几分钟回来还显示旧列表，用户看不出它已过期。
-            is Screen.Discover -> showDiscover(s.filter, s.gender)
+            is Screen.Discover -> showDiscover(s.site, s.gender, s.rankKey)
             is Screen.Settings -> showSettings()
             else -> showHome()
         }
@@ -282,26 +291,100 @@ class MainActivity : Activity() {
     private var readerSpacing = 1.75f
     private var readerBackground = Color.rgb(20, 18, 24)
 
+    /** 当前阅读页的滚动视图与位置。onPause 时要靠它们落盘。 */
+    private var readerBody: android.widget.ScrollView? = null
+    private var readerBookId = ""
+    private var readerIndex = -1
+    private var readerOffset = 0
+    private var scrollSave: Runnable? = null
+
+    /** 表冠灵敏度：每格位移（px）。表冠一格系统只给 1 个单位，必须放大才看得出。 */
+    private var crownStep = 60f
+
+    /** 表冠跟手时长（ms）。越短越跟手，太短会抖。 */
+    private var crownGlide = 50
+
     /** 阅读设置落盘。以前改完只活在内存里，杀进程就全丢。 */
     private fun loadReaderPrefs() {
         val p = getSharedPreferences("reader", MODE_PRIVATE)
         readerSize = p.getFloat("size", Md3.FS_READ)
         readerSpacing = p.getFloat("spacing", 1.75f)
         readerBackground = p.getInt("bg", Color.rgb(20, 18, 24))
+        crownStep = p.getFloat("crownStep", 60f)
+        crownGlide = p.getInt("crownGlide", 50)
     }
 
     /**
-     * 上次读到第几章（下标）。累计只会增大：往回翻不把进度弄小。
+     * 上次读到第几章（下标）。跟着最后一次阅读走，回看会退回去。
      * 0 表示没记录过（和「读到第一章」等价，不影响使用）。
      */
-    private fun readProgress(bookId: String): Int =
-        getSharedPreferences("reader", MODE_PRIVATE).getInt("pos_" + bookId.take(64), 0)
+    private fun readProgress(bookId: String): Int {
+        val raw = readIndex(bookId)
+        if (raw < 0) return 0
+        // 旧版分节存档是 `章号 * 1000 + 节号`，而 last_ 是新版才写的。
+        // 所以「有 last_」就说明存的已是纯章号，不能再用 1000 去猜大小。
+        // 靠数值大小判断会把第 1001 章当成旧值，直接扇回第 1 章。
+        val tag = bookId.take(64)
+        val prefs = getSharedPreferences("reader", MODE_PRIVATE)
+        if (prefs.contains("last_$tag")) return raw
+        // 没有 last_ 就是没见过新版代码。先把它标上，下次不再走这条路。
+        val fixed = if (raw >= SEG_BASE) raw / SEG_BASE else raw
+        prefs.edit().putInt("pos_$tag", fixed).putLong("last_$tag", 0L).apply()
+        return fixed
+    }
+
+    /** 原始存档章号。-1 = 没记录过，用来区分「没读过」和「读到第 0 章」。 */
+    private fun readIndex(bookId: String): Int =
+        getSharedPreferences("reader", MODE_PRIVATE).getInt("pos_" + bookId.take(64), -1)
+
+    /** 最近一次把这本书翻开的时刻。0 = 没记录过。 */
+    private fun readTime(bookId: String): Long =
+        getSharedPreferences("reader", MODE_PRIVATE).getLong("last_" + bookId.take(64), 0L)
 
     private fun saveProgress(bookId: String, index: Int) {
-        if (bookId.isBlank()) return
-        val key = "pos_" + bookId.take(64)
-        if (index <= getSharedPreferences("reader", MODE_PRIVATE).getInt(key, 0)) return
-        getSharedPreferences("reader", MODE_PRIVATE).edit().putInt(key, index).apply()
+        if (bookId.isBlank() || index < 0) return
+        val prefs = getSharedPreferences("reader", MODE_PRIVATE)
+        val tag = bookId.take(64)
+        val prevIndex = prefs.getInt("oidx_$tag", -1)
+        val e = prefs.edit().putInt("oidx_$tag", index)
+            .putLong("last_$tag", System.currentTimeMillis())
+        // 无条件写：和 legado 一致，进度就是最后一次停下的地方，回看会退回去。
+        // 旧值不先解包：搬运工作由 readProgress 负责，存进来的永远是纯章号。
+        e.putInt("pos_$tag", index)
+        // 换章时滚动偏移作废，否则沿用上一章的像素位置，进新章可能直接顶到底。
+        if (prevIndex != index) e.putInt("off_$tag", 0)
+        // commit 而非 apply：进程被杀时 apply 的异步写入可能还没落盘。
+        e.commit()
+    }
+
+    /** 历史包袱：分节版本用过 `章号 * 1000 + 节号`，只用来识别并还原旧值。 */
+    private val SEG_BASE = 1000
+
+    /** 上次读到本章的第几个像素。换章时清零。 */
+    private fun readOffset(bookId: String): Int =
+        getSharedPreferences("reader", MODE_PRIVATE).getInt("off_" + bookId.take(64), 0)
+
+    private fun saveOffset(bookId: String, index: Int, offset: Int, sync: Boolean = false) {
+        if (bookId.isBlank() || index < 0) return
+        val prefs = getSharedPreferences("reader", MODE_PRIVATE)
+        val kIndex = "oidx_" + bookId.take(64)
+        // 偏移只对当时那一章有意义。章号对不上就丢弃，免得上一次读到第 3000 像素，
+        // 换个更短的章一进去就顶到底。
+        if (prefs.getInt(kIndex, -1) != index) return
+        val e = prefs.edit().putInt("off_" + bookId.take(64), offset.coerceAtLeast(0))
+        if (sync) e.commit() else e.apply()
+    }
+
+    /** 立刻把当前阅读位置写盘。切后台、息屏、进程被杀前都走这里。 */
+    private fun saveReaderPosNow() {
+        val body = readerBody ?: return
+        if (readerBookId.isBlank() || readerIndex < 0) return
+        scrollSave?.let { body.removeCallbacks(it) }
+        // 章号也再写一次：翻开后原地滚动的会话不会触发 saveProgress，
+        // 而首页按 last_ 排序，不刷新就一直显示旧时间。
+        saveProgress(readerBookId, readerIndex)
+        // 记住的是「屏幕上那行」的位置，不是上次防抖触发的旧值。
+        saveOffset(readerBookId, readerIndex, body.scrollY, sync = true)
     }
 
     private fun saveReaderPrefs(size: Float, spacing: Float, bg: Int) {
@@ -310,6 +393,11 @@ class MainActivity : Activity() {
         readerBackground = bg
         getSharedPreferences("reader", MODE_PRIVATE).edit()
             .putFloat("size", size).putFloat("spacing", spacing).putInt("bg", bg).apply()
+    }
+
+    private fun saveCrownPrefs() {
+        getSharedPreferences("reader", MODE_PRIVATE).edit()
+            .putFloat("crownStep", crownStep).putInt("crownGlide", crownGlide).apply()
     }
 
     /**
@@ -339,6 +427,8 @@ class MainActivity : Activity() {
         // 尺寸按屏幕自适应。手表保持紧凑档，手机放大。
         Md3.configure(this)
         loadReaderPrefs()
+        DevLog.file = File(filesDir, "dev.log")
+        DevLog.setEnabled(getSharedPreferences("reader", MODE_PRIVATE).getBoolean("devlog", false))
         root = Widgets.screenRoot(this)
         setContentView(root)
         cleanDirtyJobs()
@@ -362,7 +452,7 @@ class MainActivity : Activity() {
         thread {
             val r = runCatching { CloudSource.update(sourcesDir()) }.getOrNull() ?: return@thread
             if (!r.ok) {
-                android.util.Log.i("WatchDL", "启动同步书源未更新：${r.message}")
+                DevLog.log("WatchDL", "启动同步书源未更新：${r.message}")
                 return@thread
             }
             // 库变了，multi 是 lazy 且已经缓存了旧列表 —— 必须作废重建成新的。
@@ -388,9 +478,9 @@ class MainActivity : Activity() {
         root.removeAllViews()
         // 主屏内容自明，但顶栏完全没字时用户看不出这是什么应用（测试报告 P1-6）。
         root.addView(Widgets.topBar(this, "小说下载器", onBack = null, backGlyph = "",
-            trailing = listOf("⚙" to { showSources() })))
+            trailing = listOf("⚙" to { rememberReturn(); showSettings() })))
 
-        val body = Widgets.scrollBody(this)
+        val body = Widgets.scrollBody(this, crownStep, crownGlide)
         val col = Widgets.contentColumn(body)
 
         // 搜索框与按钮并成一行：分两行时按钮独自吃掉 46dp（约五分之一屏高），
@@ -423,21 +513,25 @@ class MainActivity : Activity() {
         // 只认真正含 job.json 的目录。
         // 以前只看「是目录」—— 空的、导出的、脏 bookId 留下的都会进列表，
         // 而 restore 全返回 null，于是有分组标题、下面却空空如也。
+        // 先按 job.json 里的原始 bookId 取阅读时间，没有阅读记录的才退回目录修改时间。
+        // 列表要 restore 才拿得到 bookId，所以这一步提前做，排序才有依据。
         val books = jobsDir().listFiles()
             ?.filter { it.isDirectory && File(it, "job.json").isFile }
-            ?.sortedByDescending { it.lastModified() } ?: emptyList()
+            ?.map { dir -> dir to runCatching { File(dir, "job.json").readText() }.getOrNull()
+                ?.let { com.watchdl.core.TinyJson.path(it, "bookId") }.orEmpty() }
+            ?.sortedByDescending { (dir, id) -> readTime(id).takeIf { it > 0 } ?: dir.lastModified() }
+            ?: emptyList()
         // 导出目录挪到 files/export，不再混在作业目录里（见 exportTxt）。
         if (books.isEmpty()) {
             col.addView(Widgets.emptyState(this, "▤", "还没有下载过\n搜索书名即可开始"))
         } else {
             col.addView(Widgets.sectionLabel(this, "最近下载"))
             var shown = 0
-            for (dir in books) {
+            for ((dir, id) in books) {
                 if (shown >= 8) break
-                // 必须用 job.json 里的**原始 bookId**，不能用目录名 ——
+                // 用 job.json 里的**原始 bookId**，不能用目录名 ——
                 // 目录名是 safeDirName 净化过的，再拿去 restore 会被二次净化，对不上。
-                val id = runCatching { File(dir, "job.json").readText() }.getOrNull()
-                    ?.let { com.watchdl.core.TinyJson.path(it, "bookId") } ?: continue
+                if (id.isBlank()) continue
                 val job = Downloader.restore(jobsStore(), id) ?: continue
                 shown++
                 val done = job.count(ChapterStatus.DONE)
@@ -535,7 +629,7 @@ class MainActivity : Activity() {
         root.removeAllViews()
         root.addView(Widgets.topBar(this, "搜索结果", onBack = { goBackToPrevious() }))
 
-        val body = Widgets.scrollBody(this)
+        val body = Widgets.scrollBody(this, crownStep, crownGlide)
         val col = Widgets.contentColumn(body)
 
         // 多源统计卡：告诉用户跑了几条源、几条没响应。
@@ -604,7 +698,7 @@ class MainActivity : Activity() {
         root.addView(Widgets.topBar(this, info.name, onBack = { goBackToPrevious() },
             trailing = listOf("⋮" to { showTocMenu(info) })))
 
-        val body = Widgets.scrollBody(this)
+        val body = Widgets.scrollBody(this, crownStep, crownGlide)
         val col = Widgets.contentColumn(body)
 
         val free = info.chapters.count { !it.locked }
@@ -690,7 +784,7 @@ class MainActivity : Activity() {
         root.removeAllViews()
         root.addView(Widgets.topBar(this, "下载中", onBack = { showToc(info) }))
 
-        val body = Widgets.scrollBody(this)
+        val body = Widgets.scrollBody(this, crownStep, crownGlide)
         val col = Widgets.contentColumn(body)
 
         val total = info.chapters.size
@@ -729,9 +823,9 @@ class MainActivity : Activity() {
     private fun showSources() {
         setScreen(Screen.Sources)
         root.removeAllViews()
-        root.addView(Widgets.topBar(this, "书源", onBack = { showHome() }))
+        root.addView(Widgets.topBar(this, "书源", onBack = { goBackToPrevious() }))
 
-        val body = Widgets.scrollBody(this)
+        val body = Widgets.scrollBody(this, crownStep, crownGlide)
         val col = Widgets.contentColumn(body)
 
         // 副标题原本是「从 yiove 在线拉取，点选即可导入」，单行省略号把它压到卡片边缘（P1-5）。
@@ -762,7 +856,7 @@ class MainActivity : Activity() {
                 extractAssets()
                 buildLocalSourceRows()
             }.getOrElse {
-                android.util.Log.e("WatchDL", "读取本地书源失败", it)
+                DevLog.log("WatchDL", "读取本地书源失败：${it.message}")
                 null
             }
         }) { res ->
@@ -794,11 +888,11 @@ class MainActivity : Activity() {
                     .filter { it.contains("仍失败") }
                 val trace = ImportTrace.last
                 val broken = rows.count { it.mark == "✗" }
-                android.util.Log.i("WatchDL",
+                DevLog.log("WatchDL",
                     "正则自检：字面 ${RegexProbe.ALL.size} / 书源 ${RegexProbe.FROM_SOURCES.size} / " +
                     "裸编译失败 ${badRe.size}（走后兜底仍失败 ${lenientBad.size}）/ 导入抛点 ${trace ?: "无"}")
-                badRe.take(6).forEach { android.util.Log.i("WatchDL", "裸编译失败 $it") }
-                lenientBad.take(6).forEach { android.util.Log.i("WatchDL", "兜底仍失败 $it") }
+                badRe.take(6).forEach { DevLog.log("WatchDL", "裸编译失败 $it") }
+                lenientBad.take(6).forEach { DevLog.log("WatchDL", "兜底仍失败 $it") }
 
                 // 只有「有源不可用」或「修补后仍编不过 / 导入抛过异常」才展示
                 if (broken > 0 || lenientBad.isNotEmpty() || trace != null) {
@@ -848,8 +942,15 @@ class MainActivity : Activity() {
                         "⚠" -> Md3.primary
                         else -> Md3.error
                     }
+                    // M7：声明明文、且实测 https 也升级不上去的源才标「明文」。
+                    // 探测结论来自 [Http.cleartextHosts]：没发过请求的源还不知道，不预标。
+                    val plain = r.declaredHttp && r.plainConfirmed
+                    val sub = listOfNotNull(
+                        r.note?.let { shortReason(it) },
+                        if (plain) "明文传输" else null,
+                    ).joinToString(" · ").ifEmpty { null }
                     col.addView(Widgets.listItem(
-                        this, r.name, r.note?.let { shortReason(it) }, twoLine = r.note != null,
+                        this, r.name, sub, twoLine = sub != null,
                         highlight = false,
                         leading = Md3.text(this, r.mark, Md3.FS_SM, color),
                     ))
@@ -870,36 +971,38 @@ class MainActivity : Activity() {
      * 全站 31606 条 / 2.5 GB，全量拉要 9 小时，所以不做整库导入。
      */
     /**
-     * 发现页：一条持续的推荐流。
+     * 发现页：选站点 → 选频道 → 选分类 → 看那一个榜。
      *
-     * 不再是「选榜 + 翻页按钮」 —— 那要求用户先做选择。这里把多个榜混成一条流，
-     * 滑到底自动加载下一批，不需要点任何东西。
+     * 以前是一条混合流，把几个榜各取一页轮流拼起来 —— 结果「番茄更新」那种新鲜但
+     * 难看的书把好榜的份额挤掉了。现在番茄有 26 个分类 × 阅读/新书两榜，起点有 5 个榜，
+     * 全并行拉一次就是 52 个请求，所以改成**选中后只拉一个榜**。
      *
-     * 榜单**由云端配置驱动**（[RankConfig]），加榜改接口不用发版。
-     * 点书名走既有的多源搜索：起点没有对应 [BookSource]，番茄榜单的书也未必须能直取目录。
+     * 番茄分类榜走页面 SSR，一屏 10 本、不可翻页；起点每页 20 本、可翻到第 10 页。
+     * 点书名走既有的多源搜索：起点没有对应 [BookSource]，番茄榜单的书也未必能直取目录。
      */
     private fun showDiscover(
-        filter: String = "all",
+        site: String = "fq",
         gender: String = "male",
-        hits: List<BookHit> = emptyList(),
-        cursor: Int = 0,
-        exhausted: Boolean = false,
+        rankKey: String = "",
     ) {
-        setScreen(Screen.Discover(filter, gender, hits, cursor, exhausted))
+        setScreen(Screen.Discover(site, gender, rankKey))
         root.removeAllViews()
-        root.addView(Widgets.topBar(this, "发现", onBack = { goBackToPrevious() },
-            trailing = listOf("⟳" to { showDiscover(filter, gender) })))
+        val sel = discoverRanks().firstOrNull { it.key == rankKey }
+        root.addView(Widgets.topBar(this, sel?.name ?: "发现",
+            onBack = { if (rankKey.isBlank()) goBackToPrevious() else showDiscover(site, gender, "") },
+            trailing = listOf("⟳" to { showDiscover(site, gender, rankKey) })))
 
-        val body = Widgets.scrollBody(this)
+        val body = Widgets.scrollBody(this, crownStep, crownGlide)
         val col = Widgets.contentColumn(body)
+        root.addView(body)
 
-        // 分类过滤：只留三个按钮，多了反而又变成「先选再看」。
+        // 站点。换站点会把已选的榜清掉 —— 番茄的分类 ID 起点没有对应物。
         col.addView(Widgets.sectionLabel(this, "站点"))
         val tabs = Md3.row(this)
-        for ((k, label) in listOf("all" to "全部", "fq" to "番茄", "qd" to "起点")) {
-            val on = k == filter
+        for ((k, label) in listOf("fq" to "番茄", "qd" to "起点")) {
+            val on = k == site
             val b = Widgets.button(this, label, if (on) "filled" else "tonal", {
-                if (!on) showDiscover(k, gender)
+                if (!on) showDiscover(k, gender, "")
             })
             b.contentDescription = label
             tabs.addView(b, LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f).apply {
@@ -911,14 +1014,13 @@ class MainActivity : Activity() {
         ).apply { bottomMargin = Md3.dp(this@MainActivity, Md3.GAP) }
         col.addView(tabs)
 
-        // 两组筛选样式相同，没有标签时看着像「同时选中两项」。
+        // 频道。起点五个榜都分男女频，番茄分类 ID 更是男女频完全不通用。
         col.addView(Widgets.sectionLabel(this, "频道"))
-        // 男频/女频只影响起点榜，但开关常驻：列表里起点内容占一半，藏起来会更困惑。
         val genders = Md3.row(this)
         for ((g, label) in listOf("male" to "男频", "female" to "女频")) {
             val on = g == gender
             val b = Widgets.button(this, label, if (on) "filled" else "tonal", {
-                if (!on) showDiscover(filter, g)
+                if (!on) showDiscover(site, g, "")
             })
             genders.addView(b, LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f).apply {
                 if (genders.childCount > 0) leftMargin = Md3.dp(this@MainActivity, Md3.GAP / 2)
@@ -928,165 +1030,133 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, Md3.BTN),
         ).apply { bottomMargin = Md3.dp(this@MainActivity, Md3.GAP) }
         col.addView(genders)
-        root.addView(body)
 
-        // 尾部状态占位。流式加载时不重建整个页面，只改这一个 view。
-        val tail = Md3.text(this, "", Md3.FS_SM, Md3.onSurfaceVariant)
-
-        if (hits.isEmpty()) {
-            tail.text = "正在拉取推荐…"
-            col.addView(tail)
-            // 把「用户是哪一屏点进来的」记下来：拉榜单四条榜串行，慢的十二秒才放弃，
-            // 这期间用户完全可能已经退出去。回调一律带这个屏做身份校验。
-            val owner: Screen = Screen.Discover(filter, gender)
-            bg(owner, {
-                // 榜单已拿到一条就先把整页重建一次 —— 之后只有全空才当失败。
-                // 用数组包一层：闭包改不了外层局部变量，回调要用它判「已经展示过了」。
-                val shown = booleanArrayOf(false)
-                val got = loadStream(filter, gender, 0) { batch ->
-                    if (shown[0] || batch.hits.isEmpty()) return@loadStream
-                    shown[0] = true
-                    postAlive(owner) {
-                        showDiscover(filter, gender, batch.hits, batch.cursor, batch.exhausted)
-                    }
-                }
-                shown[0] to got
-            }) { res ->
-                val pair = res.getOrNull()
-                if (pair == null) {
-                    tail.text = "推荐暂时取不到，稍后重试"
-                    return@bg
-                }
-                // 已经用中途那批重建过整页了，别再用最终结果盖一次（会闪）。
-                if (pair.first) return@bg
-                val got = pair.second
-                if (got.hits.isEmpty()) {
-                    tail.text = "推荐暂时取不到，稍后重试"
-                } else {
-                    showDiscover(filter, gender, got.hits, got.cursor, got.exhausted)
-                }
-            }
+        // 这个站点+频道下有哪些榜。
+        val genderEnum = if (gender == "female") RankConfig.Gender.FEMALE else RankConfig.Gender.MALE
+        val siteEnum = if (site == "qd") RankConfig.Site.QIDIAN else RankConfig.Site.FANQIE
+        val avail = discoverRanks().filter { it.site == siteEnum && it.gender == genderEnum }
+        if (avail.isEmpty()) {
+            col.addView(Widgets.emptyState(this, "▤", "这个频道暂时没有榜单"))
             return
         }
 
-        for (h in hits) col.addView(discoverItem(col, h))
-
-        tail.text = if (exhausted) "已经到底了" else "上滑加载更多…"
-        col.addView(tail)
-
-        // 流式加载：滑到底就拉下一批，不重建整页，只往 col 里追加。
-        if (!exhausted) {
-            var loading = false
-            val ctx = this
-            body.setOnScrollChangeListener { v, _, scrollY, _, _ ->
-                if (loading) return@setOnScrollChangeListener
-                val sv = v as? ScrollView ?: return@setOnScrollChangeListener
-                val child = sv.getChildAt(0) ?: return@setOnScrollChangeListener
-                // 还剩不到一屏高就预拉，避免用户看到空白等待。
-                val remaining = child.bottom - (scrollY + sv.height)
-                if (remaining > sv.height) return@setOnScrollChangeListener
-                loading = true
-                tail.text = "正在加载…"
-                thread {
-                    val got = runCatching { loadStream(filter, gender, cursor) }
-                    runOnUiThread {
-                        // loading 必须在所有分支里复位：以前只在「没切屏」那条路上置 false，
-                        // 用户拉的时候退出去了，这个闭包就永远卡在 true，再回到同一页时
-                        // 上滑加载一次都不会触发。
-                        loading = false
-                        // 用户在等的时候切走了屏，就别往上加了 —— col 已经不是本页那个。
-                        if ((screen as? Screen.Discover)?.filter != filter) return@runOnUiThread
-                        val r = got.getOrNull()
-                        if (r == null || r.hits.isEmpty()) {
-                            tail.text = "加载失败，上滑重试"
-                            return@runOnUiThread
-                        }
-                        // 只追加新条目，不动已有列表 —— 重建会让用户回到顶部。
-                        for (h in r.hits) {
-                            addBeforeTail(col, discoverItem(col, h))
-                        }
-                        // 屏上记的条目要跟上，否则从搜索结果返回时只能看到第一批。
-                        // 这里只追加数据、不换屏，所以不走 setScreen —— 否则会把自己这个
-                        // 正在跑的任务 cancel 掉，后面的 tail.text 就写不进去了。
-                        val sd = screen
-                        if (sd is Screen.Discover) {
-                            screen = sd.copy(
-                                hits = sd.hits + r.hits, cursor = r.cursor, exhausted = r.exhausted,
-                            )
-                        }
-                        tail.text = if (r.exhausted) "已经到底了" else "上滑加载更多…"
-                    }
+        // 番茄：先选分类，再选阅读/新书。起点：一个平铺的榜列表。
+        col.addView(Widgets.sectionLabel(this, if (site == "qd") "榜单" else "分类"))
+        // 按分类名分组，一个分类一行两个按钮（阅读 / 新书）。
+        val byCat = LinkedHashMap<String, MutableList<RankConfig.Rank>>()
+        for (r in avail) {
+            // 榜单名形如「西方奇幻 · 阅读」，分类名取分隔符前那段。
+            val cat = r.name.substringBefore(" · ")
+            byCat.getOrPut(cat) { mutableListOf() }.add(r)
+        }
+        for ((cat, list) in byCat) {
+            if (site == "qd") {
+                // 起点每个榜独立一个按钮，名字里没有「 · 」。
+                for (r in list) col.addView(rankButton(r, rankKey, site, gender))
+            } else {
+                val row = Md3.row(this)
+                row.addView(Md3.text(this, cat, Md3.FS_SM, Md3.onSurfaceVariant).apply {
+                    gravity = Gravity.CENTER_VERTICAL
+                }, LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f))
+                for (r in list) {
+                    val on = r.key == rankKey
+                    val b = Widgets.button(this, if (r.rankType == 1) "新书" else "阅读",
+                        if (on) "filled" else "tonal", {
+                        if (!on) showDiscover(site, gender, r.key)
+                    })
+                    row.addView(b, LinearLayout.LayoutParams(
+                        Md3.dp(this, 64), Md3.dp(this, Md3.BTN)).apply {
+                        leftMargin = Md3.dp(this@MainActivity, Md3.GAP / 2)
+                    })
                 }
+                row.layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, Md3.BTN),
+                )
+                col.addView(row)
+            }
+        }
+
+        if (sel == null) return
+
+        // 选中了榜：只拉这一个。
+        col.addView(Widgets.sectionLabel(this, sel.name))
+        val holder = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(holder)
+        holder.addView(Md3.text(this, "正在拉取…", Md3.FS_SM, Md3.onSurfaceVariant))
+
+        bg(Screen.Discover(site, gender, rankKey), { loadOneRank(sel) }) { res ->
+            holder.removeAllViews()
+            res.onSuccess { hits ->
+                if (hits.isEmpty()) {
+                    holder.addView(Md3.text(this, "这个榜暂时没有内容",
+                        Md3.FS_SM, Md3.onSurfaceVariant))
+                } else {
+                    for (h in hits) holder.addView(discoverItem(col, h))
+                }
+            }.onFailure { e ->
+                holder.addView(Md3.text(this, "取不到：${e.message?.take(60)}",
+                    Md3.FS_SM, Md3.error))
+                holder.addView(Widgets.button(this, "重试", "tonal", {
+                    showDiscover(site, gender, rankKey)
+                }))
             }
         }
     }
 
-    /** 流式取数结果。`cursor` 是下次该从哪继续，`exhausted` 表示没有更多。 */
-    private data class Stream(val hits: List<BookHit>, val cursor: Int, val exhausted: Boolean)
+    /** 起点用：一个榜一个按钮。 */
+    private fun rankButton(r: RankConfig.Rank, cur: String, site: String, gender: String): View {
+        val on = r.key == cur
+        val b = Widgets.button(this, r.name, if (on) "filled" else "tonal", {
+            if (!on) showDiscover(site, gender, r.key)
+        })
+        b.layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, Md3.BTN),
+        ).apply { bottomMargin = Md3.dp(this@MainActivity, 2) }
+        return b
+    }
 
     /**
      * 发现页的一行。
      *
-     * 点进去走多源搜索。以前流式追加的那批写的是 `doSearch(h.name)` —— 不记返回屏，
-     * 从搜索结果退回就直接回首页，跟首批点开的行为不一样。
+     * 副标题优先用 [BookHit.extra]（排名 · 字数 · 最新章节），没有就退回作者。
+     * 点进去走多源搜索。
      */
     private fun discoverItem(col: LinearLayout, h: BookHit): LinearLayout {
-        val sub = listOf(h.author.takeIf { it.isNotBlank() }, h.sourceName.takeIf { it.isNotBlank() })
-            .filterNotNull().joinToString(" · ")
+        val sub = listOf(
+            h.author.takeIf { it.isNotBlank() },
+            h.extra.takeIf { it.isNotBlank() },
+        ).filterNotNull().joinToString(" · ")
         return Widgets.listItem(this, h.name, sub, twoLine = true, highlight = true) {
             rememberReturn()
             openDiscoverHit(h)
         }
     }
 
-    /** 往内容列里插一行，位置在尾部状态文字之前。 */
-    private fun addBeforeTail(col: LinearLayout, v: android.view.View) {
-        col.addView(v, (col.childCount - 1).coerceAtLeast(0))
-    }
-
     /**
-     * 拉一批推荐。
+     * 拉起一个榜。
      *
-     * 多个榜轮流取一页，拼成一条流 —— 这样“全部”里不会整屏都是番茄。
-     * `cursor` 是**全局第几批**，一批 = 每个榜各取一页。
-     *
-     * [onPartial] 在**任意一条榜先拿到内容时**回调一次，参数是到那一刻为止拼出来的流。
-     * 四条榜串行请求，快的一秒就回、慢的十二秒才放弃，全都等齐才画屏就是白等。
+     * 番茄分类榜一屏 10 本、不可翻页；起点每页 20 本，这里把前 [RankConfig.Rank.pages]
+     * 页串起来（最多 10 页 = 200 本）。整批共用一个死线，免得 10 页各自计时。
      */
-    private fun loadStream(
-        filter: String,
-        gender: String,
-        cursor: Int,
-        onPartial: (Stream) -> Unit = {},
-    ): Stream {
-        val ranks = discoverRanks().filter {
-            when (filter) {
-                "fq" -> it.kind != RankConfig.Kind.QIDIAN
-                "qd" -> it.kind == RankConfig.Kind.QIDIAN
-                else -> true
-            }
-        }
-        if (ranks.isEmpty()) return Stream(emptyList(), cursor, true)
+    private fun loadOneRank(r: RankConfig.Rank): List<BookHit> {
+        // 字符表只读一次。读不到也不致命，书名只是带私用区字符。
+        val decoder = runCatching {
+            CharsetFontDecoder.fromFile(File(filesDir, "charset.json").absolutePath)
+        }.getOrNull()?.takeIf { it.isReady }
 
-        val out = mutableListOf<BookHit>()
-        // 几条榜串行请求，每条都有超时；不封顶的话一个站卡住就会拖到分钟级。
-        val deadline = System.currentTimeMillis() + 20_000
-        for (r in ranks) {
+        val gender = if (r.gender == RankConfig.Gender.FEMALE) "female" else "male"
+        val deadline = System.currentTimeMillis() + RankSource.PAGE_BUDGET_MS * 2
+        val pages = if (r.kind == RankConfig.Kind.QIDIAN) r.pages.coerceIn(1, 10) else 1
+        val out = LinkedHashMap<String, BookHit>()
+        for (p in 1..pages) {
             if (System.currentTimeMillis() > deadline) break
-            // 不可翻页的榜（番茄推荐）只出第一批。
-            val page = if (r.pages <= 0) 1 else cursor + 1
-            if (r.pages > 0 && page > r.pages) continue
-            val rankDeadline = minOf(deadline, System.currentTimeMillis() + RankSource.PAGE_BUDGET_MS)
-            runCatching { RankSource.fetch(r, gender, page, rankDeadline) }.getOrDefault(emptyList())
-                .let { out.addAll(it) }
-            if (out.isNotEmpty()) {
-                onPartial(Stream(out.distinctBy { "${it.name}\u0001${it.author}" }, cursor + 1, false))
-            }
+            val got = runCatching { RankSource.fetch(r, gender, p, deadline, decoder) }
+                .getOrElse { if (p == 1) throw it else break }
+            for (h in got) out.putIfAbsent(h.bookId, h)
         }
-        // 不同榜可能有同一本书（番茄更新与起点畅销偶有重合），按书名+作者去重。
-        val dedup = out.distinctBy { "${it.name}\u0001${it.author}" }
-        return Stream(dedup, cursor + 1, dedup.isEmpty())
+        return out.values.toList()
     }
+
 
     /**
      * 当前可用的榜单。云端配置拉一次就缓存到内存，不每次翻页都去请求。
@@ -1108,7 +1178,7 @@ class MainActivity : Activity() {
         root.removeAllViews()
         root.addView(Widgets.topBar(this, "书源市场", onBack = { showSources() }))
 
-        val body = Widgets.scrollBody(this)
+        val body = Widgets.scrollBody(this, crownStep, crownGlide)
         val col = Widgets.contentColumn(body)
         root.addView(body)
 
@@ -1192,7 +1262,7 @@ class MainActivity : Activity() {
             CloudSource.update(sourcesDir(), onProgress = { msg -> postAlive(owner) { toast(msg) } })
         }) { res ->
             val r = res.getOrElse { e ->
-                android.util.Log.e("WatchDL", "云端更新失败", e)
+                DevLog.log("WatchDL", "云端更新失败：${e.message}")
                 CloudSource.Result(false, "更新异常：${e.message?.take(60)}")
             }
             toast(r.message)
@@ -1202,7 +1272,20 @@ class MainActivity : Activity() {
     }
 
     /** 本地书源一行。 */
-    private data class SourceRow(val file: String, val name: String, val mark: String, val note: String?)
+    private data class SourceRow(
+        val file: String,
+        val name: String,
+        val mark: String,
+        val note: String?,
+        /** 声明为 http:// 的源（M7）；实际是否回落到明文由 [Http.cleartextHosts] 决定。 */
+        val declaredHttp: Boolean = false,
+        /** 书源根地址，用来把探测结论对到这条行上。null = 导入器没给出。 */
+        val host: String? = null,
+    ) {
+        /** 声明明文、且探测结果明确说这个 host 升不上 https。 */
+        val plainConfirmed: Boolean
+            get() = declaredHttp && host != null && Http.isCleartextHost(host)
+    }
 
     /**
      * 读 [filesDir]/sources 下所有 json，导入并统计。
@@ -1223,9 +1306,13 @@ class MainActivity : Activity() {
             val text = runCatching { f.readText() }.getOrNull() ?: continue
             val imported = runCatching {
                 if (text.contains("bookSourceName")) LegadoImport.importAll(text)
-                else SonovelImport.importAll(text).map { (n, r) -> LegadoImport.Imported(n, r, null) }
+                else SonovelImport.importAllChecked(text).map { (n, r, issue) ->
+                    // S16：以前 `.map { (n, r) -> Imported(n, r, null) }`，issue 永远 null，
+                    // 缺字段被丢掉的条目在界面上完全不出声。
+                    LegadoImport.Imported(n, r, issue)
+                }
             }.getOrElse {
-                android.util.Log.e("WatchDL", "导入 ${f.name} 失败", it)
+                DevLog.log("WatchDL", "导入 ${f.name} 失败：${it.message}")
                 emptyList()
             }
             if (imported.isEmpty()) continue
@@ -1233,9 +1320,11 @@ class MainActivity : Activity() {
             usable += imported.count { it.rule != null }
             imported.forEach { i ->
                 rows += SourceRow(f.name, i.name,
-                    if (i.rule == null) "✗" else if (i.issue != null) "⚠" else "✓", i.issue)
+                    if (i.rule == null) "✗" else if (i.issue != null) "⚠" else "✓", i.issue,
+                    i.declaredHttp, i.rule?.host)
             }
         }
+        // 探测是按 host 记的，回填到行上；没探过的 host 保留 null。
         return Quad(files, rows, total, usable)
     }
 
@@ -1310,16 +1399,41 @@ class MainActivity : Activity() {
         root.addView(bar)
         root.addView(android.view.View(this).apply { setBackgroundColor(hairline) }, Md3.lpDp(this, null, 1))
 
-        val body = Widgets.scrollBody(this)
+        val body = Widgets.scrollBody(this, crownStep, crownGlide)
         body.setBackgroundColor(readerBackground)
         val col = Widgets.contentColumn(body)
+
         // 正文用专用字号（比正文 UI 大），行距 1.8 在手表上偏松，手机上刚好。
-        val tv = Md3.text(this, text, readerSize, readerInk)
+        val tv = Md3.text(this, if (text.isEmpty()) "本章无正文" else text, readerSize, readerInk)
         tv.setLineSpacing(Md3.dp(this, 2).toFloat(), readerSpacing)
         tv.justificationMode = android.text.Layout.JUSTIFICATION_MODE_INTER_WORD
         tv.setPadding(Md3.dp(this, 3), Md3.dp(this, 2), Md3.dp(this, 3), Md3.dp(this, 24))
         col.addView(tv)
+
         root.addView(body, Md3.lpWeight(1f))
+
+        // 读到哪了：滚动停下再记，滚动过程中每帧写盘没有意义。
+        // onPause / onDestroy 会再存一次，覆盖突然退出、切后台的情况。
+        readerBody = body
+        readerBookId = info.bookId
+        readerIndex = index
+        body.setOnScrollChangeListener { _, _, y, _, _ ->
+            readerOffset = y
+            scrollSave?.let { body.removeCallbacks(it) }
+            val task = Runnable { saveOffset(info.bookId, index, y) }
+            scrollSave = task
+            body.postDelayed(task, 400)
+        }
+        // 恢复上次读到的地方。等布局完成再滚，否则拿不到 maxScroll。
+        val restore = readOffset(info.bookId).takeIf { it > 0 }
+        if (restore != null) {
+            body.post {
+                val child = body.getChildAt(0)
+                val limit = ((child?.height ?: 0) - body.height +
+                    body.paddingTop + body.paddingBottom).coerceAtLeast(0)
+                body.scrollTo(0, restore.coerceAtMost(limit))
+            }
+        }
 
         // 底部：进度 + 上/下一章。两边的点击目标都要够大，手机上单手也能摸到。
         // 底栏必须背实底色 + 一根分隔线：否则正文从按钮下面露出来，看着像排版坏了。
@@ -1335,7 +1449,10 @@ class MainActivity : Activity() {
         prev.isClickable = true
         prev.minHeight = Md3.dp(this, Md3.HIT)
         prev.setPadding(Md3.dp(this, 4), 0, Md3.dp(this, 4), 0)
-        prev.setOnClickListener { prevChapter(info, index) }
+        // 与「下一节」对称：本章还有没读完的节时，回头必须先回上一节。
+        prev.setOnClickListener {
+            prevChapter(info, index)
+        }
         // 第一章时置灰并真的禁用：以前只调 alpha，点了还能按，弹一句「已是第一章」。
         if (index <= 0) { prev.alpha = 0.35f; prev.isClickable = false }
         foot.addView(prev)
@@ -1354,8 +1471,15 @@ class MainActivity : Activity() {
         next.isClickable = true
         next.minHeight = Md3.dp(this, Md3.HIT)
         next.setPadding(Md3.dp(this, 4), 0, Md3.dp(this, 4), 0)
-        next.setOnClickListener { nextChapter(info, index) }
-        if (index >= info.chapters.size - 1) { next.alpha = 0.35f; next.isClickable = false }
+        // 本章还有未读的节时，这一下必须先翻节 —— 否则读者点「下一章」，
+        // 本章后半截就再也不会被看到。
+        next.setOnClickListener {
+            nextChapter(info, index)
+        }
+        if (index >= info.chapters.size - 1) {
+            next.alpha = 0.35f
+            next.isClickable = false
+        }
         foot.addView(next)
         // 高度必须容得下 HIT 高的子项，否则页码被挤到第二行（P0-3）。
         foot.layoutParams = Md3.lpDp(this, null, Md3.HIT)
@@ -1439,7 +1563,7 @@ class MainActivity : Activity() {
         setScreen(Screen.Hits(keyword, emptyList(), offset, 0))
         root.removeAllViews()
         root.addView(Widgets.topBar(this, "搜索中…", onBack = { showHome() }))
-        val body = Widgets.scrollBody(this)
+        val body = Widgets.scrollBody(this, crownStep, crownGlide)
         val col = Widgets.contentColumn(body)
         // 进度文本每多一个源就改一次（P1-2）。以前 15~20 秒里只有一个静态的
         // 「正在搜索」，用户分不清是在跑还是卡死了。
@@ -1485,7 +1609,7 @@ class MainActivity : Activity() {
             }, offset = offset)
         }) { res ->
             res.onSuccess { r ->
-                android.util.Log.i("WatchDL",
+                DevLog.log("WatchDL",
                     "搜索「$keyword」：${r.hits.size} 条 / 响应 ${r.responded}/${r.total} 源" +
                     if (r.failed.isEmpty()) "" else "，失败 ${r.failed.size}: ${r.failed.take(5)}")
                 showHits(keyword, r.hits, r, offset)
@@ -1567,7 +1691,7 @@ class MainActivity : Activity() {
         }
         root.removeAllViews()
         root.addView(Widgets.topBar(this, name, onBack = { goBackToPrevious() }))
-        val body = Widgets.scrollBody(this)
+        val body = Widgets.scrollBody(this, crownStep, crownGlide)
         val hint = if (tried == 0) "正在取目录…" else "换源重试（${tried + 1}/${candidates.size}）…"
         (Widgets.contentColumn(body)).addView(Widgets.emptyState(this, "⏳", hint))
         root.addView(body)
@@ -1603,7 +1727,7 @@ class MainActivity : Activity() {
         val count = candidates.size
         root.removeAllViews()
         root.addView(Widgets.topBar(this, name, onBack = { goBackToPrevious() }))
-        val body = Widgets.scrollBody(this)
+        val body = Widgets.scrollBody(this, crownStep, crownGlide)
         val col = Widgets.contentColumn(body)
         val msg = if (count <= 1)
             "「$name」取不到目录\n这条源可能需要登录或已失效"
@@ -1631,7 +1755,7 @@ class MainActivity : Activity() {
         setScreen(Screen.Toc(BookInfo(bookId, name, author, emptyList())))
         root.removeAllViews()
         root.addView(Widgets.topBar(this, name, onBack = { showHome() }))
-        val body = Widgets.scrollBody(this)
+        val body = Widgets.scrollBody(this, crownStep, crownGlide)
         (Widgets.contentColumn(body)).addView(Widgets.emptyState(this, "⏳", "正在取目录…"))
         root.addView(body)
 
@@ -1642,6 +1766,7 @@ class MainActivity : Activity() {
         }
     }
 
+    /** 从记录的位置续读：章号 + 章内节号。 */
     private fun preview(info: BookInfo, index: Int) {
         val ch = info.chapters[index]
         // 先读本地正文，只有缺章时才在线程中初始化源并联网。
@@ -1650,7 +1775,7 @@ class MainActivity : Activity() {
             ?: tocSrc
         root.removeAllViews()
         root.addView(Widgets.topBar(this, ch.title, onBack = { showToc(info) }))
-        val body = Widgets.scrollBody(this)
+        val body = Widgets.scrollBody(this, crownStep, crownGlide)
         (Widgets.contentColumn(body)).addView(Widgets.emptyState(this, "⟳", "正在取正文…"))
         root.addView(body)
 
@@ -1708,9 +1833,9 @@ class MainActivity : Activity() {
     private fun showSettings() {
         setScreen(Screen.Settings)
         root.removeAllViews()
-        root.addView(Widgets.topBar(this, "设置", onBack = { showHome() }))
+        root.addView(Widgets.topBar(this, "设置", onBack = { goBackToPrevious() }))
 
-        val body = Widgets.scrollBody(this)
+        val body = Widgets.scrollBody(this, crownStep, crownGlide)
         val col = Widgets.contentColumn(body)
 
         col.addView(Widgets.sectionLabel(this, "阅读显示"))
@@ -1788,6 +1913,49 @@ class MainActivity : Activity() {
         segmentRow("背景", bgs.map { it.first to (it.second as Any) },
             { readerBackground as Any }) { readerBackground = it as Int }
 
+        // 字号/行距改为滑杆：三档粒度太粗，字号差一档就过大。
+        // 滑杆下面的档位行保留作为快捷选择，两者同步。
+        col.addView(Widgets.sliderRow(this, "字号", 11f, 26f, readerSize, 0,
+            { "%.1f sp".format(it) }) { v ->
+            readerSize = v
+            saveReaderPrefs(readerSize, readerSpacing, readerBackground)
+            paintPreview()
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = Md3.dp(this@MainActivity, Md3.GAP) })
+
+        col.addView(Widgets.sliderRow(this, "行距", 1.1f, 2.4f, readerSpacing, 0,
+            { "%.2f 倍".format(it) }) { v ->
+            readerSpacing = v
+            saveReaderPrefs(readerSize, readerSpacing, readerBackground)
+            paintPreview()
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = Md3.dp(this@MainActivity, Md3.GAP) })
+
+        // 表冠灵敏度：刚改完平滑滚动后这两个常数直接决定手感，不同人差异很大。
+        col.addView(Widgets.sectionLabel(this, "表冠"))
+        col.addView(Widgets.sliderRow(this, "每格位移", 20f, 200f, crownStep, 0,
+            { "%d px".format(it.toInt()) }) { v ->
+            crownStep = v
+            saveCrownPrefs()
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = Md3.dp(this@MainActivity, Md3.GAP) })
+
+        col.addView(Widgets.sliderRow(this, "跟手时长", 0f, 200f, crownGlide.toFloat(), 0,
+            { if (it < 1f) "立即" else "%d ms".format(it.toInt()) }) { v ->
+            crownGlide = v.toInt()
+            saveCrownPrefs()
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = Md3.dp(this@MainActivity, Md3.GAP) })
+
+        // 设置页自身的 body 早就建好了，改参数后需要让下次进页面生效。
+        col.addView(Md3.text(this, "表冠参数在下次进入页面时生效", Md3.FS_SM, Md3.onSurfaceVariant).apply {
+            setPadding(0, Md3.dp(this@MainActivity, 4), 0, 0)
+        })
+
         paintPreview()
 
         col.addView(Widgets.sectionLabel(this, "导出"))
@@ -1798,12 +1966,64 @@ class MainActivity : Activity() {
         col.addView(dirHint)
 
         col.addView(Widgets.sectionLabel(this, "书源"))
-        col.addView(Widgets.listItem(this, "管理书源", "启用/禁用与导入", twoLine = true) { showSources() })
+        col.addView(Widgets.listItem(this, "管理书源", "启用/禁用与导入", twoLine = true) {
+            rememberReturn(); showSources()
+        })
 
         col.addView(Widgets.sectionLabel(this, "关于"))
         col.addView(Widgets.listItem(this, "版本", appVersion(), twoLine = false, highlight = false) { })
 
+        // 开发者模式：默认关闭，关着时只有普通 logcat，不占内存不写盘。
+        col.addView(Widgets.sectionLabel(this, "开发者"))
+        val devRow = Widgets.listItem(this, "开发者模式", devLogHint(), twoLine = true,
+            trailing = if (devLogOn()) "开" else "关") { toggleDevLog() }
+        col.addView(devRow)
+        if (devLogOn()) {
+            col.addView(Widgets.listItem(this, "导出日志", "写入文件后系统分享", twoLine = true) { exportDevLog() })
+            col.addView(Widgets.listItem(this, "清空日志", null, twoLine = false) {
+                DevLog.clear(); toast("日志已清空")
+            })
+        }
+
         root.addView(body)
+    }
+
+    private fun devLogOn() = getSharedPreferences("reader", MODE_PRIVATE).getBoolean("devlog", false)
+
+    private fun devLogHint(): String {
+        val f = File(filesDir, "dev.log")
+        val kb = if (f.exists()) (f.length() / 1024).coerceAtLeast(0) else 0
+        return if (devLogOn()) "已开启 · 落盘 ${kb} KB · 只记本 App" else "关闭：仅打 logcat，不存不写盘"
+    }
+
+    private fun toggleDevLog() {
+        val on = !devLogOn()
+        getSharedPreferences("reader", MODE_PRIVATE).edit().putBoolean("devlog", on).apply()
+        DevLog.file = File(filesDir, "dev.log")
+        DevLog.setEnabled(on)
+        showSettings()          // 重画，导出/清空按钮跟着开关出现或消失
+    }
+
+    /**
+     * 写一份快照到公共「文档」目录，再走系统分享递出去。
+     * 不用 FileProvider：本工程没有 androidx，而 file:// 从 targetSdk 24 起已被封。
+     */
+    private fun exportDevLog() {
+        if (!ensureLegacyStorage()) {
+            toast("需要存储权限才能导出")
+            return
+        }
+        val stamp = SimpleDateFormat("MMdd-HHmmss", Locale.US).format(Date())
+        val out = File(filesDir, "dev-$stamp.log")
+        runCatching {
+            out.writeText(DevLog.dump().joinToString("") { it + "\n" })
+        }.onFailure { toast("写日志失败：${it.message}"); return }
+        val published = publishToDocuments(out)
+        if (published == null) {
+            toast("已写入 ${out.name}，但无法存到文档")
+            return
+        }
+        toast("已存到文档/$published")
     }
 
     /** 版本号从 PackageManager 读，避免在代码里再写一份与 build.sh 不同步的常量。 */
@@ -1884,7 +2104,7 @@ class MainActivity : Activity() {
             } ?: false
             if (ok) src.name else null
         } catch (e: Exception) {
-            android.util.Log.w("WatchDL", "写入 Documents 失败：${e.message}")
+            DevLog.log("WatchDL", "写入 Documents 失败：${e.message}")
             null
         }
     }
@@ -1965,7 +2185,7 @@ class MainActivity : Activity() {
                 showProgress(info)
             }
             }.onFailure { e ->
-                android.util.Log.w("WatchDL", "进度刷新失败（已忽略）：${e.message}")
+                DevLog.log("WatchDL", "进度刷新失败（已忽略）：${e.message}")
             }
         }
     }
@@ -1980,6 +2200,8 @@ class MainActivity : Activity() {
     override fun onPause() {
         super.onPause()
         runCatching { unregisterReceiver(progressReceiver) }
+        // 退到后台、切走、被杀之前，先把读到哪存下来。
+        saveReaderPosNow()
     }
 
     @Deprecated("手表没有返回手势，按返回键回上一层")
@@ -2007,7 +2229,7 @@ class MainActivity : Activity() {
                 is Screen.Progress -> showProgress(s.info)
                 Screen.Settings -> showSettings()
                 // 配置变更重建**不刷新**：这里只是重画，联网会让旋转/展开后卡一下。
-                is Screen.Discover -> showDiscover(s.filter, s.gender, s.hits, s.cursor, s.exhausted)
+                is Screen.Discover -> showDiscover(s.site, s.gender, s.rankKey)
             }
         }
     }
@@ -2018,11 +2240,11 @@ class MainActivity : Activity() {
             is Screen.Toc -> goBackToPrevious()
             is Screen.Hits -> goBackToPrevious()
             is Screen.Reader -> showToc(s.info)
-            is Screen.Sources -> showHome()
+            is Screen.Sources -> goBackToPrevious()
             is Screen.Market -> showSources()
             is Screen.Progress -> showToc(s.info)
             is Screen.Discover -> goBackToPrevious()
-            Screen.Settings -> showHome()
+            Screen.Settings -> goBackToPrevious()
         }
     }
 
@@ -2050,7 +2272,7 @@ class MainActivity : Activity() {
                         if (f.deleteRecursively()) removed++
                     }
                 }
-                if (removed > 0) android.util.Log.i("WatchDL", "清掉 $removed 个脏作业目录")
+                if (removed > 0) DevLog.log("WatchDL", "清掉 $removed 个脏作业目录")
             }
         }
     }
@@ -2100,7 +2322,7 @@ class MainActivity : Activity() {
                 assets.open(assetPath).use { it.available().toLong() }
             }.getOrNull()
             if (assetLen == null || assetLen == dest.length()) return
-            android.util.Log.i("WatchDL", "更新 $assetPath：${dest.length()} → $assetLen 字节")
+            DevLog.log("WatchDL", "更新 $assetPath：${dest.length()} → $assetLen 字节")
         }
         repeat(2) { attempt ->
             val ok = runCatching {
@@ -2114,9 +2336,9 @@ class MainActivity : Activity() {
                 true
             }.getOrElse { false }
             if (ok && dest.isFile && dest.length() > 0L) return
-            if (attempt == 0) android.util.Log.w("WatchDL", "解压 $assetPath 失败，重试")
+            if (attempt == 0) DevLog.log("WatchDL", "解压 $assetPath 失败，重试")
         }
-        android.util.Log.e("WatchDL", "解压 $assetPath 最终失败；书源列表可能为空")
+        DevLog.log("WatchDL", "解压 $assetPath 最终失败；书源列表可能为空")
     }
 
     /**

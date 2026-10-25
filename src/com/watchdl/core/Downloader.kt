@@ -258,7 +258,9 @@ class Downloader(
     }
 
     private fun writeChapter(job: BookJob, ch: ChapterRef, html: String) {
-        val json = """{"itemId":"${ch.itemId}","title":${quote(ch.title)},"content":${quote(html)}}"""
+        // itemId 也是书源给的值，和 title/content 一样不可信。裸拼的话，
+        // 链接里带引号就写出断裂行，读回时对不上 → 每轮续传重下这一章，导出时这章消失。
+        val json = "{\"itemId\":${quote(ch.itemId)},\"title\":${quote(ch.title)},\"content\":${quote(html)}}"
         store.appendChapter(job.bookId, json)
     }
 

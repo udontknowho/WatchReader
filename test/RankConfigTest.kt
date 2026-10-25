@@ -34,7 +34,7 @@ fun main() {
 
     println("[RankConfig] 页数封顶")
     val cap = RankConfig.parse("""{"ranks":[{"key":"a","kind":"fanqie","pages":10000}]}""")
-    check("10000 被压到 50", cap.firstOrNull()?.pages == 50, "实际 ${cap.firstOrNull()?.pages}")
+    check("10000 被压到 10", cap.firstOrNull()?.pages == 10, "实际 ${cap.firstOrNull()?.pages}")
     val neg = RankConfig.parse("""{"ranks":[{"key":"a","kind":"fanqie","pages":-3}]}""")
     check("负数压到 0", neg.firstOrNull()?.pages == 0, "实际 ${neg.firstOrNull()?.pages}")
 
@@ -48,6 +48,25 @@ fun main() {
     check("内置都有 key", RankConfig.BUILTIN.all { it.key.isNotBlank() })
     check("内置起点榜都带 board", RankConfig.BUILTIN.filter { it.kind == RankConfig.Kind.QIDIAN }
         .all { it.board.isNotBlank() })
+
+    println("[RankConfig] 全量榜单")
+    // 番茄 26 个分类 × 阅读/新书 = 52；起点 5 个。这组数是 2026-10-24 实测的范围，
+    // 少一个说明分类表写漏了。
+    val fq = RankConfig.BUILTIN.filter { it.kind == RankConfig.Kind.FANQIE_RANK }
+    check("番茄分类榜 52 个", fq.size == 52, "实际 ${fq.size}")
+    check("男频 19 类 × 2", fq.count { it.gender == RankConfig.Gender.MALE } == 38,
+        "实际 ${fq.count { it.gender == RankConfig.Gender.MALE }}")
+    check("女频 7 类 × 2", fq.count { it.gender == RankConfig.Gender.FEMALE } == 14,
+        "实际 ${fq.count { it.gender == RankConfig.Gender.FEMALE }}")
+    check("起点 5 个榜",
+        RankConfig.BUILTIN.count { it.site == RankConfig.Site.QIDIAN } == 5,
+        "实际 ${RankConfig.BUILTIN.count { it.site == RankConfig.Site.QIDIAN }}")
+    check("key 不重复", RankConfig.BUILTIN.map { it.key }.toSet().size == RankConfig.BUILTIN.size)
+    // 同（站点, 频道, 分类）下阅读榜和新书榜都必须存在，否则 UI 会只有一个按钮。
+    val groups = fq.groupBy { Triple(it.gender, it.category, it.rankType) }
+    check("每个分类两种榜都有", groups.size == 52, "实际 ${groups.size}")
+    check("番茄分类榜都带 category", fq.all { it.category > 0 })
+    check("番茄分类榜都带频道", fq.all { it.gendered })
 
     if (failures == 0) println("\n全部通过") else { println("\n失败 $failures 项"); kotlin.system.exitProcess(1) }
 }

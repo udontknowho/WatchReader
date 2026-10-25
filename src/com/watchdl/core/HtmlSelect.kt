@@ -116,7 +116,7 @@ object HtmlSelect {
             if (lt + 1 < html.length && (html[lt + 1] == '!' || html[lt + 1] == '?')) {
                 i = lt + 1; continue
             }
-            val gt = html.indexOf('>', lt)
+            val gt = tagEnd(html, lt)
             if (gt < 0) break
             val inner = html.substring(lt + 1, gt).trim()
             if (inner.isEmpty() || inner[0] == '/') { i = gt + 1; continue }
@@ -140,6 +140,28 @@ object HtmlSelect {
     }
 
     private val VOID_TAGS = setOf("br", "hr", "img", "input", "meta", "link", "area", "base", "col")
+
+    /**
+     * 找开标签的结尾 `>`，**跳过引号内的 `>`**。
+     *
+     * 直接 `indexOf('>', lt)` 在 `<div title="x > y">正文</div>` 上会把结尾定在
+     * 属性值中间，于是 `@text` 得到 `y">正文`、`@title` 得到空串。
+     */
+    private fun tagEnd(html: String, lt: Int): Int {
+        var i = lt + 1
+        var quote = '\u0000'
+        while (i < html.length) {
+            val c = html[i]
+            if (quote != '\u0000') {
+                if (c == quote) quote = '\u0000'
+            } else when (c) {
+                '"', '\'' -> quote = c
+                '>' -> return i
+            }
+            i++
+        }
+        return -1
+    }
 
     private fun parseAttrs(s: String): Map<String, String> {
         val m = HashMap<String, String>(4)
@@ -331,6 +353,11 @@ object HtmlSelect {
     }
 
     private fun matches(node: Node, sel: StepSel): Boolean {
+        // 逗号多选一：任一个备选命中就算命中。
+        if (sel.alts.isNotEmpty()) return sel.alts.any { matches(node, it) }
+        // 不支持的语法（`TEXT` 等）不能当成「匹配全部」：
+        // 那会把全页每个元素都当条目。让它「取不到」，错得明显且可查。
+        if (sel.isUnparsed) return false
         if (sel.isEmpty) return true
         // `text.串`：内文**包含**该串即命中。
         if (sel.text != null && !containsText(node, sel.text)) return false
@@ -374,8 +401,10 @@ object HtmlSelect {
             Selector.Pick.ATTR -> attr?.let { node.attrs[it] }
             // ownText：只要本节点的直接文本，不含子元素里的（官方 element.ownText()）
             Selector.Pick.OWN_TEXT -> {
-                val t = HtmlText.plain(innerHtml(html, node).replace(Regex("(?s)<[^>]*>.*"), ""))
-                t.ifBlank { HtmlText.plain(directTextOnly(html, node)) }
+                val t = HtmlText.plain(directTextOnly(html, node))
+                // 以前这里还叠了一层 `replace(Regex("(?s)<[^>]*>.*"), "")` 补丁，
+                // 那是为了掩盖 depth 不减的 bug；depth 修好后补丁会把正确的后半段 texto 掉，删掉。
+                t.ifBlank { HtmlText.plain(innerHtml(html, node)) }
             }
             // textNodes：逐个子文本节点，用换行拼（官方 joinToString("\n")）
             Selector.Pick.TEXT_NODES -> {
@@ -403,7 +432,22 @@ object HtmlSelect {
         while (i < inner.length) {
             val c = inner[i]
             when {
-                c == '<' -> { val e = inner.indexOf('>', i); i = if (e < 0) inner.length else e + 1; depth++ }
+                c == '<' -> {
+                    val e = tagEnd(inner, i)
+                    val end = if (e < 0) inner.length else e + 1
+                    // `</x>` 是闭合标签，深度要减。以前只加不减，于是子元素之后的
+                    // 文本（`<p>你好<span>x</span>世界</p>` 的「世界」）全被丢掉。
+                    if (i + 1 < inner.length && inner[i + 1] == '/') {
+                        if (depth > 0) depth--
+                    } else if (e > i && inner[i + 1] != '!' && inner[i + 1] != '?') {
+                        // 自闭合与空元素不占深度
+                        val selfClose = e > i && inner[e - 1] == '/'
+                        val name = inner.substring(i + 1, minOf(e, inner.length)).trim()
+                            .takeWhile { it.isLetterOrDigit() || it == '-' }.lowercase()
+                        if (!selfClose && name !in VOID_TAGS) depth++
+                    }
+                    i = end
+                }
                 else -> {
                     if (depth == 0) sb.append(c)
                     i++

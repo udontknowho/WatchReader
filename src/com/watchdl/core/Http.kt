@@ -20,6 +20,89 @@ object Http {
 
     private const val MAX_REDIRECTS = 5
 
+    // ───────────────────────── 明文源（M7）─────────────────────────
+    //
+    // 书源库里 bookSourceUrl 大多是 `http://`，而站点其实两边都开。以前一路走明文：
+    // 在公共网络上正文可被旁路读改，运营商也可能注入。现在同一 host 先探一次 https：
+    // 通就用 https，不通就回落原 http（并在界面标「明文」）。
+    //
+    // 探测**必须缓存**，否则每个章节都多一次请求，下载慢一倍。
+    // 缓存按 host 记，不按完整 URL：一个站点几十个章节页共用一条结论。
+
+    /** host（含端口）→ https 是否可用。 */
+    private val httpsOk = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    /** 探测结果快照，界面据此给仍走明文的源标注。key 是 host（含端口）。 */
+    fun cleartextHosts(): Set<String> = httpsOk.filterValues { !it }.keys.toSet()
+
+    /**
+     * 这个 host 是否已探测过、且只能走明文。
+     *
+     * 没探过返回 false：**不预标**。否则所有声明 http 的源一进列表
+     * 就全挂上「明文」，用户看不出哪些是真降不下来的。
+     */
+    fun isCleartextHost(hostOrUrl: String): Boolean {
+        val u = hostOrUrl.substringBefore('#')
+        val key = runCatching {
+            val x = URL(if (u.startsWith("http")) u else "http://$u")
+            if (x.port > 0 && x.port != 80) "${x.host}:${x.port}" else x.host
+        }.getOrNull() ?: return false
+        return httpsOk[key] == false
+    }
+
+    /** 清空探测缓存。自检用；线上不需要。 */
+    fun resetProbeCache() { httpsOk.clear() }
+
+    /** 探测超时。手表上不能等，3 秒足够一次 TLS 握手。 */
+    private const val PROBE_TIMEOUT_MS = 3_000
+
+    /**
+     * 给 `http://` 地址挑一个实际使用的地址。非 http 直接原样返回。
+     *
+     * 探测失败不抛异常 —— 回落到原 http，让真正的请求去报错，
+     * 这样错误信息仍然是「站点怎么了」而不是「探测怎么了」。
+     */
+    private fun upscale(url: String): String {
+        if (!url.startsWith("http://", true)) return url
+        val host = runCatching {
+            val u = URL(url)
+            if (u.port > 0 && u.port != 80) "${u.host}:${u.port}" else u.host
+        }.getOrNull() ?: return url
+        val ok = httpsOk[host] ?: probeHttps(host).also { httpsOk[host] = it }
+        return if (ok) "https://" + url.substring(7) else url
+    }
+
+    /**
+     * 探一次 https。只关心「能不能拿到 HTTP 状态码」，不看内容、不跟重定向。
+     *
+     * 证书错误的站点只能回落到明文：让用户装自己的 CA 不在本工程范围内。
+     */
+    private fun probeHttps(host: String): Boolean {
+        val task = java.util.concurrent.FutureTask {
+            val conn = URL("https://$host/").openConnection() as javax.net.ssl.HttpsURLConnection
+            try {
+                conn.instanceFollowRedirects = false
+                conn.connectTimeout = PROBE_TIMEOUT_MS
+                conn.readTimeout = PROBE_TIMEOUT_MS
+                conn.requestMethod = "HEAD"
+                conn.setRequestProperty("User-Agent", UA)
+                val code = conn.responseCode
+                // 403/405 也算通：服务器在拒绝我们的方法，但 TLS 与站点都在。
+                code in 200..499
+            } finally {
+                runCatching { conn.disconnect() }
+            }
+        }
+        POOL.execute(task)
+        return try {
+            task.get((PROBE_TIMEOUT_MS + 1_000).toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (e: Exception) {
+            // 探不通就断掉那条连接，别让它挂在那儿占线程
+            task.cancel(true)
+            false
+        }
+    }
+
     /** 抓取结果。charset 是探测到的编码，排查乱码时用得上。 */
     data class Response(val body: String, val finalUrl: String, val charset: String?, val code: Int)
 
@@ -37,8 +120,9 @@ object Http {
         headers: Map<String, String> = emptyMap(),
         userAgent: String? = null,
         timeoutMs: Int = 15_000,
+        probe: Boolean = true,
     ): Raw {
-        val conn = URL(url).openConnection() as HttpURLConnection
+        val conn = URL(if (probe) upscale(url) else url).openConnection() as HttpURLConnection
         conn.instanceFollowRedirects = false
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
@@ -59,7 +143,12 @@ object Http {
             if (k != null && v != null) hs[k.lowercase()] = v.joinToString(", ")
         }
         val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-        val bytes = if (stream == null) ByteArray(0) else stream.use { readAll(it) }
+        // 发了 Accept-Encoding: gzip，就得自己拆包。以前这里直接 readAll，
+        // 调用方拿到的是压缩字节，转成字符串后满篇乱码 —— 肉搜和榜单页都踩过。
+        val bytes = if (stream == null) ByteArray(0) else stream.use {
+            val real = if (conn.contentEncoding?.contains("gzip") == true) GZIPInputStream(it) else it
+            if (real === it) readAll(it) else real.use { gz -> readAll(gz) }
+        }
         conn.disconnect()
         return Raw(bytes, hs, code)
     }
@@ -80,11 +169,19 @@ object Http {
         timeoutMs: Int = 15_000,
         // 目录剩余预算不应再乘 TOTAL_FACTOR 或追加宽限时间。
         totalTimeoutMs: Int? = null,
+        // 明文源探测（见 upgrade）：探测与回落都要额外花钱，后台批量请求可以关掉。
+        probe: Boolean = true,
     ): Response {
         require(totalTimeoutMs == null || totalTimeoutMs > 0)
         val budget = totalTimeoutMs?.toLong() ?: (timeoutMs.toLong() * TOTAL_FACTOR + 2_000)
+        // 探测本身最长 PROBE_TIMEOUT_MS，且是在**调用方线程上同步跑**的。
+        // 预算比它宽不了多少时（目录分页那种 150ms 硬限），探测一跑就把预算吃光，
+        // 真正的请求连发都没发出去 —— 表现为「目录超时」而不是「站点慢」。
+        // 所以只在预算够宽时才探，宁可用明文，也不能让功能失效。
+        val probeOk = probe && budget > PROBE_TIMEOUT_MS * 2L
+        val target = if (probeOk) upscale(url) else url
         val task = java.util.concurrent.FutureTask {
-            fetchNow(url, method, body, headers, referer, timeoutMs, totalTimeoutMs)
+            fetchNow(target, method, body, headers, referer, timeoutMs, totalTimeoutMs)
         }
         POOL.execute(task)
         return try {
@@ -236,6 +333,9 @@ object Http {
      * 打断，而 JDK 的 disconnect 并不能中断阻塞中的 read —— 实测要等到服务器下一字节。
      * 这里改成每次读之前把 readTimeout 压到「还剩多少时间」，到点自然抛超时。
      */
+    /** 响应体字节上限。超限抛 IOException，走正常的单章失败路径，不让整进程 OOM。 */
+    private const val MAX_BYTES = 32 * 1024 * 1024
+
     private fun readAll(s: java.io.InputStream, conn: java.net.URLConnection? = null, deadlineAt: Long = 0): ByteArray {
         val out = ByteArrayOutputStream(64 * 1024)
         val buf = ByteArray(16 * 1024)
@@ -247,6 +347,11 @@ object Http {
             }
             val n = s.read(buf)
             if (n <= 0) break
+            // 硬超时只管时间不管字节：站点吐几百 MB，或「全文阅读」页把整本塞一页，
+            // 直接 OutOfMemoryError 把下载进程杀掉，job.json 停在 RUNNING 白等一轮。
+            if (out.size() + n > MAX_BYTES) {
+                throw java.io.IOException("响应超过上限 ${MAX_BYTES / 1024 / 1024}MB（已读 ${out.size()}）")
+            }
             out.write(buf, 0, n)
         }
         return out.toByteArray()

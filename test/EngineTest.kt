@@ -230,6 +230,36 @@ fun importMain() {
         jr?.search?.name?.selector ?: "null")
     check("脚本正文清空", jr?.content?.content?.selector?.isEmpty() == true)
 
+    println("[SonovelImport] S16：缺字段不再静默丢弃")
+    val broken = """
+    [{"url":"http://ok.example/","name":"好的",
+      "search":{"url":"http://ok.example/s","result":"#r a","bookName":"a"},
+      "toc":{"item":"#list a"},"chapter":{"content":"#c"}},
+     {"url":"http://noname.example/","search":{"url":"x"}},
+     {"name":"缺 url","search":{"url":"http://a/s","result":"#r a","bookName":"a"},
+      "toc":{"item":"#list a"}},
+     "字符串不是对象"]
+    """.trimIndent()
+    val checked = SonovelImport.importAllChecked(broken)
+    check("4 条都有记录，一条不少", checked.size == 4, "实际 ${checked.size}")
+    check("好的那条无 issue", checked[0].third == null, checked[0].third ?: "null")
+    check("缺 name 记名字为序号", checked[1].first.contains("2"), checked[1].first)
+    check("缺 name 带 issue", checked[1].third?.contains("name") == true, checked[1].third ?: "null")
+    check("缺 url 带 issue", checked[2].third?.contains("url") == true, checked[2].third ?: "null")
+    check("非对象带 issue", checked[3].third?.contains("不是对象") == true, checked[3].third ?: "null")
+    // 旧接口仍只返回可用的，签名向后兼容
+    check("importAll 仍只返回可用条目", SonovelImport.importAll(broken).size <= 4)
+
+    println("[LegadoImport] S16：缺 bookSourceName / 坏 JSON 也不静默")
+    val legadoBroken = """[{"bookSourceName":"甲","bookSourceUrl":"http://a.example"},{"bookSourceUrl":"http://b.example"}]"""
+    val li = com.watchdl.core.LegadoImport.importAll(legadoBroken)
+    check("两条都有记录", li.size == 2, "实际 ${li.size}")
+    check("缺名字那条带 issue", li.any { it.issue?.contains("bookSourceName") == true },
+        li.map { it.issue }.toString())
+    val badJson = com.watchdl.core.LegadoImport.importAll("不是 json")
+    check("坏 JSON 给出可展示原因", badJson.size == 1 && badJson[0].issue != null,
+        badJson.map { it.issue }.toString())
+
     val real = System.getenv("SONOVEL_RULES")
     if (!real.isNullOrEmpty()) {
         println("[SonovelImport] 真实规则文件 $real")

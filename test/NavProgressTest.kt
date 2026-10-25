@@ -3,7 +3,8 @@
  *
  * 1. 返回栈必须是**栈**。以前只有一个变量，搜索→目录→阅读→设置之后
  *    按返回会跳过搜索结果页直接回首页。
- * 2. 阅读进度只会前进。往回翻不把「继续读」的位置弄小。
+ * 2. 阅读进度跟着最后一次阅读走，回看会退（与 legado 一致）。
+ *    旧版分节存档（章号×1000+节号）只能解一次，解完立刻写成纯章号。
  */
 private var failures = 0
 
@@ -45,18 +46,43 @@ fun main() {
     }
 
     run {
-        println("[进度] 阅读进度只前进")
+        println("[进度] 进度跟着最后一次阅读走")
+        // 与 legado ReadBook.saveRead() 一致：无条件写入，回看会退。
         val pos = mutableMapOf<String, Int>()
-        fun save(book: String, i: Int) {
-            if (i <= (pos[book] ?: 0)) return
-            pos[book] = i
-        }
+        fun save(book: String, i: Int) { pos[book] = i }
         save("b1", 5)
         check("第一次记下第 6 章", pos["b1"] == 5, "实际 ${pos["b1"]}")
         save("b1", 9)
         check("往后读会更新", pos["b1"] == 9, "实际 ${pos["b1"]}")
         save("b1", 3)
-        check("往回翻不回退", pos["b1"] == 9, "实际 ${pos["b1"]}")
+        check("往回翻跟着退", pos["b1"] == 3, "实际 ${pos["b1"]}")
+    }
+
+    run {
+        println("[进度] 旧分节存档一次性解开")
+        // 旧格式是 章号 * 1000 + 节号。判据是有没有 last_（新版才写的），
+        // 不能用数值大小：第 1001 章会被当成旧值直接甩回第 1 章。
+        val SEG_BASE = 1000
+        val pos = mutableMapOf<String, Int>()
+        val last = mutableMapOf<String, Long>()
+        fun readProgress(book: String): Int {
+            val raw = pos[book] ?: return 0
+            if (last.containsKey(book)) return raw
+            val fixed = if (raw >= SEG_BASE) raw / SEG_BASE else raw
+            pos[book] = fixed; last[book] = 0L
+            return fixed
+        }
+        pos["old"] = 55000
+        check("55000 解成第 55 章", readProgress("old") == 55, "实际 ${readProgress("old")}")
+        check("解完存回纯章号", pos["old"] == 55, "实际 ${pos["old"]}")
+        check("再读一次不再除", readProgress("old") == 55, "实际 ${readProgress("old")}")
+        pos["small"] = 999
+        check("纯章号 999 不动", readProgress("small") == 999, "实际 ${readProgress("small")}")
+        // 这条就是那个 bug：第 1001 章不能被当成旧值。
+        pos["big"] = 1001
+        last["big"] = 1L
+        check("第 1001 章不会被当成旧值", readProgress("big") == 1001, "实际 ${readProgress("big")}")
+        check("没记录过算第 0 章", readProgress("none") == 0)
     }
 
     run {

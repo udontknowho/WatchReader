@@ -472,10 +472,24 @@ data class StepSel(
     val raw: String = "",
     /** 伪类/伪元素原文（`:nth-of-type(2)` 等）。执行层不解释，只为渲染保真。 */
     val pseudo: List<String> = emptyList(),
+    /**
+     * 逗号多选一（`.s1,.s5`）展开后的备选。非空时本段其余字段为空，
+     * 匹配判定为「任一备选命中」。
+     */
+    val alts: List<StepSel> = emptyList(),
 ) {
     val isEmpty: Boolean
         get() = !xpath && tag.isEmpty() && id.isEmpty() && classes.isEmpty() &&
-            attrs.isEmpty() && text == null && !wildcard && raw != ">" && pseudo.isEmpty()
+            attrs.isEmpty() && text == null && !wildcard && raw != ">" &&
+            pseudo.isEmpty() && alts.isEmpty()
+
+    /**
+     * 有原文但没解析出任何约束 —— 即**不支持的语法**（`.s1,.s5`、`TEXT` 等）。
+     *
+     * 必须与真空段（`*`、`>` 透传）区分：前者应该「取不到」，
+     * 不能当成「无条件匹配」，否则 `.s1,.s5` 会把全页每个元素都当条目。
+     */
+    val isUnparsed: Boolean get() = isEmpty && raw.isNotBlank()
 
     companion object {
         /**
@@ -483,6 +497,31 @@ data class StepSel(
          * 它们不是选择器，大小写敏感，必须原样保留。
          */
         private val BUILTIN_CONSTS = setOf("TEXT", "HTML", "ALL", "OWN_TEXT", "TEXT_NODES")
+
+        /**
+         * 按顶层逗号切分。括号内（`:text(a,b)`）与引号内的逗号不切。
+         */
+        private fun splitTopLevelCommas(s: String): List<String> {
+            val out = mutableListOf<String>()
+            var depth = 0
+            var quote = '\u0000'
+            val cur = StringBuilder()
+            for (c in s) {
+                when {
+                    quote != '\u0000' -> {
+                        if (c == quote) quote = '\u0000'
+                        cur.append(c)
+                    }
+                    c == '"' || c == '\'' -> { quote = c; cur.append(c) }
+                    c == '(' || c == '[' -> { depth++; cur.append(c) }
+                    c == ')' || c == ']' -> { depth--; cur.append(c) }
+                    c == ',' && depth == 0 -> { out.add(cur.toString()); cur.setLength(0) }
+                    else -> cur.append(c)
+                }
+            }
+            out.add(cur.toString())
+            return out
+        }
 
         fun Path(expr: String) = StepSel(xpath = true, raw = expr)
 
@@ -498,9 +537,16 @@ data class StepSel(
             if (rest.startsWith("/")) return Path(rest)
 
             if (raw.trim() in BUILTIN_CONSTS) return StepSel(raw = raw.trim())
-            // 逗号是多选一（`.s1,.s5`），交给 Jsoup 自己展开；
-            // 拆开会把 `s5` 当成类名并进 `s1`，选不到任何东西。
-            if (',' in raw) return StepSel(raw = raw.trim())
+            // 逗号是多选一（`.s1,.s5`）：拆成多个备选，执行时任一个命中就算命中。
+            // 以前整段原样保留，执行层不认 → 被当成「无条件匹配」。
+            if (',' in raw) {
+                val parts = splitTopLevelCommas(raw).map { it.trim() }.filter { it.isNotEmpty() }
+                // 切不动（引号/括号不配对，或切出来只有一项）就别递归，
+                // 否则 parse 会拿同样的含逗号输入调自己 → StackOverflow。
+                if (parts.size <= 1) return StepSel(raw = raw.trim())
+                val subs = parts.map { parse(it) }
+                return StepSel(raw = raw.trim(), alts = subs)
+            }
 
             var text: String? = null
             Regex(":text\\(([^)]*)\\)").find(rest)?.let { m ->

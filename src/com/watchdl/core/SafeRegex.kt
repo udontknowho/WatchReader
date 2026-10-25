@@ -23,9 +23,18 @@ object SafeRegex {
      */
     private val neverMatch: Regex get() = NEVER_MATCH
 
-    /** 编译失败返回 null，调用方按「没有正则」处理。 */
+    /**
+     * 灾难性回溯的典型形状：嵌套量词 `(a+)+`、`(a*)*`、`(a+)*`。
+     *
+     * Rhino 跑普通正则，Java 的 Matcher 对这种形状是指数回溯 —— 20KB 重复字符
+     * 就能把线程钉死，且**不会抛异常**，只能眼看着它转。这里在编译期拒掉。
+     */
+    private val NESTED_QUANT = Regex("""\([^)]*[+*]\)[+*]""")
+
+    /** 编译失败或形状可疑返回 null，调用方按「没有正则」处理。 */
     fun compile(pattern: String?): Regex? {
         if (pattern.isNullOrEmpty()) return null   // 空模式＝没有正则，不当成"匹配一切"
+        if (NESTED_QUANT.containsMatchIn(pattern)) return null
         return runCatching { Regex(pattern) }.getOrElse { null }
     }
 

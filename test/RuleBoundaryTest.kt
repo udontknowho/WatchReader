@@ -61,7 +61,14 @@ fun main() {
 
     // 逗号多选一交给 Jsoup，不能拆成「类 s1 且类 s5」
     check(LegadoSelector.toCss(".s1,.s5@text") == ".s1,.s5@text")
+    // 逗号是「或」：`.s1,.s5` 要能取到 class=s5 的元素。
+    // 以前解析层把整段当 raw 保留、执行层不认，被当成「无条件匹配」。
     check(HtmlSelect.select("<i class=\"s5\">a</i>", ".s1,.s5", Selector.Pick.TEXT, null) == listOf("a"))
+    check(HtmlSelect.select("<i class=\"s1\">b</i>", ".s1,.s5", Selector.Pick.TEXT, null) == listOf("b"))
+    // 两个都不匹配时不能「全命中」——那会把全页每个元素都当条目
+    check(HtmlSelect.select("<i class=\"zzz\">c</i>", ".s1,.s5", Selector.Pick.TEXT, null).isEmpty())
+    // `:text(a,b)` 里的逗号不是备选分隔符
+    check(LegadoSelector.toCss("div:text(a,b)@text") == "div:text(a,b)@text")
 
     // 内建常量大小写敏感（`imageStyle: "TEXT"`）
     check(LegadoSelector.toCss("TEXT") == "TEXT")

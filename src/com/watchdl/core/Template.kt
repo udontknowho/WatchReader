@@ -94,7 +94,9 @@ object Template {
 /** 四则 + 括号，整数优先。 */
 internal object Arith {
     fun eval(expr: String): String {
-        val v = try { Parser(expr).parseExpr() } catch (e: Exception) { return expr }
+        // StackOverflowError 继承 Error 不继承 Exception，原先的 catch(Exception) 兜不住，
+        // `{{` + 5000 个括号 + `}}` 会一直抛到界面。改成 Throwable。
+        val v = try { Parser(expr).parseExpr() } catch (e: Throwable) { return expr }
         return if (v == v.toLong().toDouble()) v.toLong().toString() else v.toString()
     }
 
@@ -122,15 +124,20 @@ internal object Arith {
             }
             return v
         }
+        private var depth = 0
+
         private fun parseFactor(): Double {
+            // 括号深度＝递归深度。没上限的话 5000 层括号直接打穿栈。
+            if (depth > 64) throw IllegalStateException("表达式嵌套过深")
             while (i < s.length && s[i] == ' ') i++
             if (i < s.length && (s[i] == '-' || s[i] == '+')) {
                 val neg = s[i] == '-'; i++
                 val v = parseFactor(); return if (neg) -v else v
             }
             if (i < s.length && s[i] == '(') {
-                i++
+                i++; depth++
                 val v = parseExpr()
+                depth--
                 if (i < s.length && s[i] == ')') i++
                 return v
             }

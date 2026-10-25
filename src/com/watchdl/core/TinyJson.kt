@@ -10,18 +10,23 @@ object TinyJson {
 
     /** 取 `data.ret_data[0].book_id` 这类路径的值，字符串去引号，找不到返回 null。 */
     fun path(json: String, path: String): String? {
-        var i = 0
+        val cursor = pathOffset(json, path)
+        return if (cursor < 0) null else readScalar(json, skipWs(json, cursor))
+    }
+
+    /** 同 [path]，但返回值所在的字符偏移；找不到返回 -1。 */
+    private fun pathOffset(json: String, path: String): Int {
         var cursor = skipWs(json, 0)
         for (seg in splitPath(path)) {
             cursor = skipWs(json, cursor)
             cursor = when {
                 seg.startsWith("[") && seg.endsWith("]") ->
-                    descendIndex(json, cursor, seg.substring(1, seg.length - 1).toIntOrNull() ?: return null)
+                    descendIndex(json, cursor, seg.substring(1, seg.length - 1).toIntOrNull() ?: return -1)
                 else -> descendKey(json, cursor, seg)
             }
-            if (cursor < 0) return null
+            if (cursor < 0) return -1
         }
-        return readScalar(json, skipWs(json, cursor))
+        return cursor
     }
 
     /**
@@ -48,11 +53,41 @@ object TinyJson {
     }
 
     /**
+     * 找键的位置，**跳过字符串值内部**。
+     *
+     * 裸 `indexOf("\"key\"")` 会命中字符串值里的同名片段：
+     * `{"items":"[0]","data":{"items":[{"a":1}]}}` 取 `objects(body,"items")`
+     * 会把字符串值当数组起点，返回空表。`"page":"[1,2]"` 这类字段真实接口很常见。
+     */
+    private fun keyOffset(json: String, key: String): Int {
+        val needle = "\"$key\""
+        var i = 0
+        while (i < json.length) {
+            when (json[i]) {
+                '"' -> {
+                    val end = stringEnd(json, i)
+                    if (end < 0) return -1
+                    // 正好是完整的键（后面跟冒号）才算。stringEnd 返回的是结尾引号的下标，
+                    // 所以闭区间终点是 i + needle.length - 1。
+                    if (json.startsWith(needle, i) && i + needle.length - 1 == end) {
+                        var j = end + 1
+                        while (j < json.length && json[j].isWhitespace()) j++
+                        if (j < json.length && json[j] == ':') return i
+                    }
+                    i = end + 1
+                }
+                else -> i++
+            }
+        }
+        return -1
+    }
+
+    /**
      * 扫出某个键下面的所有 JSON 对象（穿透分卷等多层嵌套），返回每个对象的原文。
      * `chapterListWithVolume` 是 `[[{…},{…}],[…]]`，需要逐层铺平。
      */
     fun objects(json: String, key: String): List<String> {
-        val at = json.indexOf("\"$key\"")
+        val at = keyOffset(json, key)
         if (at < 0) return emptyList()
         val open = json.indexOf('[', at)
         if (open < 0) return emptyList()
@@ -80,9 +115,12 @@ object TinyJson {
      * 2500 章只抽出 75 章。现在改为把所有顶层对象都扫一遍，只看对象的直接字段。
      */
     fun arrayField(json: String, arrayPath: String, field: String): List<String> {
-        val start = indexOfPath(json, arrayPath) ?: return emptyList()
-        val open = json.indexOf('[', start)
-        if (open < 0) return emptyList()
+        // 走路径拿**偏移**，不要拿值段再 indexOf 回来 ——
+        // 那样会命中同名键，拿到别的数组。
+        val at = pathOffset(json, arrayPath)
+        if (at < 0) return emptyList()
+        val open = skipWs(json, at)
+        if (open >= json.length || json[open] != '[') return emptyList()
         val out = mutableListOf<String>()
         var i = open + 1
         while (i < json.length) {
@@ -415,8 +453,6 @@ object TinyJson {
         return -1
     }
 
-    private fun indexOfPath(json: String, path: String): Int? =
-        if (path.isEmpty()) 0 else path(json, path)?.let { json.indexOf(it) }
 
     private fun stringEnd(s: String, quoteAt: Int): Int {
         var i = quoteAt + 1

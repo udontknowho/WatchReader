@@ -22,17 +22,32 @@ object LegadoImport {
         val rule: BookSourceRule?,
         /** 无法转换的原因，null 表示干净导入。 */
         val issue: String?,
+        /**
+         * 源地址是 http://（M7）。
+         *
+         * 这里只知道**声明**是明文；实际能不能升级到 https 要等真发过请求
+         * （见 [Http.cleartextHosts]）。界面把两者合起来才标「明文」。
+         */
+        val declaredHttp: Boolean = false,
     ) {
         val usable: Boolean get() = rule != null
     }
 
     fun importAll(json: String): List<Imported> {
-        val root = JsonParser.parse(json) as? List<*> ?: return emptyList()
-        return root.mapNotNull { item ->
-            val m = item as? Map<*, *> ?: return@mapNotNull null
-            val name = m.getStr("bookSourceName") ?: return@mapNotNull null
+        // S16：解析失败以前直接抛，被调用方 `getOrElse` 吞成空列表，
+        // 界面只显示「共 0 条」。现在转成一条可展示的问题。
+        val root = runCatching { JsonParser.parse(json) }.getOrElse {
+            return listOf(Imported("（整个文件）", null,
+                "不是合法 JSON：${it.message?.take(60) ?: it::class.simpleName}"))
+        } as? List<*> ?: return listOf(Imported("（整个文件）", null, "顶层不是数组"))
+        return root.mapIndexedNotNull { idx, item ->
+            val m = item as? Map<*, *>
+                ?: return@mapIndexedNotNull Imported("第 ${idx + 1} 条", null, "不是对象，已跳过")
+            // 缺 bookSourceName 以前直接丢弃，一整个文件里丢几条用户无从得知。
+            val name = m.getStr("bookSourceName")?.takeIf { it.isNotBlank() }
+                ?: return@mapIndexedNotNull Imported("第 ${idx + 1} 条", null, "缺 bookSourceName 字段")
             val e = m.getBool("enabled") ?: true
-            if (!e) return@mapNotNull Imported(name, null, "源已禁用")
+            if (!e) return@mapIndexedNotNull Imported(name, null, "源已禁用")
             runCatching { importOne(name, m) }
                 // 带上异常类型：只有 message 时，NullPointerException 之类会显示成空串，
                 // 排查时看不出是哪一步炸的。
@@ -41,7 +56,8 @@ object LegadoImport {
                     val msg = it.message?.take(60)?.takeIf { s -> s.isNotBlank() } ?: "无详细信息"
                     // 打完整堆栈：只看 message 时，正则错误只报
                     // "Syntax error"，看不出是哪条规则、哪个正则炸的。
-                    android.util.Log.e("WatchDL", "导入书源失败：$name", it)
+                    // 走反射：纯 JVM 测试环境没有 android.util.Log，直接引用会 NoClassDefFoundError。
+                    debugLog("导入书源失败：$name", it)
                     // 分清「我们的正则炸了」和「书源内容不支持」——
                     // PatternSyntaxException 只可能来自编译正则的代码，那一定是我们的 bug，
                     // 不该混进「源不可用」的统计里（之前 45 条全被误记成源的问题）。
@@ -298,7 +314,7 @@ object LegadoImport {
         // 文案要说清是哪个字段怎么降级的 —— 统一写「部分字段用脚本」会误导：
         // 支持的脚本（如 searchUrl）与不支持的脚本是两回事。
         val note = issues.takeIf { it.isNotEmpty() }?.joinToString("、")?.let { "以下字段未导入：$it" }
-        return Imported(name, rule, note)
+        return Imported(name, rule, note, declaredHttp = host.startsWith("http://"))
     }
 
     /**
@@ -319,7 +335,7 @@ object LegadoImport {
         // 骨架里还有域名样式的片段（含点、不含空格）
         if (skeleton.split('/', '?', '&').any { it.contains('.') && !it.contains(' ') }) return true
         // 相对路径（带或不带前导斜杠）＋主机已知，也算成立
-        return true
+        return skeleton.startsWith("/") || skeleton.isNotEmpty() && !skeleton.contains(' ')
     }
 
     /** legado 的 URL 选项。用具体类型，避免调用处到处强转。 */
@@ -572,4 +588,17 @@ fun Map<*, *>.getBool(key: String): Boolean? = when (val v = get(key)) {
     is Boolean -> v
     is String -> v.equals("true", true)
     else -> null
+}
+/**
+ * 打一条 error 日志，Android 上没有就静默跳过。
+ *
+ * 直接用 `android.util.Log` 会让纯 JVM 测试在类加载时抛 NoClassDefFoundError ——
+ * 而导入失败本来就是「测试里最容易走到」的路径。
+ */
+private fun debugLog(msg: String, t: Throwable) {
+    runCatching {
+        val log = Class.forName("android.util.Log")
+        log.getMethod("e", String::class.java, String::class.java, Throwable::class.java)
+            .invoke(null, "WatchDL", msg, t)
+    }
 }

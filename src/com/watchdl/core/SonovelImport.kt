@@ -21,13 +21,32 @@ object SonovelImport {
      * @param json 规则文件全文
      * @return 每项是「书源名 → 规则」，解析失败的源被跳过
      */
-    fun importAll(json: String): List<Pair<String, BookSourceRule>> {
-        val root = JsonParser.parse(json)
-        val arr = root as? List<*> ?: return emptyList()
-        return arr.mapNotNull { item ->
-            val m = item as? Map<*, *> ?: return@mapNotNull null
-            val name = m.getStr("name") ?: return@mapNotNull null
-            runCatching { importOne(m) }.getOrNull()?.let { name to it }
+    fun importAll(json: String): List<Pair<String, BookSourceRule>> =
+        importAllChecked(json).mapNotNull { (name, rule, _) -> rule?.let { name to it } }
+
+    /**
+     * 带问题说明的导入。
+     *
+     * 以前 `importAll` 静默 `mapNotNull` 掉三种情况：不是 map、没名字、`importOne` 抛异常。
+     * 用户看到一个「共 12 条 / 可用 9 条」的计数，却不知道那 3 条去哪了。
+     * 现在每条都给一句原因，界面按 issue 标 ⚠ 并展示。
+     */
+    fun importAllChecked(json: String): List<Triple<String, BookSourceRule?, String?>> {
+        val root = runCatching { JsonParser.parse(json) }.getOrNull() as? List<*> ?: return emptyList()
+        return root.mapIndexedNotNull { idx, item ->
+            val m = item as? Map<*, *>
+                ?: return@mapIndexedNotNull Triple("第 ${idx + 1} 条", null, "不是对象，已跳过")
+            val name = m.getStr("name")?.takeIf { it.isNotBlank() }
+                ?: return@mapIndexedNotNull Triple("第 ${idx + 1} 条", null, "缺 name 字段")
+            val r = runCatching { importOne(m) }
+                .getOrElse { return@mapIndexedNotNull Triple(name, null, "转换失败：${it.message ?: it::class.simpleName}") }
+            // 转换不抛异常，但关键字段空着，导入进来也是个搜不出东西的空壳。
+            val missing = buildList {
+                if (r.host.isBlank()) add("url")
+                if (r.search.url.isEmpty() && r.search.name.selector.isEmpty()) add("search")
+                if (r.toc.link.selector.isEmpty()) add("toc.item")
+            }
+            Triple(name, r, if (missing.isEmpty()) null else "缺字段：${missing.joinToString("、")}")
         }
     }
 

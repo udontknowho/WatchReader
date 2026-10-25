@@ -136,6 +136,16 @@ fun main() {
         com.watchdl.core.FieldRule("@{{$.nope}}").eval(authorJson).isEmpty(),
         com.watchdl.core.FieldRule("@{{$.nope}}").eval(authorJson).toString())
 
+    println("[TinyJson] 嵌套路径定位数组（回归：不能命中同名键）")
+    // 页面 SSR 真实的形态：前面还有一段无关的 {"total":0}，然后是 "rank":{...}。
+    // 以前 arrayField 拿值段文本再 indexOf 回位置，会认错数组。
+    val ssr = """{"rank":{"serverRendered":true,"book_list":[""" +
+        """{"bookId":"1","bookName":"甲"},{"bookId":"2","bookName":"乙"}]},"tail":{"total":0}}"""
+    check("嵌套路径取到两个", TinyJson.arrayField(ssr, "rank.book_list", "bookId") == listOf("1", "2"),
+        "实际 " + TinyJson.arrayField(ssr, "rank.book_list", "bookId"))
+    check("同名键不串位", TinyJson.arrayField(ssr, "rank.book_list", "bookName") == listOf("甲", "乙"),
+        "实际 " + TinyJson.arrayField(ssr, "rank.book_list", "bookName"))
+
     println("[JobStore] 取消落盘")
     val tmp = java.io.File(System.getProperty("java.io.tmpdir"), "jobstore-cancel-test")
     tmp.deleteRecursively(); tmp.mkdirs()

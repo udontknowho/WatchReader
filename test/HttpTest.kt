@@ -1,6 +1,8 @@
 import com.watchdl.core.*
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.KeyStore
 
 private val count = java.util.concurrent.atomic.AtomicInteger(0)
 
@@ -85,6 +87,101 @@ fun main() {
     }
     server.start()
 
+    // ══════ 明文源（M7）：同 host 先探 https ══════
+    //
+    // 这里要**在一切 https 请求之前**换掉信任库：探测代码不加信任例外，
+    // 只能让 JVM 真的信任 test/ssl 里那张自签证书。
+    val oldTrust = System.getProperty("javax.net.ssl.trustStore")
+    val oldPass = System.getProperty("javax.net.ssl.trustStorePassword")
+    val trustFile = makeTempTrustStore()
+    System.setProperty("javax.net.ssl.trustStore", trustFile.absolutePath)
+    System.setProperty("javax.net.ssl.trustStorePassword", "changeit")
+
+    // 在 127.0.0.1 上同时开 http 与 https 两个端口，两者的响应正文不同：
+    // 正文能直接说明**实际走了哪个方案**，不用猜。
+    val ks = KeyStore.getInstance("PKCS12")
+    ks.load(File("test/ssl/probe.p12").inputStream(), "changeit".toCharArray())
+    val tls = javax.net.ssl.SSLContext.getInstance("TLS").apply {
+        init(javax.net.ssl.KeyManagerFactory
+                .getInstance(javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm())
+                .apply { init(ks, "changeit".toCharArray()) }.keyManagers,
+            null, null)
+    }
+    val https = com.sun.net.httpserver.HttpsServer.create(
+        java.net.InetSocketAddress("127.0.0.1", 0), 0)
+    https.httpsConfigurator = com.sun.net.httpserver.HttpsConfigurator(tls)
+    val httpsHits = java.util.concurrent.atomic.AtomicInteger(0)
+    https.createContext("/ok") { ex ->
+        httpsHits.incrementAndGet()
+        val b = "HTTPS-SIDE".toByteArray(Charsets.UTF_8)
+        ex.sendResponseHeaders(200, b.size.toLong()); ex.responseBody.write(b); ex.close()
+    }
+    https.createContext("/r301") { ex ->
+        ex.responseHeaders.add("Location", "https://127.0.0.1:${https.address.port}/ok")
+        ex.sendResponseHeaders(301, -1); ex.close()
+    }
+    https.start()
+    httpsHits.set(0)
+
+    try {
+        println("[Http] 明文源：https 可用时选 https")
+        // 端口不同 → host 键不同（含端口），所以每个场景都要自己一份缓存。
+        Http.resetProbeCache()
+        val okHttps = "http://127.0.0.1:${https.address.port}/ok"
+        val r1 = Http.fetch(okHttps)
+        check("正文来自 https 端口", r1.body == "HTTPS-SIDE", r1.body)
+        check("最终 URL 改成 https", r1.finalUrl.startsWith("https://"), r1.finalUrl)
+
+        println("[Http] 明文源：缓存生效，不重复探测")
+        // 探测打的是根路径 `/`，不计入 `/ok` 的计数器；所以这里只有 1 次取数。
+        // 探测次数靠下一行「后续不再探测」间接验：若每轮都探，新增会 >2。
+        val hitsAfterFirst = httpsHits.get()
+        check("首轮只取数 1 次（探测走根路径不计数）", hitsAfterFirst == 1, "实际 $hitsAfterFirst")
+        Http.fetch(okHttps); Http.fetch(okHttps)
+        check("后续不再探测（每次只多 1 次取数）", httpsHits.get() == hitsAfterFirst + 2,
+            "实际 ${httpsHits.get() - hitsAfterFirst} 次新增")
+        check("host 未被记为明文", !Http.isCleartextHost("127.0.0.1:${https.address.port}"))
+
+        println("[Http] 明文源：https 不可用时回落 http")
+        Http.resetProbeCache()
+        // 原来的 http 服务器**没有** TLS 监听，https 探过去必失败。
+        val plain = "$base/ok"
+        val r2 = Http.fetch(plain)
+        check("正文仍来自原 http", r2.body.contains("你好 Hello"), r2.body)
+        check("host 记为明文", Http.isCleartextHost("127.0.0.1:$port"))
+        check("明文快照含该 host", Http.cleartextHosts().contains("127.0.0.1:$port"),
+            Http.cleartextHosts().toString())
+        // 回落路径也要缓存：否则每个章节都白等一次探测超时。
+        val t0 = System.currentTimeMillis()
+        repeat(2) { Http.fetch(plain) }
+        check("回落结论被缓存（两次取数 <1s）", System.currentTimeMillis() - t0 < 1_000,
+            "耗时 ${System.currentTimeMillis() - t0}ms")
+
+        println("[Http] 明文源：重定向到 https 仍正常")
+        Http.resetProbeCache()
+        val r3 = Http.fetch("https://127.0.0.1:${https.address.port}/r301")
+        check("跨协议重定向回归未被破坏", r3.body == "HTTPS-SIDE", r3.body)
+
+        println("[Http] 明文源：probe=false 完全不碰 https")
+        Http.resetProbeCache()
+        val before = httpsHits.get()
+        // 该端口只有 TLS，纯 http 过去拿不到正常响应 —— 抛异常也是预期结果，
+        // 关键只是**没有**再打 https。以前这里断言 r4.code，异常没接住，
+        // 整个自检进程被 SocketException 打断，后面的测试全部不跑了。
+        val r4 = runCatching { Http.fetch("http://127.0.0.1:${https.address.port}/ok", probe = false) }
+        check("没触发 https 请求", httpsHits.get() == before, "新增 ${httpsHits.get() - before}")
+        check("probe=false 时不写缓存", !Http.isCleartextHost("127.0.0.1:${https.address.port}"))
+        check("纯 http 打 TLS 端口会失败或返回非 200",
+            r4.getOrNull()?.let { it.code != 200 } ?: true, r4.exceptionOrNull()?.toString() ?: "")
+    } finally {
+        https.stop(0)
+        if (oldTrust == null) System.clearProperty("javax.net.ssl.trustStore")
+        else System.setProperty("javax.net.ssl.trustStore", oldTrust)
+        if (oldPass == null) System.clearProperty("javax.net.ssl.trustStorePassword")
+        else System.setProperty("javax.net.ssl.trustStorePassword", oldPass)
+        trustFile.delete()
+    }
+
     try {
         println("[Http] 基本取数")
         val r = Http.fetch("$base/ok")
@@ -141,4 +238,38 @@ fun main() {
     }
 
     if (failures == 0) println("\n全部通过") else { println("\n失败 $failures 项"); kotlin.system.exitProcess(1) }
+}
+
+/**
+ * 自签证书的 TLS 上下文，只给自检用。私钥与证书就在 `test/ssl/`，不是秘密。
+ *
+ * 探测代码（[Http.probeHttps]）**没有任何信任例外**：它和线上一样走系统信任链，
+ * 而这条链在 JVM 里就是 <java.home>/lib/security/cacerts。所以要在运行测试的
+ * JVM 里临时把一个 trustStore 指向“出厂 CA + 这张自签证书”的副本。
+ * 不改探测代码来让测试变绿，也不引入 BouncyCastle —— 这是 JDK 自带的机制。
+ */
+private fun makeTempTrustStore(): File {
+    val pass = "changeit".toCharArray()
+    val ks = java.security.KeyStore.getInstance("PKCS12")
+    ks.load(File("test/ssl/probe.p12").inputStream(), pass)
+    val cf = java.security.cert.CertificateFactory.getInstance("X.509")
+    val cert = File("test/ssl/probe.crt").inputStream().use { cf.generateCertificate(it) }
+
+    // 出厂 CA 从这里抄过来：探测的失败用例（TLS 端口不回包）不依赖它，
+    // 但不抄的话任何真实 https 都会验证失败，以后加联网用例会集体假红。
+    val out = java.security.KeyStore.getInstance(java.security.KeyStore.getDefaultType())
+    out.load(null, null)
+    val bundled = File(System.getProperty("java.home"), "lib/security/cacerts")
+    if (bundled.canRead()) {
+        val src = java.security.KeyStore.getInstance(java.security.KeyStore.getDefaultType())
+        bundled.inputStream().use { src.load(it, "changeit".toCharArray()) }
+        for (a in src.aliases()) {
+            runCatching { out.setCertificateEntry(a, src.getCertificate(a)) }
+        }
+    }
+    out.setCertificateEntry("probe", cert)
+    val f = File(System.getProperty("java.io.tmpdir"), "wr-probe-ts-${ProcessHandle.current().pid()}.jks")
+    f.deleteOnExit()
+    f.outputStream().use { out.store(it, pass) }
+    return f
 }

@@ -18,8 +18,8 @@ object RankSource {
 
     private const val FQ_HOST = "https://fanqienovel.com"
 
-    /** 起点榜单代号。用不了的 `newsignlist` 不列进来。 */
-    val QIDIAN_BOARDS = listOf("yuepiaolist" to "月票榜", "hotsaleslist" to "畅销榜")
+    /** 起点榜单代号。2026-10-24 逐个实测，其余代号一律 404。 */
+    val QIDIAN_BOARDS = RankConfig.QIDIAN_BOARDS
 
     /**
      * 按云端配置里的 [RankConfig.Rank] 取一页。
@@ -32,9 +32,13 @@ object RankSource {
         page: Int,
         /** 本批的绝对死线。三处必须共用同一个起点，否则 3 次重试各自计时。 */
         deadline: Long = System.currentTimeMillis() + PAGE_BUDGET_MS,
+        /** 字体还原器，只有番茄分类榜用得上；其它榜忽略。 */
+        decoder: CharsetFontDecoder? = null,
     ): List<BookHit> = when (rank.kind) {
         RankConfig.Kind.FANQIE -> fanqie(deadline)
         RankConfig.Kind.FANQIE_UPDATE -> fanqieUpdate(page, deadline)
+        // 番茄分类 ID 男女频不通用，以榜单自身绑定的频道为准，不信调用方传的值。
+        RankConfig.Kind.FANQIE_RANK -> fanqieRank(rank, deadline, decoder)
         RankConfig.Kind.QIDIAN -> qidian(rank.board, gender, page, deadline)
     }
 
@@ -49,7 +53,72 @@ object RankSource {
     /** 番茄更新榜每页 20 条，服务端 `total` 固定 100，即 5 页。 */
     const val FQ_UPDATE_PAGE = 20
 
-    // ── 番茄 ──────────────────────────────────────────────
+    // ── 番茄分类榜 ─────────────────────────────────────
+    /**
+     * 番茄分类榜：男频/女频 × 阅读榜/新书榜 × 分类，各 10 本，不可翻页。
+     *
+     * 10 条是服务端上限：SSR 里只有 `book_list` 一个数组，`?page=`、`?pageNum=`
+     * 均返回同一批书。想要更多只能换榜（同分类的阅读/新书两份加起来 20 本）。
+     *
+     * **必须走页面 SSR，不要碰 `/api/rank/category/list`** —— 那个接口要登录态，
+     * 任何参数组合都返空数组。而同一个页面渲染出来的 `__INITIAL_STATE__.rank.book_list`
+     * 是完整的，条件是 UA 为桌面版：移动 UA 拿到的是 `serverRendered:false` 空壳。
+     *
+     * 书名/作者含私用区字符，用 [CharsetFontDecoder] 还原。
+     */
+    fun fanqieRank(
+        rank: RankConfig.Rank,
+        deadline: Long = System.currentTimeMillis() + PAGE_BUDGET_MS,
+        decoder: CharsetFontDecoder? = null,
+    ): List<BookHit> = retry(deadline) {
+        val g = if (rank.gender == RankConfig.Gender.FEMALE) 0 else 1
+        val url = "$FQ_HOST/rank/${g}_${rank.rankType}_${rank.category}"
+        val html = Http.fetchRaw(
+            url, "GET", null, null, emptyMap(), UA, timeoutMs = left(deadline),
+        ).let { String(it.bytes, Charsets.UTF_8) }
+
+        // 页面里是 `...,"loading":true},"rank":{...}`，rank 前一字符是逗号，
+        // 不是合法 JSON 起点。补个 `{` 把它包成根对象，就能用嵌套路径了。
+        val at = html.indexOf("\"rank\":{")
+        require(at >= 0) { "榜单页没吐 SSR 数据（UA 不是桌面版？）" }
+        val body = "{" + html.substring(at)
+        // 空表时 decode 是恒等变换，所以拿不到字符表也不会把书名抹掉，只是带私用区字符。
+        val dec = decoder ?: EMPTY_DECODER
+
+        fun field(k: String) = TinyJson.arrayField(body, "rank.book_list", k)
+        val ids = field("bookId")
+        val names = field("bookName")
+        val authors = field("author")
+        val abstracts = field("abstract")
+        val covers = field("thumbUri")
+        val words = field("wordNumber")
+        val pos = field("currentPos")
+        val lastCh = field("lastChapterTitle")
+
+        ids.mapIndexed { i, id ->
+            val word = words.getOrNull(i).orEmpty().toIntOrNull()
+            val p = pos.getOrNull(i).orEmpty()
+            BookHit(
+                bookId = id,
+                name = dec.decode(names.getOrNull(i) ?: ""),
+                author = dec.decode(authors.getOrNull(i) ?: ""),
+                abstractText = dec.decode(abstracts.getOrNull(i) ?: ""),
+                sourceName = "番茄",
+                cover = covers.getOrNull(i).orEmpty(),
+                extra = listOf(
+                    p.takeIf { it.isNotBlank() }?.let { "第${it}名" },
+                    word?.takeIf { it > 0 }?.let { "${it / 10_000}万字" },
+                    lastCh.getOrNull(i)?.takeIf { it.isNotBlank() }
+                        ?.let { dec.decode(it) },
+                ).filterNotNull().joinToString(" · "),
+            )
+        }.filter { it.name.isNotBlank() }
+    }
+
+    /** 拿不到字符表时的空解码器（恒等变换）。 */
+    private val EMPTY_DECODER = CharsetFontDecoder(emptyList())
+
+    // ── 番茄推荐/更新 ──────────────────────────────────
     /**
      * 番茄推荐榜，固定 9 条、不可翻页。
      *

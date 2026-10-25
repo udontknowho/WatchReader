@@ -55,9 +55,15 @@ class JobStore(private val root: File) {
             val snapshot = if (isCancelled() || (!resume() && TinyJson.path(readJob(bookId) ?: "", "state") == "CANCELLED"))
                 setState(json, JobState.CANCELLED) else json
             val tmp = File(dirOf(bookId), "job.json.tmp")
-            tmp.writeText(snapshot)
+            // 先 fsync 再改名：只 writeText 的话数据还在页缓存里，改名后再断电就是零字节文件。
+            java.io.RandomAccessFile(tmp, "rw").use { raf ->
+                raf.setLength(0)
+                raf.write(snapshot.toByteArray(Charsets.UTF_8))
+                raf.fd.sync()
+            }
             val dst = jobFile(bookId)
-            if (dst.exists()) dst.delete()
+            // 不要先 delete：Linux 的 rename 本身是原子替换，删了反而造出
+            // 「真文件已不存在」的窗口（每章一次，3000 章就是 3000 次机会）。
             if (!tmp.renameTo(dst)) {
                 // rename 失败时退化为直写，宁可慢也不要丢状态
                 dst.writeText(snapshot)
@@ -78,10 +84,13 @@ class JobStore(private val root: File) {
      * 直接就是把整个 Activity 崩掉 —— 用户看到的就是「下载时闪退」。
      */
     fun readJob(bookId: String): String? {
-        // 读也要进同一把锁：writeJob 是 delete + rename，中间那段文件不存在，
-        // 并发读会返回 null，界面闪一下「作业不存在」，或者读到空串。
+        // 读也要进同一把锁：writeJob 是写 tmp + rename，并发读可能落在改名前后。
+        // 主文件不在时回退读 tmp —— 进程正好死在 rename 前，数据还在 tmp 里。
         return synchronized(lockFor(bookId)) {
-            runCatching { jobFile(bookId).takeIf { it.isFile }?.readText() }.getOrNull()
+            runCatching {
+                jobFile(bookId).takeIf { it.isFile }?.readText()
+                    ?: File(dirOf(bookId), "job.json.tmp").takeIf { it.isFile }?.readText()
+            }.getOrNull()
         }
     }
 

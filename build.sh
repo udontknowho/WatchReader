@@ -23,6 +23,11 @@ TARGET_SDK=34
 APP_VERSION="${APP_VERSION:-1.3.7}"
 APP_VERSION_CODE="${APP_VERSION_CODE:-20}"
 
+# kotlinc 读 JAVA_OPTS（$PREFIX/bin/kotlinc 只在未设置时用默认 -Xmx512M）。
+# 本机内存被系统压到只剩几百兆，编译峰值必须自己封顶：串行 GC 不占并发 GC 线程池，
+# 堆 / 元空间 / 代码缓存都显式给上限，避免一次编译把 Termux 自己拖进被杀名单。
+export JAVA_OPTS="${JAVA_OPTS:--Xmx384m -Xms64m -XX:+UseSerialGC -XX:MaxMetaspaceSize=320m -XX:ReservedCodeCacheSize=48m}"
+
 STDLIB="$KOTLIN_LIB/kotlin-stdlib.jar"
 [ -f "$STDLIB" ] || STDLIB="$(ls "$KOTLIN_LIB"/kotlin-stdlib-*.jar 2>/dev/null | grep -v sources | head -1)"
 
@@ -38,6 +43,22 @@ die() { echo "错误：$*" >&2; exit 1; }
 
 [ -f "$JAR" ] || die "找不到 android.jar：$JAR"
 [ -f "$STDLIB" ] || die "找不到 kotlin-stdlib.jar（在 $KOTLIN_LIB）"
+
+# ---- 闸一：同一时间只跑一个构建 ----
+# 两个 kotlinc 并发就是 700MB×2、4 核×2，本机直接越线。
+exec 9>"${TMPDIR:-/tmp}/watchreader-build.lock"
+if ! flock -w "${LOCK_WAIT:-300}" 9; then
+  die "另一个构建还在跑，本次放弃（等满 ${LOCK_WAIT:-300} 秒）"
+fi
+
+# ---- 闸二：可用内存不够就不开编 ----
+# 编译峰值约 700MB。越线会触发系统杀进程，连 Termux 一起死。
+# 看 MemAvailable（含可回收缓存），不看 MemFree。
+AVAIL_MB=$(( $(awk '/^MemAvailable:/{print $2}' /proc/meminfo) / 1024 ))
+MIN_AVAIL_MB="${MIN_AVAIL_MB:-1536}"
+if [ "$AVAIL_MB" -lt "$MIN_AVAIL_MB" ] && [ "${WATCH_FORCE:-0}" != "1" ]; then
+  die "可用内存只剩 ${AVAIL_MB}MB（要求 ≥${MIN_AVAIL_MB}MB）。先清后台大应用；确实要编就 WATCH_FORCE=1 bash build.sh …"
+fi
 
 run_kotlinc() {
   local nl="$1"; shift
@@ -142,8 +163,15 @@ if [ "${1:-}" = "test" ]; then
   run_kotlinc "$OUT/test.jar" \
     $(find "$ROOT/src/com/watchdl/core" -name '*.kt') \
     $(find "$ROOT/test" -name "*.kt")
+
+  # UI 层（MainActivity 等）不进 JVM 自检 —— 它们依赖 Android 框架，跑不起来。
+  # 但**必须至少编译一遍**：否则 src/com/watchdl/*.kt 里的类型错误
+  # （改了函数签名却漏改调用点之类）测试全绿也发现不了，要到打包才爆。
+  echo "== 编译 UI 层（只校验，不运行） =="
+  run_kotlinc "$OUT/uicheck.jar" $(find "$ROOT/src" -name '*.kt')
+  rm -f "$OUT/uicheck.jar"
   echo "== 运行 =="
-  for t in CoreTest ChapterOrderTest CloudSourceTest DownloadTest EngineTest HttpTest P0RegressionTest FinishTest SignTest RankConfigTest RotationTest AsyncGuardTest NavProgressTest JobLockTest com.watchdl.core.RuleBoundaryTest TocBudgetTest TextSelectorTest LegadoDefaultTest; do
+  for t in CoreTest ChapterOrderTest CloudSourceTest DownloadTest EngineTest HttpTest P0RegressionTest FinishTest SignTest RankConfigTest RotationTest AsyncGuardTest NavProgressTest JobLockTest com.watchdl.core.RuleBoundaryTest TocBudgetTest TextSelectorTest LegadoDefaultTest DevLogTest; do
     echo "--- $t ---"
     CHARSET_JSON="${CHARSET_JSON:-$HOME/novel/sources/fanqie-booksource/charset.json}" \
       SONOVEL_RULES="${SONOVEL_RULES:-$HOME/novel/sonovel/rules/main.json}" \

@@ -16,6 +16,13 @@ import android.widget.TextView
  */
 object Widgets {
 
+    /** ScrollView 能滚到的最大 Y。内容比视口短时为 0。 */
+    private fun maxScrollOf(sv: ScrollView): Int {
+        val child = sv.getChildAt(0) ?: return 0
+        return (child.height - sv.height + sv.paddingTop + sv.paddingBottom).coerceAtLeast(0)
+    }
+
+
     /** 应用栏。36dp 高，左返回 / 标题 / 右侧动作。 */
     fun topBar(
         ctx: Context,
@@ -57,6 +64,72 @@ object Widgets {
         }
         bar.layoutParams = Md3.lpDp(ctx, null, Md3.SEARCH).apply { bottomMargin = Md3.dp(ctx, Md3.GAP) }
         return bar
+    }
+
+    /**
+     * 一行「标签 + 当前值 + 滑杆」。
+     *
+     * 档位式选项（小/中/大）粒度太粗，字号差一档就过大。滑杆给连续值。
+     * [steps] 为 0 表示无级。
+     */
+    fun sliderRow(
+        ctx: Context,
+        label: String,
+        min: Float,
+        max: Float,
+        value: Float,
+        steps: Int = 0,
+        fmt: (Float) -> String,
+        onChange: (Float) -> Unit,
+    ): LinearLayout = sliderRow(ctx, label, min, max, value, steps, fmt, onChange, null)
+
+    fun sliderRow(
+        ctx: Context,
+        label: String,
+        min: Float,
+        max: Float,
+        value: Float,
+        steps: Int,
+        fmt: (Float) -> String,
+        onChange: (Float) -> Unit,
+        lp: LinearLayout.LayoutParams?,
+    ): LinearLayout {
+        val row = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        val head = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        head.addView(Md3.text(ctx, label, Md3.FS_SM, Md3.onSurfaceVariant),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val valText = Md3.text(ctx, fmt(value), Md3.FS_SM, Md3.primary)
+        head.addView(valText)
+        row.addView(head)
+
+        val bar = android.widget.SeekBar(ctx).apply {
+            this.max = ((max - min) * 100).toInt()
+            progress = ((value - min) * 100).toInt()
+            if (steps > 0) {
+                // SeekBar 的 keyProgressIncrement 只在触屏上按步进吸附；
+                // 这里靠 onChange 自己取整，避免两套吸附逻辑打架。
+                keyProgressIncrement = (((max - min) * 100 / steps).toInt()).coerceAtLeast(1)
+            }
+            setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: android.widget.SeekBar?, p: Int, fromUser: Boolean) {
+                    val raw = min + p / 100f
+                    val v = if (steps > 0) {
+                        // 按步取整，保证落到合法档位
+                        val q = Math.round((raw - min) / ((max - min) / steps))
+                        min + q * ((max - min) / steps)
+                    } else raw
+                    valText.text = fmt(v)
+                    if (fromUser) onChange(v)
+                }
+                override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
+                override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {}
+            })
+        }
+        row.addView(bar, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ))
+        if (lp != null) row.layoutParams = lp
+        return row
     }
 
     /** 分组标题。 */
@@ -314,7 +387,7 @@ object Widgets {
      * 滚动条显式打开并加粗：Android 默认在 2.0 density 下只有约 4px，
      * 手表上既看不见也够不着。
      */
-    fun scrollBody(ctx: Context): ScrollView =
+    fun scrollBody(ctx: Context, crownStep: Float = 60f, crownGlide: Int = 50): ScrollView =
         ScrollView(ctx).apply {
             isFillViewport = true
             setPadding(Md3.dp(ctx, Md3.PAD), 0, Md3.dp(ctx, Md3.PAD), Md3.dp(ctx, Md3.PAD))
@@ -324,16 +397,31 @@ object Widgets {
             // 画在内容内侧，否则会和页面边距一起被挤到屏外
             scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY
             // 表冠：ColorOS 把转动投成 ACTION_SCROLL，而 ScrollView 默认只认触摸。
-            // 一格通常只有 1 个单位，直接滚几乎看不见，这里放大到 60px 一档。
+            //
+            // 不能每来一格就 scrollBy：事件之间没有插值，转快了是「跳格子」，
+            // 看着不跟手。这里维护一个目标位置，每格把位移累加进目标，
+            // 再用 ValueAnimator 每帧逼近，手感连续，快转也不丢距离。
             // 方向键事件不用管：ScrollView 自身就会响应（实测 DPAD_DOWN 能滚）。
+            var crownTarget = 0f
+            var crownAnim: android.animation.ValueAnimator? = null
             setOnGenericMotionListener { v, e ->
-                if (e.action == android.view.MotionEvent.ACTION_SCROLL) {
-                    val dy = e.getAxisValue(android.view.MotionEvent.AXIS_VSCROLL)
-                    if (dy != 0f) {
-                        (v as ScrollView).scrollBy(0, (-dy * 60).toInt())
-                        true
-                    } else false
-                } else false
+                if (e.action != android.view.MotionEvent.ACTION_SCROLL) return@setOnGenericMotionListener false
+                val dy = e.getAxisValue(android.view.MotionEvent.AXIS_VSCROLL)
+                if (dy == 0f) return@setOnGenericMotionListener false
+                val sv = v as ScrollView
+                // 上一次动画还在跑时，crownTarget 已经是未到达的目标，不能重置，
+                // 否则快转时的位移会丢（表现为越转越不跟手）。
+                if (crownAnim?.isRunning != true) crownTarget = sv.scrollY.toFloat()
+                crownTarget = (crownTarget - dy * crownStep).coerceIn(0f, maxScrollOf(sv).toFloat())
+                crownAnim?.cancel()
+                crownAnim = android.animation.ValueAnimator.ofFloat(sv.scrollY.toFloat(), crownTarget).apply {
+                    // 追平时长：再短看着抖，再长有拖尾。由设置页给。
+                    duration = crownGlide.toLong()
+                    interpolator = android.view.animation.DecelerateInterpolator()
+                    addUpdateListener { a -> sv.scrollTo(0, (a.animatedValue as Float).toInt()) }
+                    start()
+                }
+                true
             }
             // 外层横向容器负责居中，内层 col 限宽
             val outer = Md3.row(ctx)

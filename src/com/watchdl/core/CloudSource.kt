@@ -177,11 +177,25 @@ object CloudSource {
         if (text.isBlank()) return Result(false, "下载到空内容")
 
         // ---- 3. 校验：必须能解析出书源 ----
+        // S16 起 importAll 不再对坏 JSON 抛异常，而是返回一条带 issue 的记录
+        //（界面要能告诉用户哪条坏了）。所以这里要把「整个文件解析失败」
+        // 单独识别出来，否则 404 页面也会被收下。
+        // 不能用「有没有 usable」：书源能否导入成功与云端包好坏无关，
+        // 以前就是这么放的，收紧会让本来能用的包被拒。
         val parsed = runCatching { LegadoImport.importAll(text) }.getOrElse { e ->
             return Result(false, "书源库解析失败：${e.message?.take(80)}")
         }
         if (parsed.isEmpty()) {
             return Result(false, "书源库解析出 0 条（多半拉到了 404 页面）")
+        }
+        // 整个文件级别的拒收（不是合法 JSON / 顶层不是数组）：只有这一条且它没有规则。
+        if (parsed.size == 1 && parsed[0].rule == null &&
+            parsed[0].name.startsWith("（整个文件）")) {
+            return Result(false, "书源库解析失败：${parsed[0].issue ?: "内容不是书源数组"}")
+        }
+        // 条条都缺必填字段（如全是 404 页面里的碎片），同样不能收。
+        if (parsed.all { it.rule == null && it.issue?.startsWith("缺 ") == true }) {
+            return Result(false, "书源库解析出 0 条可用源（多半拉到了 404 页面）")
         }
 
         // ---- 3b. 不降级（按条数） ----
