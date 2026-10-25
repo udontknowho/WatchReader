@@ -1,7 +1,7 @@
 /**
  * 「换一批源」的轮转推进自检。不碰网络 —— 只验纯算术，跟 UI 无关的部分。
  *
- * 复刻 `MainActivity.nextSourceBatch` 的公式。它以前是 `offset + step`，
+ * 调 `SourceRotation.next`（原 `MainActivity.nextSourceBatch` 的公式）。它以前是 `offset + step`，
  * 源总数不是 step 的整数倍时会周期重复（42 条源 × 15 一构：
  * 0→15→30→3→18→33→6→21→36→9…），有的源永远轮不到。
  * 改成余数后要注意「转满一圈」这个终止条件别丢。
@@ -14,13 +14,9 @@ fun main() {    var failures = 0
         if (ok) println("  ✓ $n") else { failures++; println("  ✗ $n  $d") }
     }
 
-    /** 与 MainActivity.nextSourceBatch 同一套算法：返回 null = 转满一圈。 */
-    fun next(offset: Int, step: Int, total: Int): Int? {
-        val s = step.coerceAtLeast(1)
-        if (total <= 0) return null
-        val n = (offset + s) % total
-        return if (n == 0) null else n
-    }
+    // 调真实现 SourceRotation.next。以前这里复刻一份公式再断言副本，
+    // 真实现改成任何样子都绿（N12）。
+    val next: (Int, Int, Int) -> Int? = { o, st, tot -> com.watchdl.core.SourceRotation.next(o, st, tot) }
 
     println("[换一批] 源总数是步长的整数倍")
     check("0 → 15", next(0, 15, 45) == 15)

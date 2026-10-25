@@ -75,14 +75,14 @@ fun main() {
     File(books, "export").mkdirs()
     File(books, "https:").mkdirs()
     val good = File(books, "goodbook").apply { mkdirs() }
-    File(good, "job.json").writeText("""{"name":"真书"}""")
+    File(good, "job.json").writeText("""{"bookId":"goodbook","name":"真书"}""")
 
-    val listed = books.listFiles()
-        ?.filter { it.isDirectory && File(it, "job.json").isFile }
-        ?.map { it.name } ?: emptyList()
-    check("只列出有 job.json 的", listed == listOf("goodbook"), listed.toString())
-    check("空目录被排除", "empty1" !in listed)
-    check("export 被排除", "export" !in listed)
+    // 调真实现 JobStore.listBooks。以前这里把 MainActivity 的过滤链复刻一遍
+    // 再断言副本，真实现改了测试照样绿（N12）。
+    val listed = JobStore(books).listBooks()
+    check("只列出有 job.json 的", listed.size == 1, listed.toString())
+    check("空目录被排除", listed.none { it.contains("empty1") }, listed.toString())
+    check("export 被排除", listed.none { it.contains("export") }, listed.toString())
 
     sourceRowsCheck()
     bad += assetsMustNotClobberCloudCheck()

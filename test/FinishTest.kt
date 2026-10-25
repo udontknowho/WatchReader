@@ -3,6 +3,7 @@
  */
 import com.watchdl.core.BookHit
 import com.watchdl.core.JobStore
+import com.watchdl.core.MatchScore
 import java.io.File
 
 fun main() {
@@ -40,18 +41,9 @@ fun main() {
 
     // ══════ 搜索排序：精确匹配排最前 ══════
     println("[score] 匹配度排序")
-    // score 是 MainActivity 的私有方法（依赖 Context），这里复刻同一套规则验证语义。
-    // 若两边规则要改，务必同时改，否则测试失去意义。
-    fun score(name: String, keyword: String): Int {
-        val n = name.trim(); val k = keyword.trim()
-        return when {
-            n == k -> 0
-            n.startsWith(k) -> 1
-            n.contains(k) -> 2
-            k.contains(n) -> 3
-            else -> 4
-        }
-    }
+    // 调真实现 MatchScore.of。以前这里复刻一份规则再断言副本，
+    // 真实现改成任何样子都绿（N12）。
+    val score: (String, String) -> Int = { n, k -> MatchScore.of(n, k) }
     val hits = listOf(
         BookHit("1", "斗破苍穹外传", "a", ""),
         BookHit("2", "剑来", "b", ""),
@@ -68,10 +60,18 @@ fun main() {
 
     // ══════ build.sh 不再无条件覆盖源库 ══════
     println("[build.sh] 不再覆盖已存在的源库")
-    val sh = File("/data/data/com.termux/files/home/WatchDownloader/build.sh").readText()
+    // 路径按 working dir 找，不写死绝对路径：仓库搬家或改名后
+    // 这里应该跳过，而不是抛 FileNotFoundException 把整个测试拖挂（N12）。
+    val shFile = File("build.sh").takeIf { it.isFile }
+        ?: File(System.getProperty("user.dir"), "build.sh")
+    if (!shFile.isFile) {
+        println("  - 找不到 build.sh，跳过（从仓库根目录运行测试才会检查）")
+    } else {
+    val sh = shFile.readText()
     check("没有无条件的 cp 覆盖",
         !sh.contains("[ -f \"\$ROOT/shareBookSource.json\" ] && cp"))
     check("改成只在缺失时初始化", sh.contains("[ ! -f \"\$ROOT/app/assets/sources/legado.json\" ]"))
+    }
 
     println(if (bad == 0) "收尾四项自检通过" else "收尾失败 $bad 项")
     if (bad > 0) kotlin.system.exitProcess(1)

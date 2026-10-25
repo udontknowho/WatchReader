@@ -554,17 +554,6 @@ class MainActivity : Activity() {
     }
 
     /** 匹配度打分，越小越靠前。 */
-    private fun score(name: String, keyword: String): Int {
-        val n = name.trim()
-        val k = keyword.trim()
-        return when {
-            n == k -> 0              // 书名就是关键词
-            n.startsWith(k) -> 1     // 关键词开头（《斗破苍穹》续集之类）
-            n.contains(k) -> 2       // 包含
-            k.contains(n) -> 3       // 书名是关键词的一部分（短名）
-            else -> 4                // 只靠作者命中，排最后
-        }
-    }
 
     /** ② 搜索结果。 */
     /**
@@ -573,15 +562,8 @@ class MainActivity : Activity() {
      * 只有 pool（含被 MAX_SOURCES 剔除的源）大于本轮用量时，换一批才能真正换出新源；
      * 否则转一圈回到原处，翻页就是白翻。
      */
-    private fun nextSourceBatch(h: Screen.Hits): Int? {
-        val step = h.searchedSources.coerceAtLeast(1)
-        val total = multi.searchable
-        // 余数：源总数不是本轮用量的整数倍时（如 42 条源 × 15 一构），
-        // 用 `offset + step` 会循环取同一批（0→15→30→3→18→33→6…重复），
-        // 有些源永远轮不到。
-        val next = (h.offset + step) % total
-        return if (next == 0) null else next
-    }
+    private fun nextSourceBatch(h: Screen.Hits): Int? =
+        SourceRotation.next(h.offset, h.searchedSources, multi.searchable)
 
     /**
      * 换一批时把已经看过的条目从新结果里剔掉。
@@ -616,7 +598,7 @@ class MainActivity : Activity() {
         val all = allHits.asSequence()
             .filter { it.name.isNotBlank() }
             .filter { replay || hitKey(it) !in seenHits }
-            .sortedWith(compareBy<BookHit> { score(it.name, keyword) }.thenBy { it.name.trim() })
+            .sortedWith(compareBy<BookHit> { MatchScore.of(it.name, keyword) }.thenBy { it.name.trim() })
             .toList()
         // 记下来，换一批时不再重复显示。
         if (!replay) all.forEach { seenHits += hitKey(it) }

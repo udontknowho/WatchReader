@@ -719,7 +719,13 @@ fun linkCheck() {
             if (url.endsWith("/t")) firstPage
             else "<ul class='ch'><li><a href='/x'>章</a></li></ul>"
         }
-        runCatching { eng.toc("https://m.example/t") }
+        // 以前这里 `runCatching { eng.toc(...) }` 把返回值和异常都丢掉，只断言
+        // hits <= 32。改坏分页解析让第一页就抛异常时 hits == 1，断言依旧成立 ——
+        // 这是「目录分页封顶」的唯一断言，却根本拦不住回归。
+        val r = runCatching { eng.toc("https://m.example/t") }
+        check("200 个后续页的目录能取成", r.isSuccess, r.exceptionOrNull()?.toString() ?: "")
+        check("分页后确实拿到了目录条目", r.getOrNull()?.chapters?.isNotEmpty() == true,
+            "章数 ${r.getOrNull()?.chapters?.size}")
         check("200 个后续页不会全请求", hits <= 32, "实际请求 $hits 次")
     }
     run {
