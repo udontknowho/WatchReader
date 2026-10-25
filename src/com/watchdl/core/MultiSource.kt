@@ -29,7 +29,12 @@ class MultiSource(
 ) : BookSource {
 
     /** 带名字的源。[name] 用于结果标注与失败统计。 */
-    data class NamedSource(val name: String, val source: BookSource)
+    /**
+     * [host] 只在重名时用来消歧。源库实测 88 组重名：
+     * `漫客栈` 同时有 `comic.mkzhan.com` 与 `www.mkzhan.com`，`酷我小说` 三条不同接口。
+     * 去掉装饰符后还会再撞（`" 绾书文学"` 与 `"绾书文学"`）。
+     */
+    data class NamedSource(val name: String, val source: BookSource, val host: String = "")
 
     /** 一次聚合搜索的结果。 */
     data class Result(
@@ -165,11 +170,7 @@ class MultiSource(
      * `"  ●QB  qq女榜"`。直接透传到界面会多出奇怪空白，而源名是用户
      * 选择「用哪个源下载」的唯一依据，必须能一眼读清。
      */
-    private fun tidySourceName(raw: String): String {
-        val s = raw.replace(Regex("\\s+"), " ").trim()
-        // 去掉开头的装饰符号（● ○ ◆ ◇ ■ ▲ ★ 等），保留字母数字中文
-        return s.trimStart { it in "●○◆◇■▲★☆◎※·•-—" }.trim()
-    }
+    private fun tidySourceName(raw: String): String = tidyName(raw)
 
     /**
      * 洗掉搜索结果的 HTML 痕迹。
@@ -195,15 +196,65 @@ class MultiSource(
     override fun content(itemId: String, bookId: String): String =
         throw UnsupportedOperationException("多源模式下需先确定来源源（见 pickFor）")
 
-    /** 按来源名找出能处理这本书的具体源。找不到返回 null。 */
+    /**
+     * 按来源名找出能处理这本书的具体源。找不到返回 null。
+     *
+     * 重名是常态（源库 88 组）。`sourceName` 里可以带 host 后缀（`漫客栈 @comic.mkzhan.com`），
+     * 带后缀时按 host 精确匹配，不带时退回按名字找第一条。
+     *
+     * 以前只按显示名 `firstOrNull`，于是选 B 站的书交给 A 站引擎取目录 →
+     * 空目录 → 报「取不到目录」。去掉装饰符后还会再撞。
+     */
     fun pickFor(hit: BookHit): BookSource? {
-        // 现在一条结果只对应一个源（不再拼 `甲/乙`），直接精确匹配。
-        // 仍保留按 `/` 拆分的兼容：旧作业或外部传入的拼接名还能用。
+        // 一条结果只对应一个源（不再拼 `甲/乙`），仍保留按 `/` 拆分的兼容：
+        // 旧作业或外部传入的拼接名还能用。
         val names = hit.sourceName.split('/').map { it.trim() }.filter { it.isNotEmpty() }
         if (names.isEmpty()) return null
         for (n in names) {
-            pool.firstOrNull { tidySourceName(it.name) == n || it.name == n }?.let { return it.source }
+            // 带 host 后缀：按 host 精确挑
+            val at = n.lastIndexOf(" @")
+            if (at > 0) {
+                val bare = n.substring(0, at).trim()
+                val h = n.substring(at + 2).trim()
+                fun bareHost(u: String) =
+                    u.removePrefix("https://").removePrefix("http://").trimEnd('/')
+                // 只看 host：显示名带了 `@host` 后缀，拿它和裸名比必然不等。
+                pool.firstOrNull { bareHost(it.host) == h }?.let { return it.source }
+                // 后缀对不上（源库更新过 host）时按裸名字再找一次
+                pool.firstOrNull { matchesName(it, bare) }?.let { return it.source }
+                continue
+            }
+            pool.firstOrNull { matchesName(it, n) }?.let { return it.source }
         }
         return null
+    }
+
+    /**
+     * 名字匹配。注册时重名源带了 `@host` 后缀，所以除了整名比较，
+     * 还要拿「后缀前那一段」比：否则旧作业里的裸名（`漫客栈`）找不到任何源，
+     * 换源重试直接退回番茄。
+     */
+    private fun matchesName(ns: NamedSource, n: String): Boolean {
+        if (tidySourceName(ns.name) == n || ns.name == n) return true
+        val at = ns.name.lastIndexOf(" @")
+        return at > 0 && tidySourceName(ns.name.substring(0, at)) == n
+    }
+
+
+    companion object {
+        /**
+         * 源名清洗。
+         *
+         * 书源自带的 `bookSourceName` 经常夹前后空格和装饰符号，例如
+         * `"  ●QB  qq女榜"`。直接透传到界面会多出奇怪空白，而源名是用户
+         * 选择「用哪个源下载」的唯一依据，必须能一眼读清。
+         *
+         * 同时用于注册时判重名：清洗后撞名的源要加 host 后缀（N7）。
+         */
+        fun tidyName(raw: String): String {
+            val s = raw.replace(Regex("\\s+"), " ").trim()
+            // 去掉开头的装饰符号（● ○ ◆ ◇ ■ ▲ ★ 等），保留字母数字中文
+            return s.trimStart { it in "●○◆◇■▲★☆◎※·•-—" }.trim()
+        }
     }
 }

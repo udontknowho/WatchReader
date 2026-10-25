@@ -695,6 +695,43 @@ fun linkCheck() {
         check("下一页指回自身时不无限循环", hits <= 2, "实际请求 $hits 次")
     }
 
+    // ── N7：重名源必须按 host 消歧 ──
+    println("[N7] 重名源")
+    run {
+        // 源库里 88 组重名。这里复刻 `漫客栈` 的两条不同接口。
+        class Fake(private val tag: String) : BookSource {
+            override fun search(keyword: String, page: Int): List<BookHit> =
+                listOf(BookHit(bookId = "id", name = "书", author = "a", abstractText = "", sourceName = tag))
+            override fun toc(bookId: String, name: String, author: String) =
+                BookInfo(bookId = bookId, name = name, author = author, chapters = emptyList())
+            override fun open(hit: BookHit) = toc(hit.bookId, hit.name, hit.author)
+            override fun content(itemId: String, bookId: String): String = "<$tag>"
+        }
+        val a = Fake("A")
+        val b = Fake("B")
+        val ms = MultiSource(emptyList(), pool = listOf(
+            MultiSource.NamedSource("漫客栈 @comic.mkzhan.com", a, "https://comic.mkzhan.com"),
+            MultiSource.NamedSource("漫客栈 @www.mkzhan.com", b, "https://www.mkzhan.com"),
+        ))
+
+        val hitB = BookHit(bookId = "x", name = "书", author = "a", abstractText = "",
+            sourceName = "漫客栈 @www.mkzhan.com")
+        check("按 host 选到 B 站", ms.pickFor(hitB) === b, ms.pickFor(hitB)?.content("", "") ?: "null")
+
+        val hitA = BookHit(bookId = "x", name = "书", author = "a", abstractText = "",
+            sourceName = "漫客栈 @comic.mkzhan.com")
+        check("按 host 选到 A 站", ms.pickFor(hitA) === a, ms.pickFor(hitA)?.content("", "") ?: "null")
+
+        // 不带后缀的旧作业仍能落地（按名字找第一条），不能直接崩
+        val legacy = BookHit(bookId = "x", name = "书", author = "a", abstractText = "", sourceName = "漫客栈")
+        check("旧作业按名字仍可解析", ms.pickFor(legacy) !== null, "null")
+
+        // 清洗规则本身
+        check("去装饰符", MultiSource.tidyName("  ●QB  qq女榜") == "QB qq女榜",
+            MultiSource.tidyName("  ●QB  qq女榜"))
+        check("空串安全", MultiSource.tidyName("") == "", MultiSource.tidyName(""))
+    }
+
     // ── N4：正文分页的相对链接要相对**当前页**，不是站点根 ──
     println("[N4] 正文分页 baseUrl")
     run {

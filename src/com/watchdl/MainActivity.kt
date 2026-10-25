@@ -52,15 +52,30 @@ class MainActivity : Activity() {
         // 按文件名排序：`listFiles()` 的顺序由文件系统决定，不保证稳定。
         // 下面 `take(MAX_SOURCES)` 取的是列表前几个，所以**文件顺序就是优先级**，
         // 不排序的话每次安装跑的可能都不是同一批源。
+        // 先收集规则，再统一分配显示名：重名要加 host 后缀，
+        // 否则 pickFor 只按名字找第一条，选 B 站的书会交给 A 站引擎取目录（N7，源库 88 组重名）。
+        val pending = mutableListOf<Triple<String, com.watchdl.core.BookSourceRule, String>>()
         sourceFiles(dir).forEach { f ->
             runCatching {
                 val text = f.readText()
                 if (text.contains("bookSourceName")) {
                     LegadoImport.importAll(text).forEach { im ->
-                        im.rule?.let { list += MultiSource.NamedSource(im.name, LegadoSource.of(it)) }
+                        im.rule?.let { pending += Triple(im.name, it, it.host) }
                     }
                 }
             }.onFailure { DevLog.log("WatchDL", "载入书源 ${f.name} 失败：${it.message}") }
+        }
+        val nameCount = pending.groupingBy { MultiSource.tidyName(it.first) }.eachCount()
+        val seen = mutableSetOf<String>()
+        for ((name, rule, host) in pending) {
+            val bare = MultiSource.tidyName(name)
+            val disambiguate = (nameCount[bare] ?: 0) > 1
+            val shown = if (disambiguate) {
+                val shortHost = host.removePrefix("https://").removePrefix("http://").trimEnd('/')
+                "$name @$shortHost"
+            } else name
+            if (!seen.add(MultiSource.tidyName(shown))) continue   // 同一 host 重复注册，留第一条
+            list += MultiSource.NamedSource(shown, LegadoSource.of(rule), host)
         }
         // 只搜前 MAX_SOURCES 个源。
         //
