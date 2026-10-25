@@ -532,18 +532,32 @@ data class BookSourceRule(
      * 以前这里不传，`{{$.bookId}}` 被 `Template` 当成未知变量换成空串，
      * URL 就变成 `?bookId=` —— 实测 5 条源 0ms 死在这里。
      */
-    fun expand(template: String, ctx: Map<String, String>, result: String? = null): String {
+    /**
+     * [base] 是拼相对路径的基准，默认站点根。
+     *
+     * 正文分页要传**当前页**地址：章节页 `/book/123/456.html` 的下一页若是
+     * `456_2.html`，用站点根会拼成 `/456_2.html`（404，或站点根返回 200 时
+     * 把首页文字拼进正文）。以前这里只会用站点根，调用方再传 base 也无效 ——
+     * 因为 expand 已经把相对链接绝对化了。
+     */
+    fun expand(
+        template: String,
+        ctx: Map<String, String>,
+        result: String? = null,
+        base: String? = null,
+    ): String {
         val withJson = result?.let { putJsonVars(template, it) } ?: template
         val rendered = Template.render(withJson, ctx) { code, env ->
             JsEngine.eval(jsLib?.let { "$it\n$code" } ?: code, env.copy(vars = env.vars.toMutableMap()))
         }
         if (rendered.isBlank()) return rendered
         if (rendered.startsWith("http://", true) || rendered.startsWith("https://", true)) return rendered
-        if (host.isEmpty()) return rendered
+        val origin = base?.substringBefore(',')?.trim().orEmpty()
+        if (origin.isEmpty() && host.isEmpty()) return rendered
         // 与 SourceEngine.absolute 保持一致：走 RFC 3986。
         // 默认 base 不补尾斜杠：`?p=20` 拼在 host 后应为 `https://x.com?p=20`（历史行为，
-        // EngineTest「分页算术」依赖它）。
-        val baseUrl = host.trimEnd('/')
+        // EngineTest「分页算术」依赖它）。传了当前页 base 时就走标准 URL 解析。
+        val baseUrl = if (origin.isNotEmpty()) origin else host.trimEnd('/')
         // `?` / `#` 开头：直接接在 base 后。走 URL 会补一个 `/`（变成 https://x/?p=20），
         // 与历史行为不符，「分页算术」用例依赖 https://x?p=20。
         if (rendered.startsWith("?") || rendered.startsWith("#")) return baseUrl + rendered

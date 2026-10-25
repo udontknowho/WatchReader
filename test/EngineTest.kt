@@ -695,6 +695,69 @@ fun linkCheck() {
         check("下一页指回自身时不无限循环", hits <= 2, "实际请求 $hits 次")
     }
 
+    // ── N4：正文分页的相对链接要相对**当前页**，不是站点根 ──
+    println("[N4] 正文分页 baseUrl")
+    run {
+        val reqs = mutableListOf<String>()
+        val eng = SourceEngine(BookSourceRule(
+            name = "pg", host = "https://p.example",
+            search = SearchRule(url = "/s", name = FieldRule.parse(""), link = FieldRule.parse("")),
+            toc = TocRule(url = "/t", name = FieldRule.parse(""), link = FieldRule.parse("")),
+            content = ContentRule(
+                url = "",
+                content = FieldRule.parse("#c"),
+                nextContentUrl = FieldRule.parse("a.next@href"),
+            ),
+        )) { url, _, _, _ ->
+            reqs += url
+            when {
+                // 章节页在 /book/123/ 下，下一页是相对链接
+                url.endsWith("/book/123/456.html") ->
+                    "<div id='c'>第一页</div><a class='next' href='456_2.html'>下一页</a>"
+                url.endsWith("/book/123/456_2.html") ->
+                    "<div id='c'>第二页</div>"
+                // 站点根被误请求时返回标记文本，便于断言「没去根」
+                else -> "<div id='c'>错</div>"
+            }
+        }
+        val body = eng.content("https://p.example/book/123/456.html")
+        check("第二页取到了", body.contains("第二页"), body.take(60))
+        check("第一页还在", body.contains("第一页"), body.take(60))
+        // 旧实现在这里请求 https://p.example/456_2.html
+        check("没有请求站点根下的 456_2.html",
+            reqs.none { it == "https://p.example/456_2.html" }, reqs.toString())
+        check("请求的是相对当前页的地址",
+            reqs.any { it == "https://p.example/book/123/456_2.html" }, reqs.toString())
+    }
+    run {
+        // 直接用 baseUrl 拼 href 的源（源库里有 12 条这种写法）。
+        // 这是 N4 位置二的原始触发条件：baseUrl 为空 → href 得空串。
+        val reqs = mutableListOf<String>()
+        val tocJs = """
+            <js>
+            var out = [{n: '第1章', u: baseUrl + '/c1'}];
+            out
+            </js>
+        """.trimIndent()
+        val eng = SourceEngine(BookSourceRule(
+            name = "usebase", host = "https://u.example",
+            search = SearchRule(url = "/s", name = FieldRule.parse(""), link = FieldRule.parse("")),
+            toc = TocRule(
+                url = "/book/7",
+                name = FieldRule.parse("\$\$.n"),
+                link = FieldRule.parse("\$\$.u"),
+                sourceList = FieldRule.parse(tocJs),
+            ),
+            content = ContentRule(url = "", content = FieldRule.parse("#c")),
+        )) { url, _, _, _ -> reqs += url; "<div id='c'>正文</div>" }
+        val info = runCatching { eng.toc("https://u.example/book/7") }
+        val hrefs = info.getOrNull()?.chapters?.map { it.itemId } ?: emptyList()
+        check("脚本用 baseUrl 拼出的 href 不是空串",
+            hrefs.isNotEmpty() && hrefs.none { it.isBlank() }, hrefs.toString())
+        check("baseUrl 是实际目录页地址（不是空串）",
+            hrefs.any { it.startsWith("https://u.example/book/7") }, hrefs.toString())
+    }
+
     // ── N5：正文选择器失效不能把整页 HTML 当正文存下 ──
     println("[N5] 正文取空时必须返空串，不返整页")
     run {

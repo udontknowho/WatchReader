@@ -263,7 +263,7 @@ class SourceEngine(
         // 取 `$.n` / `$.u` —— 这是 legado 的语义。
         // 以前名字和链接都拿整段响应求值，`$.n` 取不到，目录为空。
         // chapterList 是字符串列表（CSS / 带 @text 的脚本）时走旧路径，一个字符不改。
-        val items = tocItemScope(raw)
+        val items = tocItemScope(raw, url)
         val names: MutableList<String>
         val links: MutableList<String>
         val vols: MutableList<String>
@@ -365,12 +365,14 @@ class SourceEngine(
      * 判据：chapterList 规则是脚本，且它的结果解析出成 JSON 对象数组。
      * 字符串列表的源在这里拿到空表（TinyJson.objectItems 不认字符串数组）。
      */
-    private fun tocItemScope(raw: String): List<String>? {
+    private fun tocItemScope(raw: String, pageUrl: String): List<String>? {
         val lst = rule.toc.sourceList ?: return null
         // evalList 已经把脚本返回的数组摊平成元素（末尾的 TinyJson.allValues），
         // 所以这里拿到的是「每项一个对象的 JSON 原文」。再确认一遍都是对象 ——
         // 字符串数组（普通脚本目录）不是对象，照样返回 null 走旧路径。
-        val ev = evalList(raw, lst, "", rule.jsLib)
+        // N4：baseUrl 以前传空串。用 `baseUrl` 的纯 <js> 目录规则（源库里有 12 条）
+        // 会得到空 href，回退成目录页地址当章节链接，正文取到目录页。
+        val ev = evalList(raw, lst, pageUrl, rule.jsLib)
         if (ev.isEmpty() || ev.any { !it.trim().startsWith("{") }) return null
         return ev
     }
@@ -452,11 +454,18 @@ class SourceEngine(
         var curRaw = firstRaw
         var pages = 1
         while (pages < MAX_PAGES) {
-            // 链接相对当前页求值（legado 语义）。取不到就结束。
+            // 链接相对**当前页**求值（legado 语义）。取不到就结束。
             val next = runCatching { nextRule.eval(curRaw, jsLib = rule.jsLib).firstOrNull() }
                 .getOrNull()?.trim().orEmpty()
             if (next.isEmpty()) break
-            val nextUrl = absolute(rule.expand(next, mapOf("url" to firstUrl, "chapterUrl" to firstUrl)))
+            // N4：以前 expand 只用站点根做基准、absolute 又没传 base，
+            // 章节页 /book/123/456.html 的下一页若是相对链接 `456_2.html`，
+            // 就会拼成 /456_2.html 而 404（或更糟：站点根返回 200，首页文字被拼进正文）。
+            // 现在 expand 和 absolute 都用当前页 firstUrl 做基准。
+            val nextUrl = absolute(
+                rule.expand(next, mapOf("url" to firstUrl, "chapterUrl" to firstUrl), base = firstUrl),
+                base = firstUrl,
+            )
             if (nextUrl in visited) break          // 绕回自身，停
             visited += nextUrl
             val rawPage = runCatching {
