@@ -1231,7 +1231,14 @@ class MainActivity : Activity() {
             }
         }
 
-        if (sel == null) return
+        if (sel == null) {
+            // 还没选榜，屏上只有选择器：这正是后台拉云端配置的好时机。
+            // 拉到了且列表真变了就重画一次；没变就不动，不闪。
+            refreshRanks(Screen.Discover(site, gender, rankKey)) {
+                showDiscover(site, gender, rankKey)
+            }
+            return
+        }
 
         // 选中了榜：只拉这一个。
         col.addView(Widgets.sectionLabel(this, sel.name))
@@ -1322,12 +1329,41 @@ class MainActivity : Activity() {
      */
     private var rankCache: List<RankConfig.Rank>? = null
 
+    /** 云端刷新只跑一次；拉过了就不再重复问镜像。 */
+    private var rankRefreshed = false
+
+    /**
+     * 当前可用的榜单。**已缓存的纯内存读，首次也只读磁盘和内置表，都不联网。**
+     *
+     * 以前这里直接调 [RankConfig.load]，而 load 最坏串行问 4 个镜像、
+     * 总预算 20 秒。它在主线程被调 —— 点「发现榜单」就冻住十几秒，看着就是卡死。
+     * 现在联网的部分全交给 [refreshRanks] 在后台做。
+     */
     private fun discoverRanks(): List<RankConfig.Rank> {
         rankCache?.let { return it }
-        val got = RankConfig.load(File(filesDir, "sources")).first
+        val got = RankConfig.local(File(filesDir, "sources"))
         // 空表不缓存 —— 否则一次取数失败会让本次进程再也不重试。
         if (got.isNotEmpty()) rankCache = got
         return got
+    }
+
+    /**
+     * 后台拉一次云端配置；拉到了就重新渲染当前发现页。
+     *
+     * 只在榜选择器画完之后调，所以即使慢或失败也不影响用户先看到本地榜单。
+     * 重渲染前已经靠 [postAlive] 核过屏身份 —— 用户已经走了就不重画。
+     */
+    private fun refreshRanks(owner: Screen, rerender: () -> Unit) {
+        if (rankRefreshed) return
+        rankRefreshed = true
+        bg(owner, { RankConfig.load(File(filesDir, "sources")) }) { res ->
+            val got = res.getOrNull()?.first ?: return@bg
+            if (got.isEmpty()) return@bg
+            val before = rankCache
+            rankCache = got
+            // 内容没变就不重画，避免回到发现页时闪一下。
+            if (got != before) rerender()
+        }
     }
 
     private fun showMarket(page: Int, accumulated: List<YioveSource.Item>) {

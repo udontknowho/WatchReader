@@ -127,6 +127,16 @@ object RankConfig {
     val MIRRORS: List<String> get() = CloudSource.MIRRORS
 
     /**
+     * 只用本地数据取榜单：磁盘上的上次缓存，没有就内置表。**不联网。**
+     *
+     * 给主线程用。[load] 最坏要串行问 4 个镜像（总预算 20 秒），
+     * 放在主线程里就是点「发现榜单」直接冻住十几秒。
+     * 发现页先用这份立刻出画面，云端配置交给后台线程刷。
+     */
+    fun local(dir: File): List<Rank> =
+        readCachedVersioned(dir)?.second ?: BUILTIN
+
+    /**
      * 拉云端配置并落地。
      *
      * 任何一步失败都**不动本地文件**，退回上次缓存或内置清单 —— 发现页不能因为

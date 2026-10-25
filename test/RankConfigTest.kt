@@ -71,5 +71,30 @@ fun main() {
     check("番茄分类榜都带 category", fq.all { it.category > 0 })
     check("番茄分类榜都带频道", fq.all { it.gendered })
 
+    println("[RankConfig] local() 不联网也能立刻出榜单")
+    // 主线程只用 local()。它必须不依赖任何文件就返回内置表 ——
+    // 以前主线程直接调 load()，最坏串行问 4 个镜像共 20 秒，
+    // 点「发现榜单」整屏冻住，用户报的就是「卡死」。
+    run {
+        val emptyDir = java.io.File(
+            System.getProperty("java.io.tmpdir"), "rankcfg-empty-${System.nanoTime()}")
+        val started = System.currentTimeMillis()
+        val got = RankConfig.local(emptyDir)
+        val spent = System.currentTimeMillis() - started
+        check("空目录返回内置表", got.size == RankConfig.BUILTIN.size, "实际 ${got.size}")
+        check("不建目录也能读", !emptyDir.exists())
+        // 本地读不该接近任何网络超时。留 1 秒余量给慢设备。
+        check("耗时远低于网络超时", spent < 1_000, "实际 ${spent}ms")
+
+        // 有缓存时就该用缓存，不能一直退内置表。
+        emptyDir.mkdirs()
+        val cfg = java.io.File(emptyDir, "ranks.json")
+        cfg.writeText("""{"version":99,"ranks":[{"key":"only","name":"只有这一条","kind":"fanqie"}]}""")
+        val cached = RankConfig.local(emptyDir)
+        check("有缓存就用缓存", cached.size == 1 && cached[0].key == "only",
+            "实际 ${cached.map { it.key }}")
+        emptyDir.deleteRecursively()
+    }
+
     if (failures == 0) println("\n全部通过") else { println("\n失败 $failures 项"); kotlin.system.exitProcess(1) }
 }
