@@ -102,8 +102,10 @@ object RankConfig {
                 category = cat, rankType = type, gendered = true, gender = gender,
                 site = Site.FANQIE))
         }
-        for ((cat, name) in MALE_CATS) for (t in intArrayOf(2, 1)) fq(cat, name, Gender.MALE, t)
-        for ((cat, name) in FEMALE_CATS) for (t in intArrayOf(2, 1)) fq(cat, name, Gender.FEMALE, t)
+        // 只出「阅读」榜（type=2）。番茄的「新书」榜（type=1）全是刚发几章的新书，
+        // 点进去多数取不到正文 —— 用户要求去掉。要恢复就把它加回这两个数组。
+        for ((cat, name) in MALE_CATS) fq(cat, name, Gender.MALE, 2)
+        for ((cat, name) in FEMALE_CATS) fq(cat, name, Gender.FEMALE, 2)
         for ((board, name) in QIDIAN_BOARDS) {
             add(Rank("qd:$board", "起点$name", Kind.QIDIAN, board = board, pages = 10,
                 gendered = true, site = Site.QIDIAN))
@@ -239,6 +241,10 @@ object RankConfig {
             if (kind == Kind.QIDIAN && board.isBlank()) continue
             val category = TinyJson.path(obj, "category")?.toDoubleOrNull()?.toInt() ?: 0
             if (kind == Kind.FANQIE_RANK && category == 0) continue
+            // 番茄「新书」榜（rankType=1）已从产品中移除，云端配置下发也要挡掉，
+            // 否则下发的 26 条新书榜会把它们加回来。
+            if (kind == Kind.FANQIE_RANK &&
+                TinyJson.path(obj, "rankType")?.toDoubleOrNull()?.toInt() == 1) continue
             out.add(
                 Rank(
                     key = key,

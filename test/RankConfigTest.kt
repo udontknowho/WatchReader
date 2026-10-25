@@ -50,21 +50,24 @@ fun main() {
         .all { it.board.isNotBlank() })
 
     println("[RankConfig] 全量榜单")
-    // 番茄 26 个分类 × 阅读/新书 = 52；起点 5 个。这组数是 2026-10-24 实测的范围，
+    // 番茄 26 个分类 × 只留阅读榜 = 26；起点 5 个。这组数是 2026-10-24 实测的范围，
     // 少一个说明分类表写漏了。
+    // 2026-10-25：番茄「新书」榜（rankType=1）已按用户要求移除，所以不再是 52。
     val fq = RankConfig.BUILTIN.filter { it.kind == RankConfig.Kind.FANQIE_RANK }
-    check("番茄分类榜 52 个", fq.size == 52, "实际 ${fq.size}")
-    check("男频 19 类 × 2", fq.count { it.gender == RankConfig.Gender.MALE } == 38,
+    check("番茄分类榜 26 个", fq.size == 26, "实际 ${fq.size}")
+    check("男频 19 类", fq.count { it.gender == RankConfig.Gender.MALE } == 19,
         "实际 ${fq.count { it.gender == RankConfig.Gender.MALE }}")
-    check("女频 7 类 × 2", fq.count { it.gender == RankConfig.Gender.FEMALE } == 14,
+    check("女频 7 类", fq.count { it.gender == RankConfig.Gender.FEMALE } == 7,
         "实际 ${fq.count { it.gender == RankConfig.Gender.FEMALE }}")
     check("起点 5 个榜",
         RankConfig.BUILTIN.count { it.site == RankConfig.Site.QIDIAN } == 5,
         "实际 ${RankConfig.BUILTIN.count { it.site == RankConfig.Site.QIDIAN }}")
     check("key 不重复", RankConfig.BUILTIN.map { it.key }.toSet().size == RankConfig.BUILTIN.size)
-    // 同（站点, 频道, 分类）下阅读榜和新书榜都必须存在，否则 UI 会只有一个按钮。
-    val groups = fq.groupBy { Triple(it.gender, it.category, it.rankType) }
-    check("每个分类两种榜都有", groups.size == 52, "实际 ${groups.size}")
+    // 新书榜已移除。这条守着「别哪天又加回来」。
+    check("没有番茄新书榜", fq.none { it.rankType == 1 },
+        "还有 ${fq.count { it.rankType == 1 }} 个")
+    check("番茄榜都是阅读榜", fq.all { it.rankType == 2 })
+    check("每个分类各一个榜", fq.map { it.gender to it.category }.toSet().size == fq.size)
     check("番茄分类榜都带 category", fq.all { it.category > 0 })
     check("番茄分类榜都带频道", fq.all { it.gendered })
 

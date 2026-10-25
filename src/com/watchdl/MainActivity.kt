@@ -1096,25 +1096,17 @@ class MainActivity : Activity() {
                 // 起点每个榜独立一个按钮，名字里没有「 · 」。
                 for (r in list) col.addView(rankButton(r, rankKey, site, gender))
             } else {
-                val row = Md3.row(this)
-                row.addView(Md3.text(this, cat, Md3.FS_SM, Md3.onSurfaceVariant).apply {
-                    gravity = Gravity.CENTER_VERTICAL
-                }, LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f))
-                for (r in list) {
-                    val on = r.key == rankKey
-                    val b = Widgets.button(this, if (r.rankType == 1) "新书" else "阅读",
-                        if (on) "filled" else "tonal", {
-                        if (!on) showDiscover(site, gender, r.key)
-                    })
-                    row.addView(b, LinearLayout.LayoutParams(
-                        Md3.dp(this, 64), Md3.dp(this, Md3.BTN)).apply {
-                        leftMargin = Md3.dp(this@MainActivity, Md3.GAP / 2)
-                    })
+                // 番茄只剩「阅读」榜一个，整行做成按钮 —— 右边不再留一块空白。
+                // 分类名直接当按钮文字，少一层「标签 + 小按钮」的读法。
+                val r = list.first()
+                val on = r.key == rankKey
+                val b = Widgets.button(this, cat, if (on) "filled" else "tonal") {
+                    if (!on) showDiscover(site, gender, r.key)
                 }
-                row.layoutParams = LinearLayout.LayoutParams(
+                b.layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, Md3.BTN),
-                )
-                col.addView(row)
+                ).apply { bottomMargin = Md3.dp(this@MainActivity, Md3.GAP / 2) }
+                col.addView(b)
             }
         }
 
