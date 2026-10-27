@@ -324,9 +324,15 @@ class SourceEngine(
                     // 上层拿到的是「目录就这么多章」，后续标 DONE，书少几十章没人知道。
                     if (budget-- <= 0 || remainingMs() <= 0) { tocCut = true; break }
                     visited += nextUrl
+                    val pageAt = System.currentTimeMillis()
                     val pageRaw = runCatching {
                         request(nextUrl)
                     }.getOrNull() ?: run { tocCut = true; null } ?: break
+                    // 单页卡死：已经取到的页算数，剩下的不追了。
+                    // 详见 TOC_PAGE_STALL_MS 的注释（pingshuku 每页 2.4 秒的实测）。
+                    // 必须在这里判而不是只靠总预算：一页一页慢慢磨到 25 秒，
+                    // 用户看到的是「点了没反应 25 秒」，而前几页的数据明明已经到手了。
+                    if (System.currentTimeMillis() - pageAt > TOC_PAGE_STALL_MS) tocCut = true
                     val n2 = rule.toc.name.eval(pageRaw, list = true)
                     if (n2.isEmpty()) break
                     names += n2
@@ -552,6 +558,16 @@ class SourceEngine(
 
         /** 目录请求总预算，包含书籍页与分页。分页超时保留已取得的章节。 */
         private const val TOC_BUDGET_MS = 25_000L
+
+        /**
+         * 单页卡死阀值。
+         *
+         * 实测（2026-10-27 日志）56书库（m.pingshuku.com）每页固定 `conn=9 hdr=2411`：
+         * 连接 9ms，等响应头 2.4 秒 —— 服务器自己在想，不是我们的网慢。
+         * 180 章的书写 9 页，一页一页等下去就是 25 秒全烧光，用户看到的只是「没反应」。
+         * 超过这个值就判本页卡住，把已经取到的那部分当目录用（上层会提示不完整）。
+         */
+        private const val TOC_PAGE_STALL_MS = 6_000
 
         /**
          * URL 关键词编码。

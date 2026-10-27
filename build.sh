@@ -228,8 +228,23 @@ grep -q "versionCode=\"$APP_VERSION_CODE\"" "$MANIFEST" || die "版本号注入�
   --version-code "$APP_VERSION_CODE" --version-name "$APP_VERSION" \
   --auto-add-overlay >/dev/null
 
-echo "== 5/6 塞 dex =="
+echo "== 5/6 塞 dex 里和其他资源 =="
 (cd "$OUT/dex" && zip -q -X "$OUT/base.apk" classes.dex)
+
+# Rhino 报错文案在 org/mozilla/javascript/resources/Messages*.properties。
+# d8 只搬 dex，`.properties` 一个都进不了 APK，于是任何 JS 书源抛错时
+# Rhino 取不到文案 bundle，抛 MissingResourceException 把真实错误盖掉，
+# 日志里只剩「Can't find bundle for base name ... Messages」。
+# 只塞默认的 Messages.properties（无后缀）与 _en：zh_CN 找不到会退化到默认，够用。
+RHINO="$ROOT/libs/rhino-slim.jar"
+if [ -f "$RHINO" ]; then
+  for f in org/mozilla/javascript/resources/Messages.properties \
+           org/mozilla/javascript/resources/Messages_en.properties; do
+    unzip -p "$RHINO" "$f" > "$OUT/_rhino_msg.properties" || die "从 rhino-slim.jar 读不出 $f"
+    (cd "$OUT" && mkdir -p "$(dirname "$f")" && mv _rhino_msg.properties "$f" && zip -q -X "$OUT/base.apk" "$f")
+  done
+  echo "   Rhino 文案资源已塞入：$(unzip -l "$OUT/base.apk" | grep -c 'javascript/resources/Messages') 个"
+fi
 
 echo "== 6/6 对齐 + 签名 =="
 [ -x "$ZIPALIGN" ] || die "找不到 zipalign（build-tools 和 PATH 都没有）"

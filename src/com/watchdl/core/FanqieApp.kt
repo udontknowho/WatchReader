@@ -159,7 +159,11 @@ class FanqieApp(
     /** `bookId` 用不到（正文接口只认 itemId），保留参数是为了满足 [BookSource]。 */
     override fun content(itemId: String, bookId: String): String {
         val a = BigInteger(2048, rnd)
-        val pub = BigInteger.TWO.modPow(a, DHP)
+        // BigInteger.TWO 是 Java 9 才有的静态字段，Android 11 (SDK 30) 的
+        // core-libart.jar 里没有它：编译期过得去，运行期抛 NoSuchFieldError，
+        // 于是内置番茄源 100% 取不到正文（实测 2026-10-27）。用 valueOf(2)，
+        // 这个从 Android 1 就有。
+        val pub = BigInteger.valueOf(2).modPow(a, DHP)
 
         // pub 按 JS 的 toByteArray（有符号大端）转字节，再当 latin-1 字符串补齐
         val pubBytes = pub.toByteArray()

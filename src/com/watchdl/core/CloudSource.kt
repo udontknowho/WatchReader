@@ -64,6 +64,16 @@ object CloudSource {
     private const val BUDGET_MS = 45_000
 
     /**
+     * 单次清单请求的超时。
+     *
+     * 实测（2026-10-27 日志）启动同步白等了 27 秒：jsdelivr 1.4s 才回，
+     * ghproxy SocketTimeout，raw.githubusercontent 走满 16 秒超时，
+     * 结论只是一句「已是最新（版本 5）」。用户什么也没得到，却等了半分钟。
+     * 清单只有几十字节，4 秒不给就是那个节点不通。
+     */
+    private const val MANIFEST_TIMEOUT_MS = 4_000
+
+    /**
      * 拉取并安装。
      *
      * @param dir 书源目录（`filesDir/sources`）
@@ -97,7 +107,7 @@ object CloudSource {
         // 先问一圈：哪个镜像的清单最新就从哪拉。见 [bestMirror] 里关于 jsDelivr 节点滞后的说明。
         if (base.isBlank() && bases.size > 1 && !force) {
             onProgress?.invoke("检查更新…")
-            val best = runCatching { bestMirror(bases, minOf(timeoutMs, 8_000)) }.getOrNull()
+            val best = runCatching { bestMirror(bases, minOf(timeoutMs, MANIFEST_TIMEOUT_MS)) }.getOrNull()
             if (best != null) {
                 val r = updateFrom(dir, best.first.trimEnd('/'), force, timeoutMs, onProgress, best.second)
                 if (r.ok || r.message.startsWith("已是最新")) return r
@@ -114,7 +124,7 @@ object CloudSource {
             }
             val suffix = if (bases.size > 1) "（${i + 1}/${bases.size}）" else ""
             onProgress?.invoke("检查更新$suffix…")
-            val r = updateFrom(dir, b.trimEnd('/'), force, minOf(timeoutMs, left), onProgress)
+            val r = updateFrom(dir, b.trimEnd('/'), force, minOf(timeoutMs, left, MANIFEST_TIMEOUT_MS), onProgress)
             if (r.ok) return r
             // 「已是最新」也是成功，不必再去下一个镜像试。
             if (r.message.startsWith("已是最新")) return r

@@ -670,6 +670,12 @@ class MainActivity : Activity() {
 
     /** 目录页一次渲染多少章（M8）。1600 章的书分 16 段，不再一次建 6400 个 View。 */
     private val TOC_WINDOW = 100
+
+    /** 搜索结果一次只建这么多张卡（理由见 showHits 里的注释）。 */
+    private val HITS_WINDOW = 60
+
+    /** 搜索结果当前窗口起点。换关键词时不重置就会停在越界位置。 */
+    private var hitsWinStart = 0
     /** 目录页当前窗口的起始章下标。进目录时按上次读到的那章重置。 */
     private var tocWinStart = 0
 
@@ -710,6 +716,10 @@ class MainActivity : Activity() {
                         batch: Int = 0, replay: Boolean = false) {
         // 排序（P2）：各源拼接顺序完全随机，实测 1700+ 条里目标书可能落在
         // 第 900 位。手表小屏只看得到几条，不排等于没有。
+        //
+        // 新的一次搜索要把窗口拍回开头：不重置就会停在上次翻到的位置，
+        // 用户看到的是「新搜索结果从第 61 条开始」。
+        if (!replay) hitsWinStart = 0
         //
         // 两层排序：先按匹配度分档，档内**同名书必须相邻** —— 列表里同一本书
         // 现在按源各占一行，分散在各处就失去了「挑个能用的源」的意义。
@@ -770,7 +780,12 @@ class MainActivity : Activity() {
             }
             col.addView(Widgets.emptyState(this, "∅", msg), Md3.lpWeight(1f))
         } else {
-            for (h in hits) {
+            // 510 条结果一次性建 510 个 View，手表上量到 616ms 掉帧（2026-10-27 日志）。
+            // 跟目录那一屏用同一个办法：只建一窗，翻页换窗。
+            val winStart = hitsWinStart.coerceIn(0, maxOf(0, hits.size - HITS_WINDOW))
+            hitsWinStart = winStart
+            val winEnd = (winStart + HITS_WINDOW).coerceAtMost(hits.size)
+            for (h in hits.subList(winStart, winEnd)) {
                 // 第二行显示作者 + 来源站名。源名放最后，因为它是用户挑源要看的。
                 val cleanSource = h.sourceName.takeIf { it.isNotBlank() && !it.contains("{{") && !it.contains("@{") }
                 val sub = listOf(h.author.takeIf { it.isNotBlank() }, cleanSource)
@@ -781,6 +796,15 @@ class MainActivity : Activity() {
                 col.addView(Widgets.listItem(this, title, sub, twoLine = true, highlight = true) {
                     openHit(h)
                 })
+            }
+            // 翻页条：只在结果超过一窗时才出，否则会让小屏多占两行。
+            if (hits.size > HITS_WINDOW) {
+                val nav = Widgets.button(this, "${winStart + 1}–$winEnd / ${hits.size} 条", "tonal", {
+                    hitsWinStart = if (winEnd >= hits.size) 0 else winEnd
+                    showHits(keyword, allHits, stat, offset, batch, replay = true)
+                })
+                nav.contentDescription = "翻到下一百条"
+                col.addView(nav)
             }
         }
         root.addView(body)
