@@ -302,7 +302,9 @@ class SourceEngine(
         if (nextRule != null) {
             val visited = HashSet<String>().apply { add(url) }
             // 第一轮：拿当前页给出的后续页列表。
-            val firstNext = runCatching { nextRule.eval(raw, jsLib = rule.jsLib) }
+            // 必须 `list = true`：eval 默认只取第 1 个，`≥2 个并发一次全取`
+            // 这条分支根本到不了，`select#page@option@value` 这种整页列表只翻到第 2 页。
+            val firstNext = runCatching { nextRule.eval(raw, list = true, jsLib = rule.jsLib) }
                 .getOrDefault(emptyList())
             val pending = firstNext.map { it.trim() }.filter { it.isNotEmpty() }
                 .map { absolute(rule.expand(it, ctx), url) }
