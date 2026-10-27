@@ -68,7 +68,10 @@ object Http {
             val u = URL(url)
             if (u.port > 0 && u.port != 80) "${u.host}:${u.port}" else u.host
         }.getOrNull() ?: return url
-        val ok = httpsOk[host] ?: probeHttps(host).also { httpsOk[host] = it }
+        val cached = httpsOk[host]
+        val ok = cached ?: probeHttps(host).also { httpsOk[host] = it }
+        // 每个 host 只探一次（有缓存），所以这里不会刷屏。
+        if (cached == null) DevLog.log("HTTP", "https 探测 $host → ${if (ok) "可用" else "回落明文"}")
         return if (ok) "https://" + url.substring(7) else url
     }
 
@@ -103,8 +106,25 @@ object Http {
         }
     }
 
-    /** 抓取结果。charset 是探测到的编码，排查乱码时用得上。 */
-    data class Response(val body: String, val finalUrl: String, val charset: String?, val code: Int)
+    /**
+     * 抓取结果。charset 是探测到的编码，排查乱码时用得上。
+     *
+     * 带默认值：诊断字段是后加的，别破坏已有构造点。
+     * [bytes] 是原始字节数（`body.length` 是字符数，看不出空响应与压缩差别）。
+     * [msConnect]/[msHeaders]/[msBody] 是三段耗时，用来分辨「连不上」「等头慢」「读正文慢」。
+     */
+    data class Response(
+        val body: String,
+        val finalUrl: String,
+        val charset: String?,
+        val code: Int,
+        val bytes: Int = 0,
+        val redirects: Int = 0,
+        val msConnect: Long = 0,
+        val msHeaders: Long = 0,
+        val msBody: Long = 0,
+        val contentType: String? = null,
+    )
 
     /**
      * 一行请求日志：`GET host/path 200 850ms 12KB`。
@@ -114,18 +134,43 @@ object Http {
      */
     private fun logReq(method: String, url: String, code: Int?, ms: Long, bytes: Int?, err: Throwable?) {
         if (!DevLog.enabled) return          // 关着就别拼字符串
-        val where = runCatching {
-            val u = URL(url)
-            val port = if (u.port > 0 && u.port != u.defaultPort) ":${u.port}" else ""
-            u.host + port + u.path.take(120)
-        }.getOrElse { url.take(120) }
-        val tail = if (err != null) {
-            "ERR ${err.javaClass.simpleName}: ${err.message}"
-        } else {
-            "$code ${ms}ms ${(bytes ?: 0) / 1024}KB"
+        val where = whereOf(url)
+        val tail = when {
+            // 上层 invokeAll 超时 → cancel(true) → 这里的 task.get() 被中断。
+            // 记成「取消」，否则每次都先去排一堆假失败线索。
+            err is InterruptedException -> "取消（上层超时中断）"
+            err != null -> "ERR ${err.javaClass.simpleName}: ${err.message}"
+            else -> "$code ${ms}ms ${sizeText(bytes ?: 0)}"
         }
         DevLog.log("HTTP", "${method.uppercase()} $where $tail${if (err == null && ms > 5000) " 慢" else ""}")
     }
+
+    /** 成功那一条：`GET host/path 200 8123ms 53KB conn=1200 hdr=3200 body=3700 r=1 text/html cs=gbk 慢`。 */
+    private fun logOk(method: String, url: String, r: Response, totalMs: Long) {
+        if (!DevLog.enabled) return
+        val sb = StringBuilder()
+        sb.append(method.uppercase()).append(' ').append(whereOf(url))
+        sb.append(' ').append(r.code).append(' ').append(totalMs).append("ms ")
+        sb.append(sizeText(r.bytes))
+        sb.append(" conn=").append(r.msConnect)
+        sb.append(" hdr=").append(r.msHeaders)
+        sb.append(" body=").append(r.msBody)
+        if (r.redirects > 0) sb.append(" r=").append(r.redirects)
+        r.contentType?.substringBefore(';')?.trim()?.take(30)?.let { sb.append(' ').append(it) }
+        r.charset?.let { sb.append(" cs=").append(it) }
+        if (totalMs > 5000) sb.append(" 慢")
+        DevLog.log("HTTP", sb.toString())
+    }
+
+    private fun whereOf(url: String): String = runCatching {
+        val u = URL(url)
+        val port = if (u.port > 0 && u.port != u.defaultPort) ":${u.port}" else ""
+        u.host + port + u.path.take(120)
+    }.getOrElse { url.take(120) }
+
+    /** 1KB 以下显示真实字节：以前一律 `/1024` 整除，空响应也显示「0KB」。 */
+    private fun sizeText(bytes: Int): String =
+        if (bytes < 1024) "${bytes}B" else "${bytes / 1024}KB"
 
     /**
      * 原始字节版：番茄的设备注册要发二进制体，正文要读 `y`/`c` 响应头。
@@ -256,7 +301,7 @@ object Http {
         POOL.execute(task)
         return try {
             val r = task.get(budget, java.util.concurrent.TimeUnit.MILLISECONDS)
-            logReq(method, target, r.code, System.currentTimeMillis() - t0, r.body.length, null)
+            logOk(method, target, r, System.currentTimeMillis() - t0)
             r
         } catch (e: java.util.concurrent.TimeoutException) {
             task.cancel(true)
@@ -301,6 +346,10 @@ object Http {
         var m = if (method.isBlank()) "GET" else method.uppercase()
         var bodyToSend = body
         var redirects = 0
+        // 三段耗时（多跳重定向累加）：连不上 / 等头慢 / 读正文慢，三种病对应三种措施。
+        var connectMs = 0L
+        var headersMs = 0L
+        var bodyMs = 0L
 
         val totalBudget = minOf(timeoutMs.toLong() * TOTAL_FACTOR, totalTimeoutMs?.toLong() ?: Long.MAX_VALUE)
         // 整次请求（含建连、重定向、读响应体）共用一份预算。
@@ -324,6 +373,15 @@ object Http {
                 conn.doOutput = true
                 conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
                 conn.outputStream.use { it.write(bodyToSend.toByteArray(Charsets.UTF_8)) }
+            } else {
+                // 显式 connect() 才把 DNS+TCP+TLS 单独量出来。
+                // 必须包 runCatching：POST 设了 doOutput 之后这里会抛「已连接」，
+                // 量不到时间就当 0，绝不能让计时把请求本身弄挂。
+                connectMs += runCatching {
+                    val t = System.currentTimeMillis()
+                    conn.connect()
+                    System.currentTimeMillis() - t
+                }.getOrDefault(0L)
             }
 
             // 总时限。readTimeout 只约束单次读：服务器每次吐几个字节时它永远不触发，
@@ -337,8 +395,10 @@ object Http {
             }.apply { isDaemon = true; start() }
 
             val code: Int
+            val tHdr = System.currentTimeMillis()
             try {
                 code = conn.responseCode
+                headersMs += System.currentTimeMillis() - tHdr
             } catch (e: Exception) {
                 cut.interrupt()
                 if (expired.get() || System.currentTimeMillis() >= deadlineAt) error("请求超时（${totalBudget}ms）")
@@ -366,6 +426,7 @@ object Http {
 
             val bytes: ByteArray
             val contentType: String?
+            val tBody = System.currentTimeMillis()
             try {
                 val stream = conn.inputStream
                 bytes = if (conn.contentEncoding?.contains("gzip") == true) {
@@ -374,6 +435,7 @@ object Http {
                     stream.use { readAll(it, conn, deadlineAt) }
                 }
                 contentType = conn.contentType
+                bodyMs += System.currentTimeMillis() - tBody
             } catch (e: Exception) {
                 cut.interrupt()
                 if (expired.get() || System.currentTimeMillis() >= deadlineAt) error("请求超时（${totalBudget}ms）")
@@ -382,7 +444,18 @@ object Http {
             cut.interrupt()
             val charset = sniffCharset(bytes, contentType)
             conn.disconnect()
-            return Response(decode(bytes, charset), current, charset, code)
+            return Response(
+                body = decode(bytes, charset),
+                finalUrl = current,
+                charset = charset,
+                code = code,
+                bytes = bytes.size,
+                redirects = redirects,
+                msConnect = connectMs,
+                msHeaders = headersMs,
+                msBody = bodyMs,
+                contentType = contentType,
+            )
         }
     }
 

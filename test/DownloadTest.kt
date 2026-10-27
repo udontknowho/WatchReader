@@ -29,6 +29,19 @@ fun main() {
     check("第二次 2s", Backoff.delayMs(1) == 2000L)
     check("封顶 8s", Backoff.delayMs(10) == 8000L)
 
+    println("[Downloader] 失败分类")
+    // 分类错一个，整份日志的归因就错：取消被当成源坏了、403 被当成网络问题。
+    fun kind(e: Throwable) = Downloader.errKind(e)
+    check("请求超时", kind(java.io.IOException("请求超时（15000ms，含 DNS）")) == "请求超时")
+    check("socket 超时", kind(java.net.SocketTimeoutException()) == "请求超时")
+    check("403 风控", kind(java.io.IOException("HTTP 403")) == "403 风控")
+    check("其他 HTTP 错", kind(java.io.IOException("HTTP 500")) == "HTTP 错")
+    check("正文无效", kind(IllegalStateException("正文过短（第1章 仅 21 字）")) == "正文无效")
+    check("正文为空也算正文无效", kind(IllegalStateException("正文为空")) == "正文无效")
+    check("上层取消", kind(java.io.IOException("请求被取消")) == "取消")
+    check("中断", kind(InterruptedException()) == "取消")
+    check("不认识的退回异常类名", kind(IllegalArgumentException("x")) == "IllegalArgumentException")
+
     println("[Downloader] 双写落盘与恢复")
     val root = File(System.getenv("WD_TEST_DIR") ?: "build/test-state", "wd-${System.nanoTime()}")
     root.deleteRecursively(); root.mkdirs()

@@ -238,6 +238,7 @@ class DownloadService : Service() {
 
     private fun runJob(info: BookInfo, freeOnly: Boolean) {
         val store = JobStore(File(filesDir, "books"))
+        val startedAt = System.currentTimeMillis()
         // APP 接口给完整正文（网页端只给 185 字试读片段）。
         // 第三方书源不初始化番茄设备，避免无用注册。
         val source: BookSource = resolveSource(info.bookId)
@@ -274,6 +275,8 @@ class DownloadService : Service() {
         }
 
         try {
+            val lanesNow = lanes()
+            DevLog.log("DL", "开始：${info.name.ifBlank { "未命名" }} ${job.chapters.size} 章，并发 $lanesNow，间隔 ${if (source is FanqieApp) FANQIE_GAP_MS else Backoff.GAP_MS}ms")
             val dl = Downloader(
                 store = store,
                 fetchChapter = { ch -> source.content(ch.itemId, info.bookId) },
@@ -284,7 +287,7 @@ class DownloadService : Service() {
                 gapMs = if (source is FanqieApp) FANQIE_GAP_MS else Backoff.GAP_MS,
                 // 并发同理：以前只对番茄开 3 个，通用书源串行（0.17 章/秒，一本两小时）。
                 // 现在统一读用户选项，默认 3。
-                concurrency = lanes(),
+                concurrency = lanesNow,
                 // 取消要走到落盘那一步：Downloader 自己把最终状态写成 CANCELLED。
                 isCancelled = { cancelFlag.get() },
             )
@@ -304,6 +307,8 @@ class DownloadService : Service() {
             val targets = if (freeOnly) job.chapters.indices.filter { !job.chapters[it].locked }
                           else job.chapters.indices.toList()
             val r = dl.run(job, targets)
+            DevLog.log("DL", "结束：${info.name.ifBlank { "未命名" }} 成功 ${r.success} 失败 ${r.failed}" +
+                "，全书 ${r.doneTotal}/${r.total}，用时 ${(System.currentTimeMillis() - startedAt) / 1000}s")
             // N3：本次只下 5 章时，说「成功 5」会让人以为全书只有 5 章。
             // 分成两句：全书进度 + 本次增量。
             val head = "已下载 ${r.doneTotal}/${r.total}" +

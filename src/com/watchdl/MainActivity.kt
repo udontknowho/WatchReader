@@ -378,6 +378,12 @@ class MainActivity : Activity() {
         loadReaderPrefs()
         DevLog.file = File(filesDir, "dev.log")
         DevLog.setEnabled(getSharedPreferences("reader", MODE_PRIVATE).getBoolean("devlog", false))
+        // 幂等；无论开关开没开都挂上（崩溃现场是开关来不及开的那类问题），
+        // 关着时只多一行 logcat。
+        DevLog.installCrashHandler()
+        // 开关状态会随升级保留，而 watchFrames 只在 toggleDevLog 里挂 ——
+        // 不在这里补一句，升级后掉帧日志永远不会生效。
+        if (DevLog.enabled) watchFrames()
         root = Widgets.screenRoot(this)
         setContentView(root)
         cleanDirtyJobs()
@@ -1928,19 +1934,27 @@ class MainActivity : Activity() {
         val owner: Screen = Screen.Toc(BookInfo("", name, author, emptyList()))
         bg(owner, {
             val src = sourceFor(hit)
+            val tocAt = System.currentTimeMillis()
             val got = src.toc(hit.bookId, hit.name, hit.author)
+            DevLog.log("WatchDL", "目录「${hit.sourceName}」${got.chapters.size} 章 ${System.currentTimeMillis() - tocAt}ms")
             // 目录非空但正文规则已坏的书源很常见（实测 m.rulianshi.la 每章只回 21 字）。
             // 以前直接进目录页，用户下完 320 章才发现全书空白。
             // 这里先试一章正文，不合格就换下一个源。
             if (got.chapters.isNotEmpty()) {
                 // 试前 3 章：有些书第一章是「作者的话」之类短章节，只看一章会误判整条源。
                 val probes = got.chapters.filter { !it.locked }.take(3)
+                // 探测异常以前被 runCatching 吃掉、`?: 0` 折成 0 字，日志只写「正文只有 0 字」
+                // ——真实原因（签名错、接口改、资源包缺失）一点都看不到。
+                var probeErr: Throwable? = null
                 val best = probes.maxOfOrNull { ch ->
-                    runCatching { src.content(ch.itemId, hit.bookId) }.getOrNull()
+                    runCatching { src.content(ch.itemId, hit.bookId) }
+                        .onFailure { probeErr = it }
+                        .getOrNull()
                         ?.let { Downloader.bodyChars(it) } ?: 0
                 } ?: Int.MAX_VALUE
                 if (best < Downloader.MIN_BODY_CHARS) {
-                    DevLog.log("WatchDL", "源「${hit.sourceName}」正文只有 $best 字，换源")
+                    val why = probeErr?.let { "（探测异常：${it.javaClass.simpleName}: ${it.message}）" } ?: ""
+                    DevLog.log("WatchDL", "源「${hit.sourceName}」正文只有 $best 字，换源$why")
                     return@bg null
                 }
             }
@@ -2258,8 +2272,39 @@ class MainActivity : Activity() {
         getSharedPreferences("reader", MODE_PRIVATE).edit().putBoolean("devlog", on).apply()
         DevLog.file = File(filesDir, "dev.log")
         DevLog.setEnabled(on)
+        if (on) watchFrames()     // 只在开着时挂：关着不能给每一帧加一个回调
         showSettings()          // 重画，导出/清空按钮跟着开关出现或消失
     }
+
+    @Volatile private var frameWatcherOn = false
+
+    /**
+     * 掉帧监听：相邻两帧间隔超 200ms 记一行，带当前屏名。
+     *
+     * 手表上「点了一下没反应」大多是主线程被卡，而卡在哪里只能靠这个量。
+     * 开关关掉后不再续挂（否则每帧一个回调，本身就是负担）。
+     */
+    private fun watchFrames() {
+        if (frameWatcherOn) return
+        frameWatcherOn = true
+        val choreographer = android.view.Choreographer.getInstance()
+        choreographer.postFrameCallback(object : android.view.Choreographer.FrameCallback {
+            private var last = 0L
+            override fun doFrame(frameTimeNanos: Long) {
+                if (!DevLog.enabled) { frameWatcherOn = false; return }
+                val prev = last
+                last = frameTimeNanos
+                if (prev != 0L) {
+                    val ms = (frameTimeNanos - prev) / 1_000_000
+                    if (ms > 200) DevLog.log("UI", "掉帧 ${ms}ms（$screenName）")
+                }
+                choreographer.postFrameCallback(this)
+            }
+        })
+    }
+
+    /** 崩溃/掉帧日志里用的屏名：只记枚举名，不把书名之类用户内容写进去。 */
+    private val screenName: String get() = runCatching { screen.javaClass.simpleName }.getOrDefault("?")
 
     /**
      * 写一份快照到公共「文档」目录，再走系统分享递出去。
@@ -2272,8 +2317,11 @@ class MainActivity : Activity() {
         }
         val stamp = SimpleDateFormat("MMdd-HHmmss", Locale.US).format(Date())
         val out = File(filesDir, "dev-$stamp.log")
+        // 导文件而不是导 ring：ring 只有 3000 条，前面的上下文早被挤掉了。
+        val body = DevLog.exportText()
+        val lines = body.lines().count { it.isNotBlank() }
         runCatching {
-            out.writeText(DevLog.dump().joinToString("") { it + "\n" })
+            out.writeText(devLogHeader(lines) + "\n" + body)
         }.onFailure { toast("写日志失败：${it.message}"); return }
         val published = publishToDocuments(out)
         if (published == null) {
@@ -2281,6 +2329,30 @@ class MainActivity : Activity() {
             return
         }
         toast("已存到文档/$published")
+    }
+
+    /**
+     * 导出文件头：版本、机型、内存、存储、网络、时间。
+     *
+     * 以前导出的文件只有日志行，靠它完全无法判断「是手表内存不足被杀」
+     * 还是「站点慢」——这些环境量必须先写清。
+     */
+    private fun devLogHeader(lines: Int): String {
+        val vi = runCatching { packageManager.getPackageInfo(packageName, 0) }.getOrNull()
+        val mem = android.app.ActivityManager.MemoryInfo()
+        runCatching { getSystemService(android.app.ActivityManager::class.java)?.getMemoryInfo(mem) }
+        val st = android.os.StatFs(filesDir.absolutePath)
+        val net = runCatching {
+            getSystemService(android.net.ConnectivityManager::class.java)
+                ?.activeNetworkInfo?.typeName ?: "无"
+        }.getOrDefault("未知（无权限）")
+        return listOf(
+            "WatchReader ${vi?.versionName ?: "?"} (code ${vi?.longVersionCode ?: 0})",
+            "机型 ${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})",
+            "可用内存 ${mem.availMem / 1024 / 1024}MB / ${mem.totalMem / 1024 / 1024}MB",
+            "可用存储 ${st.availableBytes / 1024 / 1024}MB / ${st.totalBytes / 1024 / 1024}MB",
+            "网络 $net · 导出 ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())} · $lines 行",
+        ).joinToString("\n")
     }
 
     /** 版本号从 PackageManager 读，避免在代码里再写一份与 build.sh 不同步的常量。 */

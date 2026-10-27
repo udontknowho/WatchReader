@@ -117,32 +117,42 @@ class Downloader(
                         if (cancelled()) break
                         val ch = job.chapters[i]
                         onChapterStart?.invoke(i, ch.title)
+                        val t0 = System.currentTimeMillis()
                         var success = false
                         var lastError: String? = null
+                        var lastThrown: Throwable? = null
                         for (attempt in 0 until Backoff.MAX_ATTEMPTS) {
                             try {
                                 val html = withChapterTimeout(chapterTimeoutMs) { fetchChapter(ch) }
-                                checkBody(html, ch.title)
+                                val chars = checkBody(html, ch.title)
                                 synchronized(lock) { writeChapter(job, ch, html) }
                                 synchronized(lock) {
                                     statuses[i] = ChapterStatus.DONE
                                     ok++
                                 }
                                 onChapter?.invoke(i, ChapterStatus.DONE, ch.title)
+                                log("第 ${i + 1} 章 ${ch.title.take(12)} 成功 ${System.currentTimeMillis() - t0}ms $chars 字")
                                 success = true
                                 break
                             } catch (e: ChapterTimeoutException) {
                                 // 超时不再重试：卡死的源重试 4 次也只是再卡 4 遍，
                                 // 整本书都被它拖死。直接记本章失败，往下走。
                                 lastError = e.message
+                                lastThrown = e
                                 break
                             } catch (e: Exception) {
                                 lastError = e.message ?: e.javaClass.simpleName
-                                log("第 ${i + 1} 章第 ${attempt + 1} 次失败：$lastError")
+                                lastThrown = e
                                 // 取消时不要再重试，也不要记成失败：这一章只是没轮到。
                                 if (cancelled()) break
                                 if (attempt < Backoff.MAX_ATTEMPTS - 1) pause(Backoff.delayMs(attempt))
                             }
+                        }
+                        // 每章一行：成功在上面那行，失败在这里，带分类（见 [errKind]）。
+                        // 以前每次重试都记一行，一章四行，日志里看不清哪章是真失败的。
+                        if (!success && !cancelled()) {
+                            log("第 ${i + 1} 章 ${ch.title.take(12)} 失败 ${System.currentTimeMillis() - t0}ms " +
+                                errKind(lastThrown ?: RuntimeException(lastError)))
                         }
                         if (!success && !cancelled()) {
                             synchronized(lock) {
@@ -306,10 +316,11 @@ class Downloader(
      *
      * 正常章节至少几百字；300 这个阈值是 e2e 第 6 段用的同一口径。
      */
-    private fun checkBody(html: String, title: String) {
+    private fun checkBody(html: String, title: String): Int {
         if (html.isBlank()) error("正文为空")
         val chars = bodyChars(html)
         if (chars < MIN_BODY_CHARS) error("正文过短（${title.take(12)} 仅 ${chars} 字）")
+        return chars
     }
 
     private fun writeChapter(job: BookJob, ch: ChapterRef, html: String) {
@@ -352,6 +363,25 @@ class Downloader(
     }
 
     companion object {
+        /**
+         * 失败分类。下载日志里一章一行，带分类才能一眼看出病在哪。
+         *
+         * 顺序要紧：章超时是包装异常，取消会伪装成 IOException("請求被取消")，
+         * "HTTP 403" 得在泛指 HTTP 错之前判。
+         */
+        fun errKind(e: Throwable): String {
+            val m = e.message ?: ""
+            return when {
+                e is Downloader.ChapterTimeoutException -> "章超时"
+                e is InterruptedException || e is java.util.concurrent.CancellationException ||
+                    m.contains("取消") -> "取消"
+                e is java.net.SocketTimeoutException || m.contains("超时") -> "请求超时"
+                m.startsWith("HTTP 403") -> "403 风控"
+                m.startsWith("HTTP ") -> "HTTP 错"
+                m.contains("正文") -> "正文无效"
+                else -> e.javaClass.simpleName
+            }
+        }
         /**
          * 单章正文的最少字数（去空白后）。低于此值判本章失败，可重试/可重下。
          * 阈值与 e2e 第 6 段「正文完整」同一口径。

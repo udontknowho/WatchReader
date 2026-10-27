@@ -30,6 +30,10 @@ fun main() {
     check("开启后有一条起始记录", DevLog.dump().size == 1, "得到 ${DevLog.dump()}")
     check("开启即可见文件内容", logFile.exists() && logFile.length() > 0,
           "长度 ${if (logFile.exists()) logFile.length() else -1}")
+    // 行格式：MM-dd HH:mm:ss.SSS [线程] TAG msg（毫秒与线程名是这轮新加的）
+    check("行头带毫秒和线程名",
+          Regex("^\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d\\.\\d{3} \\[.+\\] \\S+ ").containsMatchIn(DevLog.dump().first()),
+          DevLog.dump().first())
 
     // 缓冲满：只留最近 CAP 条，不能无限涨（手表内存只有几百兆）。
     DevLog.clear()
@@ -39,21 +43,25 @@ fun main() {
     check("留下的是最新的", d.last().contains("第 3199 条"), "末条 ${d.lastOrNull()}")
     check("丢的是最旧的", d.none { it.contains("第 100 条") })
 
-    // 落盘：每 8 条追加一次，700 条必然写过多轮。
-    // 最后不足 8 条缓冲里是有的、文件里还没有，所以断言看最后一条已落盘的记录。
+    // 落盘：每 50 条或 2 秒一次，3200 条必然写过多轮。先 flush 到齐再数行。
     check("落盘有内容", logFile.length() > 0, "长度 ${logFile.length()}")
+    DevLog.forceFlush()
     val text = logFile.readText()
-    check("文件里有日志行", text.contains("第 319") , "长度 ${text.length}")
-    // 不重复膨胀：文件行数不该超过缓冲行数（以前每次重抄整个 ring，行数会成倍涨）。
+    // 不重复膨胀：文件行数必须等于写入条数。以前 appendLocked 用 size<flushed 判有没有新行，
+    // ring 一封顶就恒为 false —— 文件冻在最早 3000 行、且每轮重抄整个 ring。
     val lines = text.lines().filter { it.isNotBlank() }.size
-    check("写入不重复膨胀", lines <= 3000, "行数 $lines")
+    check("写入不重复膨胀", lines == 3200, "行数 $lines")
+    check("导出读文件且行数齐", DevLog.exportText().lines().count { it.isNotBlank() } == 3200,
+          DevLog.exportText().length.toString())
 
     // 超限轮转：不让日志把用户存储吃光。
     val big = File(dir, "big.log")
-    big.writeText("x".repeat(3 * 1024 * 1024))   // > MAX_BYTES 2MB
     DevLog.file = big
     DevLog.clear()
-    repeat(9) { DevLog.log("T", "轮转 $it") }
+    // clear 会清空文件，所以清完再灌满，否则轮转分支根本没被走过。
+    big.writeText("x".repeat(3 * 1024 * 1024))   // > MAX_BYTES 2MB
+    repeat(60) { DevLog.log("T", "轮转 $it") }
+    DevLog.forceFlush()
     check("超 2MB 后轮转", big.length() < 64 * 1024, "长度 ${big.length()}")
 
     // 清空

@@ -82,8 +82,10 @@ class MultiSource(
     ): Result {
         val sources = rotation(offset)
         if (sources.isEmpty()) return Result(emptyList(), 0, 0, emptyList())
+        val lanes = minOf(concurrency, sources.size)
+        DevLog.log("SRC", "搜索「$keyword」第 $page 页开始：${sources.size} 源，并发 $lanes，预算 ${timeoutMs}ms")
 
-        val runner = Executors.newFixedThreadPool(minOf(concurrency, sources.size))
+        val runner = Executors.newFixedThreadPool(lanes)
         val finished = java.util.concurrent.atomic.AtomicInteger(0)
         // N6：以前是 List，同一源会被记两次（onFailure 一次、invokeAll 取消后又一次），
         // 于是 responded = size - failed.size 可能变成负数。
@@ -109,7 +111,11 @@ class MultiSource(
                         }
                         .onFailure {
                             failed.add(ns.name)
-                            DevLog.log("SRC", "「${ns.name}」失败 ${System.currentTimeMillis() - t0}ms ${it.javaClass.simpleName}: ${it.message}")
+                            // 被上层 cancel 的源这里只记一行：以前 onFailure 记「失败」、
+                            // 下面 isCancelled 分支又记「超时被取消」，同一个源两行噪音。
+                            val why = if (isCancelLike(it)) "本轮超时被取消"
+                                      else "${it.javaClass.simpleName}: ${it.message}"
+                            DevLog.log("SRC", "「${ns.name}」失败 ${System.currentTimeMillis() - t0}ms $why")
                         }
                     // 跑完一条报一次进度（成功失败都算）。
                     onProgress?.invoke(finished.incrementAndGet(), sources.size)
@@ -119,8 +125,9 @@ class MultiSource(
             // invokeAll 超时后会把没跑完的 future cancel 掉，这里补记成失败
             futures.forEachIndexed { i, f ->
                 if (f.isCancelled) {
+                    // 只记账，不再记日志：onFailure 已经记过（或这个任务根本没跑到），
+                    // 两行写同一件事只会把真正的原因埋掉。
                     failed.add(sources[i].name)
-                    DevLog.log("SRC", "「${sources[i].name}」超时被取消（本轮 ${timeoutMs}ms 用完）")
                     // 被取消的源不会再走到上面的回调，这里补报，否则进度条永远不到 100%。
                     onProgress?.invoke(finished.incrementAndGet(), sources.size)
                 }
@@ -138,6 +145,17 @@ class MultiSource(
             failed = failed.toList(),
         )
     }
+
+    /**
+     * 取消类异常。
+     *
+     * `invokeAll` 超时 → `cancel(true)` → 内层 `Http.fetch` 的 `task.get()` 被中断，
+     * 抛出的是 InterruptedException，或 `Http` 包装后的 IOException("請求被取消")。
+     * 这些不是「源坏了」，日志里必须写成上层取消。
+     */
+    private fun isCancelLike(e: Throwable): Boolean =
+        e is InterruptedException || e is java.util.concurrent.CancellationException ||
+            e.message?.contains("取消") == true
 
     /**
      * 去重 + 混排。
