@@ -220,7 +220,7 @@ class MainActivity : Activity() {
     /** 重放一屏（不重新联网）。记录里的屏都自带重绘所需的数据。 */
     private fun replay(s: Screen?) {
         when (s) {
-            is Screen.Hits -> showHits(s.keyword, s.hits, offset = s.offset, batch = s.searchedSources, replay = true)
+            is Screen.Hits -> showHits(s.keyword, s.all, offset = s.offset, batch = s.searchedSources, replay = true)
             is Screen.Toc -> showToc(s.info, s.src)
             is Screen.Reader -> showReader(s.info, s.index, s.text, s.src)
             is Screen.Market -> showMarket(s.page, s.hits)
@@ -721,7 +721,7 @@ class MainActivity : Activity() {
         val hits = all.distinctBy { "${it.name.trim()}\u0001${it.author.trim()}" }
         // 同名书共几源：必须在合并前统计，合并后每个名字只剩一条。
         val sourceCount = all.groupingBy { "${it.name.trim()}\u0001${it.author.trim()}" }.eachCount()
-        setScreen(Screen.Hits(keyword, hits, offset, stat?.total ?: 0))
+        setScreen(Screen.Hits(keyword, hits, offset, stat?.total ?: 0, all))
         root.removeAllViews()
         root.addView(Widgets.topBar(this, "搜索结果", onBack = { goBackToPrevious() }))
 
@@ -745,7 +745,7 @@ class MainActivity : Activity() {
         // 重进这一屏时 stat 为 null，改用屏上记的批次大小。
         val batch = stat?.total ?: batch.takeIf { it > 0 }
             ?: (screen as? Screen.Hits)?.searchedSources ?: 0
-        val hitsScreen = Screen.Hits(keyword, hits, offset, batch)
+        val hitsScreen = Screen.Hits(keyword, hits, offset, batch, all)
         val sourceTotal = multi.searchable
         val canRotate = batch > 0 && offset + batch < sourceTotal
         val remaining = sourceTotal - offset - batch
@@ -1891,7 +1891,7 @@ class MainActivity : Activity() {
      * 让被点的那一条排第一。
      */
     private fun siblingsOf(hit: BookHit): List<BookHit> {
-        val all = (screen as? Screen.Hits)?.hits.orEmpty()
+        val all = (screen as? Screen.Hits)?.all.orEmpty()
         val same = all.filter {
             it.name.trim() == hit.name.trim() && it.author.trim() == hit.author.trim()
         }
@@ -1928,7 +1928,23 @@ class MainActivity : Activity() {
         val owner: Screen = Screen.Toc(BookInfo("", name, author, emptyList()))
         bg(owner, {
             val src = sourceFor(hit)
-            src to src.toc(hit.bookId, hit.name, hit.author)
+            val got = src.toc(hit.bookId, hit.name, hit.author)
+            // 目录非空但正文规则已坏的书源很常见（实测 m.rulianshi.la 每章只回 21 字）。
+            // 以前直接进目录页，用户下完 320 章才发现全书空白。
+            // 这里先试一章正文，不合格就换下一个源。
+            if (got.chapters.isNotEmpty()) {
+                // 试前 3 章：有些书第一章是「作者的话」之类短章节，只看一章会误判整条源。
+                val probes = got.chapters.filter { !it.locked }.take(3)
+                val best = probes.maxOfOrNull { ch ->
+                    runCatching { src.content(ch.itemId, hit.bookId) }.getOrNull()
+                        ?.let { Downloader.bodyChars(it) } ?: 0
+                } ?: Int.MAX_VALUE
+                if (best < Downloader.MIN_BODY_CHARS) {
+                    DevLog.log("WatchDL", "源「${hit.sourceName}」正文只有 $best 字，换源")
+                    return@bg null
+                }
+            }
+            src to got
         }) { res ->
             val pair = res.getOrNull()
             if (pair != null && pair.second.chapters.isNotEmpty()) {
@@ -2524,7 +2540,7 @@ class MainActivity : Activity() {
                 // 传 null 会丢掉批次信息，「换一批源」按钮就没了；
                 // 但 Result 需要真实统计，屏上只记了批次大小，
                 // 所以改用 batch 参数直接传。
-                is Screen.Hits -> showHits(s.keyword, s.hits, offset = s.offset,
+                is Screen.Hits -> showHits(s.keyword, s.all, offset = s.offset,
                     batch = s.searchedSources)
                 is Screen.Market -> showMarket(s.page, s.hits)
                 is Screen.Sources -> showSources()

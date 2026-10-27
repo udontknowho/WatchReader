@@ -19,6 +19,13 @@ sealed interface Screen {
         val offset: Int = 0,
         /** 本轮跑了几条源，还没跑的源为换源留钩子。 */
         val searchedSources: Int = 0,
+        /**
+         * 合并显示前的完整命中（同一本书多源各一条）。
+         *
+         * 列表按「书名+作者」只出一张卡，而点进去时要能按源依次重试。
+         * 没有这个字段时 siblingsOf 只能拿到合并后的列表，候选永远只有它自己。
+         */
+        val all: List<BookHit> = hits,
     ) : Screen
     data class Toc(val info: BookInfo, val src: BookSource? = null) : Screen
     data class Reader(

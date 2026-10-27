@@ -113,7 +113,17 @@ fun main(args: Array<String>) {
         tocTried++
         val e = SourceEngine(cand.rule) { u, m, b, h -> Http.fetch(u, m, b, h, null, 15_000).body }
         val got = runCatching { e.toc(cand.hit.bookId) }.getOrNull()
-        if (got != null && got.chapters.isNotEmpty()) { used = cand; info = got; break }
+        if (got == null || got.chapters.isEmpty()) continue
+        // 目录能取≠能读：规则失效的书源照样给全目录，但每章只回几十字。
+        // 界面侧同一道关在 MainActivity.loadToc，这里不卡的话 e2e 测不出那个问题。
+        val probe = got.chapters.filter { !it.locked }.take(3).maxOfOrNull { ch ->
+            runCatching { Downloader.bodyChars(e.content(ch.itemId)) }.getOrDefault(0)
+        } ?: Int.MAX_VALUE
+        if (probe < Downloader.MIN_BODY_CHARS) {
+            println("  ⋯ 跳过「${cand.rule.name}」：正文只有 $probe 字")
+            continue
+        }
+        used = cand; info = got; break
     }
     val eng = SourceEngine(used.rule) { u, m, b, h -> Http.fetch(u, m, b, h, null, 15_000).body }
     if (info == null) {

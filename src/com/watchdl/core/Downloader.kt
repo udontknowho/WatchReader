@@ -122,7 +122,7 @@ class Downloader(
                         for (attempt in 0 until Backoff.MAX_ATTEMPTS) {
                             try {
                                 val html = withChapterTimeout(chapterTimeoutMs) { fetchChapter(ch) }
-                                if (html.isBlank()) error("正文为空")
+                                checkBody(html, ch.title)
                                 synchronized(lock) { writeChapter(job, ch, html) }
                                 synchronized(lock) {
                                     statuses[i] = ChapterStatus.DONE
@@ -182,6 +182,7 @@ class Downloader(
                         if (cancelled()) break
                         try {
                             val html = withChapterTimeout(chapterTimeoutMs) { fetchChapter(job.chapters[i]) }
+                            checkBody(html, job.chapters[i].title)
                             writeChapter(job, job.chapters[i], html)
                             statuses[i] = ChapterStatus.DONE
                             ok++; fail--
@@ -296,6 +297,21 @@ class Downloader(
         }
     }
 
+    /**
+     * 正文合格判定。不合格就抛错，让这一章记 FAILED 而不是 DONE。
+     *
+     * 存在的理由：以前只判 `isBlank()`。规则坏掉的书源（如 m.rulianshi.la）
+     * 每章只回 21 字，照样算成功写进 jsonl，进度显示「已下载 320/320」，
+     * 用户打开全书都是 21 字 —— 这就是「取不到书」。
+     *
+     * 正常章节至少几百字；300 这个阈值是 e2e 第 6 段用的同一口径。
+     */
+    private fun checkBody(html: String, title: String) {
+        if (html.isBlank()) error("正文为空")
+        val chars = bodyChars(html)
+        if (chars < MIN_BODY_CHARS) error("正文过短（${title.take(12)} 仅 ${chars} 字）")
+    }
+
     private fun writeChapter(job: BookJob, ch: ChapterRef, html: String) {
         // itemId 也是书源给的值，和 title/content 一样不可信。裸拼的话，
         // 链接里带引号就写出断裂行，读回时对不上 → 每轮续传重下这一章，导出时这章消失。
@@ -336,6 +352,22 @@ class Downloader(
     }
 
     companion object {
+        /**
+         * 单章正文的最少字数（去空白后）。低于此值判本章失败，可重试/可重下。
+         * 阈值与 e2e 第 6 段「正文完整」同一口径。
+         */
+        const val MIN_BODY_CHARS = 300
+
+        /**
+         * 正文有效字数（去标签、去空白）。
+         *
+         * 特意不走 [htmlToText]：restore() 要对整本 jsonl 逐章判，
+         * 那边做四五次正则 + 逐行缩进，3000 章的书在手表上要卡住界面。
+         * 这里只去标签，阈值只要粗致。
+         */
+        fun bodyChars(html: String): Int =
+            html.replace(Regex("<[^>]+>"), "").count { !it.isWhitespace() && it != '\u3000' }
+
         /**
          * 取数线程上限。
          *
@@ -420,9 +452,15 @@ class Downloader(
                 }
             }
             // jsonl 里有的章，状态一定是 DONE
+            // 但旧版本没校验正文字数：规则坏掉的源会写进 21 字一章还标 DONE，
+            // 用户打开全书空白。这类必须当未下载重跑，否则永远修不好。
             val downloaded = store.readChapters(bookId)
             chapters.forEachIndexed { i, ch ->
-                if (downloaded.containsKey(ch.itemId)) statuses[i] = ChapterStatus.DONE
+                val line = downloaded[ch.itemId] ?: return@forEachIndexed
+                val body = TinyJson.path(line, "content") ?: ""
+                val chars = bodyChars(body)
+                statuses[i] = if (chars >= MIN_BODY_CHARS) ChapterStatus.DONE
+                              else ChapterStatus.FAILED
             }
             // 进程被杀时没有机会写 DONE。RUNNING 只能表示上次异常中断，不能继续冒充运行中。
             //

@@ -1,6 +1,14 @@
 import com.watchdl.core.*
 import java.io.File
 
+/**
+ * 取数器返回的假正文。
+ *
+ * 必须够 [Downloader.MIN_BODY_CHARS] 字：以前夹具都是「<p>正2 章</p>」这种 5 字正文，
+ * 而真实现的合格判定要求足够长。夹具不真实的话，这层判定就永远测不到。
+ */
+private fun chapterBody(s: String) = "<p>$s" + "正文填充".repeat(100) + "</p>"
+
 /** 下载引擎自检：批拆分、退避、双写落盘、恢复、导出。用假取数器，不碰网络。 */
 fun main() {
     var failures = 0
@@ -33,7 +41,7 @@ fun main() {
         val dl = Downloader(store, fetchChapter = { ch ->
             calls++
             if (ch.itemId == "id7") error("模拟永久失败")
-            "<p>正文 ${ch.title}</p>"
+            chapterBody("正文 ${ch.title}")
         }, log = {}, sleep = {})
         val r = dl.run(job)
         check("大部分成功", r.success >= 27, "成功 ${r.success} 失败 ${r.failed}")
@@ -51,10 +59,32 @@ fun main() {
             "实际 ${restored.statuses[6]}")
         check("未完成不算 finished", !restored.isFinished)
 
+        println("[Downloader] 正文过短不算成功")
+        // 真实现场：书源规则失效后每章只回 21 字，旧代码当成功写进 jsonl，
+        // 进度显示「已下载 320/320」，用户打开全书空白。
+        run {
+            val sStore = JobStore(root.resolve("short"))
+            val sBook = BookJob("sh1", "短正文书", "作者",
+                (0 until 3).map { ChapterRef("p$it", "第${it + 1}章", false) })
+            val r = Downloader(sStore, fetchChapter = { "<p>只有二十一个字而已真的很少</p>" },
+                log = {}, sleep = {}).run(sBook)
+            check("短正文全部记失败", r.success == 0 && r.failed == 3,
+                "成功 ${r.success} / 失败 ${r.failed}")
+            check("短正文不落盘", sStore.readChapters("sh1").isEmpty(),
+                "${sStore.readChapters("sh1").size} 章落了盘")
+            // 旧版本已经写进 jsonl 的短章，restore 要当未完成，否则永远修不好。
+            sStore.chaptersFile("sh1").parentFile!!.mkdirs()
+            sStore.chaptersFile("sh1").writeText(
+                """{"itemId":"p0","title":"第1章","content":"<p>二十一个字</p>"}""" + "\n")
+            val st = Downloader.restore(sStore, "sh1")
+            check("旧短章恢复成未完成", st?.statuses?.get(0) != ChapterStatus.DONE,
+                "实际 ${st?.statuses?.get(0)}")
+        }
+
         println("[Downloader] 续传不重复下载")
         // 注意：必须用新计数器测新实例——用旧变量会读到第一次那个 lambda 的值
         var resumeCalls = 0
-        val rr = Downloader(store, fetchChapter = { resumeCalls++; "<p>补下载</p>" }, log = {}, sleep = {})
+        val rr = Downloader(store, fetchChapter = { resumeCalls++; chapterBody("补下载") }, log = {}, sleep = {})
             .run(restored)
         check("只补失败的章", resumeCalls == 1, "实际请求 $resumeCalls 次")
 
@@ -133,7 +163,7 @@ fun main() {
             val noNum = JobStore(root.resolve("nonum"))
             val b = BookJob("b7", "无号书", "作者",
                 listOf(ChapterRef("a", "开头", false), ChapterRef("b", "承接", false)))
-            Downloader(noNum, fetchChapter = { ch -> "<p>正文${ch.title}</p>" }, log = {}, sleep = {})
+            Downloader(noNum, fetchChapter = { ch -> chapterBody("正文${ch.title}") }, log = {}, sleep = {})
                 .run(b, indexes = listOf(0, 1))
             val o2 = File(root, "nonum.txt")
             Downloader.exportText(noNum, "b7", o2)
@@ -148,7 +178,7 @@ fun main() {
             val bigStore = JobStore(root.resolve("big"))
             val big = BookJob("b9", "大部头", "作者",
                 (0 until 60).map { ChapterRef("i$it", "第${it + 1}章", false) })
-            Downloader(bigStore, fetchChapter = { ch -> "<p>正文${ch.title}</p>" }, log = {}, sleep = {})
+            Downloader(bigStore, fetchChapter = { ch -> chapterBody("正文${ch.title}") }, log = {}, sleep = {})
                 .run(big, indexes = (0 until 60).toList())
             val bigOut = File(root, "big.txt")
             val bigN = Downloader.exportText(bigStore, "b9", bigOut)
@@ -171,7 +201,7 @@ fun main() {
             shStore.chaptersFile("s1").parentFile!!.mkdirs()
             java.io.RandomAccessFile(shStore.chaptersFile("s1"), "rw").use { raf ->
                 for (i in scrambled) {
-                    val line = """{"itemId":"s$i","title":"第${i + 1}章","content":"<p>正文${i + 1}</p>"}""" + "\n"
+                    val line = """{"itemId":"s$i","title":"第${i + 1}章","content":"${chapterBody("正文${i + 1}")}"}""" + "\n"
                     raf.write(line.toByteArray(Charsets.UTF_8))
                 }
             }
@@ -192,7 +222,7 @@ fun main() {
             val cBook = BookJob("c1", "并发书", "作者",
                 (0 until 40).map { ChapterRef("j$it", "第${it + 1}章", false) })
             val r = Downloader(
-                cStore, fetchChapter = { ch -> "<p>内容${ch.title}</p>" },
+                cStore, fetchChapter = { ch -> chapterBody("内容${ch.title}") },
                 log = {}, sleep = {}, gapMs = 0, concurrency = 4,
             ).run(cBook, indexes = (0 until 40).toList())
             check("并发全部完成", r.success == 40, "成功 ${r.success} / 失败 ${r.failed}")
@@ -223,8 +253,8 @@ fun main() {
                 fetchChapter = { ch ->
                     called.incrementAndGet()
                     // 第 1 章永远卡住，其余章正常。
-                    if (ch.itemId == "k0") { Thread.sleep(60_000); "<p>x</p>" }
-                    else "<p>内容${ch.title}</p>"
+                    if (ch.itemId == "k0") { Thread.sleep(60_000); chapterBody("x") }
+                    else chapterBody("内容${ch.title}")
                 },
                 log = {}, sleep = {}, gapMs = 0,
                 chapterTimeoutMs = 600, isCancelled = { System.currentTimeMillis() - t0 > 60_000 },
@@ -250,7 +280,7 @@ fun main() {
                         while (release.count > 0) {
                             try { release.await() } catch (_: InterruptedException) { }
                         }
-                        "<p>正文</p>"
+                        chapterBody("正文")
                     }, gapMs = 0, chapterTimeoutMs = 0).run(iBook)
                 } finally { returned.countDown() }
             }
@@ -264,7 +294,7 @@ fun main() {
             check("写入线程未结束时 run 不返回", !early)
             check("写入线程结束后 run 返回", !worker.isAlive)
             check("中断落盘为取消", TinyJson.path(iStore.readJob("interrupt") ?: "", "state") == "CANCELLED")
-            Downloader(iStore, fetchChapter = { "<p>正文</p>" }, gapMs = 0).run(Downloader.restore(iStore, "interrupt")!!)
+            Downloader(iStore, fetchChapter = { chapterBody("正文") }, gapMs = 0).run(Downloader.restore(iStore, "interrupt")!!)
             check("取消后可显式续传", TinyJson.path(iStore.readJob("interrupt") ?: "", "state") == "DONE")
         }
 
