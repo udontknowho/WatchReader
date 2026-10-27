@@ -16,8 +16,9 @@ import java.util.ArrayDeque
  * 只依赖 java.io / java.util，纯 JVM 测试里也能跑（[Log] 反射兜住）。
  */
 object DevLog {
-    private const val CAP = 500
-    private const val MAX_BYTES = 256L * 1024   // 超过就轮转一次，别把关表用户的存储吃光
+    // 一次多源搜索就是几百行，500 条装不下前后文。3000 条 × 约 200 字节 ≈ 600KB 内存。
+    private const val CAP = 3000
+    private const val MAX_BYTES = 2L * 1024 * 1024   // 超过就轮转一次，别把关表用户的存储吃光
     private const val TAG = "WatchDL"
 
     @Volatile var enabled: Boolean = false

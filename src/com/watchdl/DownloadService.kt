@@ -277,7 +277,7 @@ class DownloadService : Service() {
             val dl = Downloader(
                 store = store,
                 fetchChapter = { ch -> source.content(ch.itemId, info.bookId) },
-                log = { },
+                log = { com.watchdl.core.DevLog.log("DL", it) },
                 sleep = { Thread.sleep(it) },
                 // 番茄是自家公开接口，350ms 的通用间隔对它保守过头。
                 // 第三方书源保持默认值，免得把人打急。

@@ -96,16 +96,21 @@ class MultiSource(
         try {
             val tasks = sources.map { ns ->
                 Callable {
+                    val t0 = System.currentTimeMillis()
                     runCatching { ns.source.search(keyword, page) }
                         .onSuccess { hits ->
                             respondedCount.incrementAndGet()
+                            DevLog.log("SRC", "「${ns.name}」命中 ${hits.size} 本 ${System.currentTimeMillis() - t0}ms")
                             // 源自己没填来源名时，用我们在 MultiSource 里登记的名字补上。
                             // 这样界面无论从哪条路都拿得到来源标注。
                             hits.forEach { h ->
                                 collected.add(if (h.sourceName.isBlank()) h.copy(sourceName = ns.name) else h)
                             }
                         }
-                        .onFailure { failed.add(ns.name) }
+                        .onFailure {
+                            failed.add(ns.name)
+                            DevLog.log("SRC", "「${ns.name}」失败 ${System.currentTimeMillis() - t0}ms ${it.javaClass.simpleName}: ${it.message}")
+                        }
                     // 跑完一条报一次进度（成功失败都算）。
                     onProgress?.invoke(finished.incrementAndGet(), sources.size)
                 }
@@ -115,6 +120,7 @@ class MultiSource(
             futures.forEachIndexed { i, f ->
                 if (f.isCancelled) {
                     failed.add(sources[i].name)
+                    DevLog.log("SRC", "「${sources[i].name}」超时被取消（本轮 ${timeoutMs}ms 用完）")
                     // 被取消的源不会再走到上面的回调，这里补报，否则进度条永远不到 100%。
                     onProgress?.invoke(finished.incrementAndGet(), sources.size)
                 }
@@ -124,6 +130,7 @@ class MultiSource(
         }
 
         val hits = dedupe(collected)
+        DevLog.log("SRC", "搜索「$keyword」第 $page 页：${sources.size} 源响应 ${respondedCount.get()}，失败 ${failed.size}，命中 ${hits.size} 本")
         return Result(
             hits = hits,
             total = sources.size,

@@ -107,6 +107,27 @@ object Http {
     data class Response(val body: String, val finalUrl: String, val charset: String?, val code: Int)
 
     /**
+     * 一行请求日志：`GET host/path 200 850ms 12KB`。
+     *
+     * 只记 host+path（去 query）：诊断要看的是「哪个站、哪个页慢」，
+     * 而 query 里常带 cookie/token，不宜进日志。
+     */
+    private fun logReq(method: String, url: String, code: Int?, ms: Long, bytes: Int?, err: Throwable?) {
+        if (!DevLog.enabled) return          // 关着就别拼字符串
+        val where = runCatching {
+            val u = URL(url)
+            val port = if (u.port > 0 && u.port != u.defaultPort) ":${u.port}" else ""
+            u.host + port + u.path.take(120)
+        }.getOrElse { url.take(120) }
+        val tail = if (err != null) {
+            "ERR ${err.javaClass.simpleName}: ${err.message}"
+        } else {
+            "$code ${ms}ms ${(bytes ?: 0) / 1024}KB"
+        }
+        DevLog.log("HTTP", "${method.uppercase()} $where $tail${if (err == null && ms > 5000) " 慢" else ""}")
+    }
+
+    /**
      * 原始字节版：番茄的设备注册要发二进制体，正文要读 `y`/`c` 响应头。
      * 只支持单跳，不跟重定向（这两个接口都不跳）。
      */
@@ -135,19 +156,26 @@ object Http {
         val budget = totalTimeoutMs?.toLong() ?: (timeoutMs.toLong() * TOTAL_FACTOR + 2_000)
         val probeOk = probe && budget > PROBE_TIMEOUT_MS * 2L
         val target = if (probeOk) upscale(url) else url
+        val t0 = System.currentTimeMillis()
         val task = java.util.concurrent.FutureTask {
             fetchRawNow(target, method, body, contentType, headers, userAgent, timeoutMs)
         }
         POOL.execute(task)
         return try {
-            task.get(budget, java.util.concurrent.TimeUnit.MILLISECONDS)
+            val r = task.get(budget, java.util.concurrent.TimeUnit.MILLISECONDS)
+            logReq(method, target, r.code, System.currentTimeMillis() - t0, r.bytes.size, null)
+            r
         } catch (e: java.util.concurrent.TimeoutException) {
             task.cancel(true)
+            DevLog.log("HTTP", "${method.uppercase()} ${target.take(120)} 超时(原始) ${budget}ms")
             throw java.io.IOException("请求超时（${budget}ms，含 DNS）")
         } catch (e: java.util.concurrent.ExecutionException) {
-            throw (e.cause as? Exception) ?: e
+            val c = (e.cause as? Exception) ?: e
+            logReq(method, target, null, System.currentTimeMillis() - t0, null, c)
+            throw c
         } catch (e: InterruptedException) {
             task.cancel(true)
+            logReq(method, target, null, System.currentTimeMillis() - t0, null, e)
             Thread.currentThread().interrupt()
             throw java.io.IOException("请求被取消")
         }
@@ -221,19 +249,26 @@ object Http {
         // 所以只在预算够宽时才探，宁可用明文，也不能让功能失效。
         val probeOk = probe && budget > PROBE_TIMEOUT_MS * 2L
         val target = if (probeOk) upscale(url) else url
+        val t0 = System.currentTimeMillis()
         val task = java.util.concurrent.FutureTask {
             fetchNow(target, method, body, headers, referer, timeoutMs, totalTimeoutMs)
         }
         POOL.execute(task)
         return try {
-            task.get(budget, java.util.concurrent.TimeUnit.MILLISECONDS)
+            val r = task.get(budget, java.util.concurrent.TimeUnit.MILLISECONDS)
+            logReq(method, target, r.code, System.currentTimeMillis() - t0, r.body.length, null)
+            r
         } catch (e: java.util.concurrent.TimeoutException) {
             task.cancel(true)
+            DevLog.log("HTTP", "${method.uppercase()} ${target.take(120)} 超时 ${budget}ms")
             throw java.io.IOException("请求超时（${budget}ms，含 DNS）")
         } catch (e: java.util.concurrent.ExecutionException) {
-            throw (e.cause as? Exception) ?: e
+            val c = (e.cause as? Exception) ?: e
+            logReq(method, target, null, System.currentTimeMillis() - t0, null, c)
+            throw c
         } catch (e: InterruptedException) {
             task.cancel(true)
+            logReq(method, target, null, System.currentTimeMillis() - t0, null, e)
             Thread.currentThread().interrupt()
             throw java.io.IOException("请求被取消")
         }

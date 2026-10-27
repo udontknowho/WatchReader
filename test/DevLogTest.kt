@@ -33,26 +33,28 @@ fun main() {
 
     // 缓冲满：只留最近 CAP 条，不能无限涨（手表内存只有几百兆）。
     DevLog.clear()
-    repeat(700) { DevLog.log("T", "第 $it 条") }
+    repeat(3200) { DevLog.log("T", "第 $it 条") }   // 3200 > CAP 3000
     val d = DevLog.dump()
-    check("缓冲封顶 500", d.size == 500, "实际 ${d.size}")
-    check("留下的是最新的", d.last().contains("第 699 条"), "末条 ${d.lastOrNull()}")
+    check("缓冲封顶 3000", d.size == 3000, "实际 ${d.size}")
+    check("留下的是最新的", d.last().contains("第 3199 条"), "末条 ${d.lastOrNull()}")
     check("丢的是最旧的", d.none { it.contains("第 100 条") })
 
     // 落盘：每 8 条追加一次，700 条必然写过多轮。
     // 最后不足 8 条缓冲里是有的、文件里还没有，所以断言看最后一条已落盘的记录。
     check("落盘有内容", logFile.length() > 0, "长度 ${logFile.length()}")
     val text = logFile.readText()
-    check("文件里有日志行", text.contains("第 69") , "长度 ${text.length}")
-    check("写入不重复膨胀", logFile.length() < 40 * 1024, "长度 ${logFile.length()}")
+    check("文件里有日志行", text.contains("第 319") , "长度 ${text.length}")
+    // 不重复膨胀：文件行数不该超过缓冲行数（以前每次重抄整个 ring，行数会成倍涨）。
+    val lines = text.lines().filter { it.isNotBlank() }.size
+    check("写入不重复膨胀", lines <= 3000, "行数 $lines")
 
     // 超限轮转：不让日志把用户存储吃光。
     val big = File(dir, "big.log")
-    big.writeText("x".repeat(300 * 1024))
+    big.writeText("x".repeat(3 * 1024 * 1024))   // > MAX_BYTES 2MB
     DevLog.file = big
     DevLog.clear()
     repeat(9) { DevLog.log("T", "轮转 $it") }
-    check("超 256KB 后轮转", big.length() < 64 * 1024, "长度 ${big.length()}")
+    check("超 2MB 后轮转", big.length() < 64 * 1024, "长度 ${big.length()}")
 
     // 清空
     DevLog.clear()
