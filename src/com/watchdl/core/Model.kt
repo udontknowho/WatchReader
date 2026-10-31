@@ -45,6 +45,13 @@ data class BookInfo(
      * 书悄悄少几十章（N6）。
      */
     val truncated: Boolean = false,
+    /**
+     * 书籍简介。
+     *
+     * 来源两条：书源的 `ruleBookInfo.intro`（在取目录那次请求里顺带求值），
+     * 或搜索/榜单已有的摘要（[BookHit.abstractText]）—— 前者为空时由调用方补。
+     */
+    val intro: String = "",
 )
 
 /** 下载任务状态。字段名保持稳定，写进 job.json 后不要随意改。 */

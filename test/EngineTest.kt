@@ -17,6 +17,7 @@ fun main() {
 <div id="toc">
   <dl><dd><a href="/read/11">第一章 觉醒</a></dd><dd><a href="/read/12">第二章 突破</a></dd></dl>
 </div>
+<div class="intro">少年萧炎，天才变废物，三年之约。</div>
 <div class="content"><p>正文第一段</p><p>正文第二段</p></div>
 </body></html>
     """.trimIndent()
@@ -118,6 +119,7 @@ fun main() {
             url = "/toc/{{id}}",
             name = FieldRule.parse("@css:#toc dd a@text"),
             link = FieldRule.parse("@css:#toc dd a@href"),
+            intro = FieldRule.parse("@css:.intro"),
         ),
         content = ContentRule(
             url = "/read/{{id}}",
@@ -145,6 +147,7 @@ fun main() {
     check("目录 2 章", info.chapters.size == 2, "实际 ${info.chapters.size}")
     check("章节标题", info.chapters[0].title == "第一章 觉醒", info.chapters[0].title)
     check("章节链接绝对", info.chapters[0].itemId == "https://site.example/read/11", info.chapters[0].itemId)
+    check("简介从 ruleBookInfo.intro 取出", info.intro == "少年萧炎，天才变废物，三年之约。", info.intro)
 
     val text = engine.content("https://site.example/read/11")
     check("正文取到", text.contains("正文第一段"), text.take(60))

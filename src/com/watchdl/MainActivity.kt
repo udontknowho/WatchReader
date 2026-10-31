@@ -106,6 +106,13 @@ class MainActivity : Activity() {
     /** 切屏统一入口。换屏就意味着上一屏的后台任务全部作废。 */
     private fun setScreen(next: Screen) {
         if (next === screen || next == screen) return
+        // 同一屏换内容（搜索结果边跑边上屏、目录重载）时**不能撤任务**：
+        // 撤了就把正在跑的那轮搜索自己干掉。屏身份由 screenId 定义，
+        // 只看类型 + 关键词，不看列表内容。
+        if (screenId(next) == screenId(screen)) {
+            screen = next
+            return
+        }
         cancelTasks()
         screen = next
     }
@@ -237,6 +244,18 @@ class MainActivity : Activity() {
     private var progressDone = 0
     private var progressFailed = 0
     private var progressStartedAt = 0L
+    // 续传时的起点章数。速度/剩余时间只能用增量算：拿总数除以本次耗时
+    // 会算出「2190 章/分 · 约 37 秒」，实际要跑 5 分钟。
+    private var progressBase = 0
+    /**
+     * 首页「最近下载」里正在下的那一本书的副标题（P1-1）。
+     *
+     * 以前进度广播只在进度屏消费，停在首页时那一行一直是进屏时的数，
+     * 看着像下载卡死了。这里只留一个回调改那一行文字，不重建整屏。
+     */
+    private val homeProgressRows = HashMap<String, (Int, Int) -> Unit>()
+    /** 熔断原因，bookId → 一句人能读懂的话。开下时清掉。 */
+    private val abortHints = HashMap<String, String>()
     private var readerSize = Md3.FS_READ
     private var readerSpacing = 1.75f
     private var readerBackground = Color.rgb(20, 18, 24)
@@ -390,7 +409,38 @@ class MainActivity : Activity() {
         ensureNotifyPermission()
         // S19：进程被回收后重建时回到原来那一屏，别让用户重搜书名。
         if (!restoreScreen(savedInstanceState)) showHome()
+        // 报告 P0-1：从下载通知点进来时落在进度屏，而不是首页。
+        // 新建实例走 onCreate，已在前台则走 onNewIntent。
+        openFromNotification(intent)
         syncSourcesOnStart()
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        openFromNotification(intent)
+    }
+
+    /**
+     * 下载通知带 `EXTRA_BOOK_ID` 点进来时，直接落到那本书的进度屏。
+     *
+     * 报告 P0-1：以前通知点了只回首页，而首页那本下载中的书没有实时进度，
+     * 用户只能自己找目录、找「下载中」。
+     *
+     * 只在服务确实在跑这本时才跳：作业停了还跳进度屏，屏上是一个不动的数，
+     * 比留在首页更让人以为卡死。
+     */
+    private fun openFromNotification(intent: Intent?) {
+        val id = intent?.getStringExtra(DownloadService.EXTRA_BOOK_ID)
+            ?.takeIf { it.isNotBlank() } ?: return
+        if ((screen as? Screen.Progress)?.info?.bookId == id) return
+        if (DownloadService.runningBookId != id) return
+        val job = runCatching { Downloader.restoreLight(jobsStore(), id) }.getOrNull() ?: return
+        progressDone = job.count(ChapterStatus.DONE)
+        progressFailed = job.count(ChapterStatus.FAILED)
+        progressStartedAt = System.currentTimeMillis()
+        progressBase = progressDone
+        showProgress(BookInfo(job.bookId, job.name, job.author, job.chapters))
     }
 
     /**
@@ -447,6 +497,7 @@ class MainActivity : Activity() {
     /** ① 首页：搜索框 + 最近下载。 */
     private fun showHome() {
         setScreen(Screen.Home)
+        homeProgressRows.clear()
         root.removeAllViews()
         // 主屏内容自明，但顶栏完全没字时用户看不出这是什么应用（测试报告 P1-6）。
         root.addView(Widgets.topBar(this, "小说下载器", onBack = null, backGlyph = "",
@@ -502,18 +553,27 @@ class MainActivity : Activity() {
             for (job in books) {
                 val done = job.count(ChapterStatus.DONE)
                 val failed = job.count(ChapterStatus.FAILED)
-                // 副标题统一两段：作者 · 进度。字段数固定，列表才能纵向扫读。
-                val tail = if (failed > 0) "$done/${job.total} 章 · 失败 $failed"
-                           else "$done/${job.total} 章"
+                val tail = progressTail(done, job.total, failed)
                 val sub = if (job.author.isBlank()) tail else "${job.author} · $tail"
                 val displayName = job.name.ifBlank {
                     "未命名 · ${job.total} 章"
                 }
-                col.addView(Widgets.listItem(
+                val item = Widgets.listItem(
                     this, displayName, sub, twoLine = true, highlight = false,
                     trailing = "⋮",
                     onTrailingClick = { showJobMenu(job) },
-                ) { openBook(job.bookId, job.name.ifBlank { displayName }, job.author) })
+                ) { openBook(job.bookId, job.name.ifBlank { displayName }, job.author) }
+                // 只有正在下的那一本需要跟着广播走：其余书的进度不会自己变。
+                if (DownloadService.runningBookId == job.bookId) {
+                    val subView = item.getChildAt(item.childCount - 1) as? android.widget.TextView
+                    val author = job.author
+                    val total = job.total
+                    if (subView != null) homeProgressRows[job.bookId] = { d, f ->
+                        val t = progressTail(d, total, f)
+                        subView.text = if (author.isBlank()) t else "$author · $t"
+                    }
+                }
+                col.addView(item)
             }
             // 首页只露 8 本，其余全在书架页 —— 否则下载多了以后首页要滑很久
             // 才够得到搜索框。少于 8 本时不显入口，上面「书架」按钮已够用。
@@ -524,6 +584,10 @@ class MainActivity : Activity() {
         }
         root.addView(body)
     }
+
+    /** 最近下载行的进度尾巴。副标题统一两段，字段数固定，列表才能纵向扫读。 */
+    private fun progressTail(done: Int, total: Int, failed: Int): String =
+        if (failed > 0) "$done/$total 章 · 失败 $failed" else "$done/$total 章"
 
     /**
      * 书架数据：已下载的书，最近读过的在前。
@@ -670,6 +734,9 @@ class MainActivity : Activity() {
 
     /** 目录页一次渲染多少章（M8）。1600 章的书分 16 段，不再一次建 6400 个 View。 */
     private val TOC_WINDOW = 100
+
+    /** 简介卡片默认行数，点一下展开全文。 */
+    private val INTRO_LINES = 3
 
     /** 搜索结果一次只建这么多张卡（理由见 showHits 里的注释）。 */
     private val HITS_WINDOW = 60
@@ -847,6 +914,26 @@ class MainActivity : Activity() {
         val done = job?.count(ChapterStatus.DONE) ?: 0
         val failed = job?.count(ChapterStatus.FAILED) ?: 0
 
+        // 简介卡片。默认只显 3 行，点一下展开 —— 手表屏幕就那么大，
+        // 一整段简介会把目录挤到一屏之外。
+        // 兜底的 abstractText 常是「...」这类占位，只判非空会画出一张只有省略号的卡片。
+        // 有效字符不足 10 个就当没有简介，整张卡片不画。
+        if (info.intro.trim().let { it.isNotBlank() && it.count { c -> c.isLetterOrDigit() } >= 10 }) {
+            val ic = Widgets.card(this)
+            val tv = Md3.text(this, info.intro, Md3.FS_SM, Md3.onSurfaceVariant)
+            tv.maxLines = INTRO_LINES
+            tv.ellipsize = android.text.TextUtils.TruncateAt.END
+            tv.setOnClickListener {
+                val expanded = tv.maxLines != Int.MAX_VALUE
+                tv.maxLines = if (expanded) Int.MAX_VALUE else INTRO_LINES
+                tv.ellipsize = if (expanded) null else android.text.TextUtils.TruncateAt.END
+                tv.contentDescription = if (expanded) "书籍简介，点击收起" else "书籍简介，点击展开"
+            }
+            tv.contentDescription = "书籍简介，点击展开"
+            ic.addView(tv)
+            col.addView(ic)
+        }
+
         // 进度卡片
         val card = Widgets.card(this)
         val tocMeta = listOf(info.author, "${info.chapters.size} 章", "免费 $free")
@@ -866,10 +953,17 @@ class MainActivity : Activity() {
             })
         }
         val finished = job?.isFinished == true
+        // 差几章没下完也算完成态（P2-5）：1645/1650 的书，用户最想做的是导出，
+        // 不该因为 5 章失败就把导出从主按钮挪到右边的 ⤓。finished 仍按「零失败」原义保留。
+        val nearlyDone = !finished && job != null && job.total > 0 && done * 10 >= job.total * 9
         // 后台是否正在跑这本书。磁盘上的 state 靠不住：作业跑着的时候 job.json 一直是
         // RUNNING，restore 会把 RUNNING 改判成 PAUSED，于是下载中的页面误报「已中断」。
         val running = DownloadService.runningBookId == info.bookId
+        // 熔断停下的书（P0-3-a）：状态仍是 PAUSED，光看 state 分不出是「系统杀了后台」
+        // 还是「源坏了，自己停了」。所以熔断原因优先显示，下次开下时清掉。
+        val abortHint = abortHints[info.bookId]
         val hint: String? = when {
+            abortHint != null -> abortHint
             finished || running -> null
             job?.state == JobState.CANCELLED -> "上次下载已取消。点「继续下载」接着跑。"
             job?.state == JobState.PAUSED -> "上次下载已中断（系统回收了后台）。点「继续下载」接着跑。"
@@ -879,19 +973,24 @@ class MainActivity : Activity() {
         val row = Md3.row(this).apply { setPadding(0, Md3.dp(this@MainActivity, 7), 0, 0) }
         // 完成态不再给一个点了只弹 toast 的填充按钮：整屏最显眼的控件必须有动作。
         val go = Widgets.button(this, when {
-            finished -> "导出 TXT"
+            finished || nearlyDone -> "导出 TXT"
             running -> "下载中…"
             done > 0 -> "继续下载"
             else -> "下载免费章"
         }, "filled") {
             when {
-                finished -> exportTxt(info)
+                finished || nearlyDone -> exportTxt(info)
                 running -> toast("正在下载，进度看通知")
                 else -> startDownload(info)
             }
         }
         row.addView(go, LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f))
-        val exp = Widgets.button(this, "⤓", "tonal") { exportTxt(info) }
+        // 差几章的书把导出提到主按钮后，右边这个按钮不能再是导出的复制品 ——
+        // 否则那几章失败的永远没地方重试。它改成「续下」入口。
+        val exp = Widgets.button(this, if (nearlyDone) "↻" else "⤓", "tonal") {
+            if (nearlyDone) startDownload(info) else exportTxt(info)
+        }
+        exp.contentDescription = if (nearlyDone) "继续下载" else "导出 TXT"
         row.addView(exp, LinearLayout.LayoutParams(Md3.dp(this, Md3.BTN), Md3.dp(this, Md3.BTN)).apply {
             leftMargin = Md3.dp(this@MainActivity, Md3.GAP)
         })
@@ -969,8 +1068,9 @@ class MainActivity : Activity() {
         card.addView(num)
         card.addView(Widgets.progressBar(this, if (total > 0) progressDone.toFloat() / total else 0f, 5))
         val elapsed = if (progressStartedAt > 0) ((System.currentTimeMillis() - progressStartedAt) / 1000).coerceAtLeast(1) else 0
-        val speed = if (elapsed > 0) " · ${progressDone * 60 / elapsed} 章/分" else ""
-        val remain = if (progressDone > 0 && total > progressDone) " · 约 ${(total - progressDone) * elapsed / progressDone} 秒" else ""
+        val delta = (progressDone - progressBase).coerceAtLeast(0)
+        val speed = if (elapsed > 0 && delta > 0) " · ${delta * 60 / elapsed} 章/分" else ""
+        val remain = if (delta > 0 && total > progressDone) " · 约 ${(total - progressDone) * elapsed / delta} 秒" else ""
         card.addView(Md3.text(this, "已下载 $progressDone 章，失败 $progressFailed 章$speed$remain", Md3.FS_SM, Md3.onSurfaceVariant))
         // shortcut: 进度屏首次进入时在主线程完整读一次，用来列出失败章。
         // 按章数线性增长：167 章实测 10.6 ms，3000 章约 190 ms（超一帧）。
@@ -1027,9 +1127,10 @@ class MainActivity : Activity() {
         progressSub = card.getChildAt(2) as? android.widget.TextView
         val elapsed = if (progressStartedAt > 0)
             ((System.currentTimeMillis() - progressStartedAt) / 1000).coerceAtLeast(1) else 0
-        val speed = if (elapsed > 0) " · ${progressDone * 60 / elapsed} 章/分" else ""
-        val remain = if (progressDone > 0 && total > progressDone)
-            " · 约 ${(total - progressDone) * elapsed / progressDone} 秒" else ""
+        val delta = (progressDone - progressBase).coerceAtLeast(0)
+        val speed = if (elapsed > 0 && delta > 0) " · ${delta * 60 / elapsed} 章/分" else ""
+        val remain = if (delta > 0 && total > progressDone)
+            " · 约 ${(total - progressDone) * elapsed / delta} 秒" else ""
         sub.text = "已下载 $progressDone 章，失败 $progressFailed 章$speed$remain"
     }
 
@@ -1201,110 +1302,112 @@ class MainActivity : Activity() {
     ) {
         setScreen(Screen.Discover(site, gender, rankKey))
         root.removeAllViews()
-        val sel = discoverRanks().firstOrNull { it.key == rankKey }
-        root.addView(Widgets.topBar(this, sel?.name ?: "发现",
-            onBack = { if (rankKey.isBlank()) goBackToPrevious() else showDiscover(site, gender, "") },
-            trailing = listOf("⟳" to { showDiscover(site, gender, rankKey) })))
-
-        val body = Widgets.scrollBody(this, crownStep, crownGlide)
-        val col = Widgets.contentColumn(body)
-        root.addView(body)
-
-        // 站点。换站点会把已选的榜清掉 —— 番茄的分类 ID 起点没有对应物。
-        col.addView(Widgets.sectionLabel(this, "站点"))
-        val tabs = Md3.row(this)
-        for ((k, label) in listOf("fq" to "番茄", "qd" to "起点")) {
-            val on = k == site
-            val b = Widgets.button(this, label, if (on) "filled" else "tonal", {
-                if (!on) showDiscover(k, gender, "")
-            })
-            b.contentDescription = label
-            tabs.addView(b, LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f).apply {
-                if (tabs.childCount > 0) leftMargin = Md3.dp(this@MainActivity, Md3.GAP / 2)
-            })
-        }
-        tabs.layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, Md3.BTN),
-        ).apply { bottomMargin = Md3.dp(this@MainActivity, Md3.GAP) }
-        col.addView(tabs)
-
-        // 频道。起点五个榜都分男女频，番茄分类 ID 更是男女频完全不通用。
-        col.addView(Widgets.sectionLabel(this, "频道"))
-        val genders = Md3.row(this)
-        for ((g, label) in listOf("male" to "男频", "female" to "女频")) {
-            val on = g == gender
-            val b = Widgets.button(this, label, if (on) "filled" else "tonal", {
-                if (!on) showDiscover(site, g, "")
-            })
-            genders.addView(b, LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f).apply {
-                if (genders.childCount > 0) leftMargin = Md3.dp(this@MainActivity, Md3.GAP / 2)
-            })
-        }
-        genders.layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, Md3.BTN),
-        ).apply { bottomMargin = Md3.dp(this@MainActivity, Md3.GAP) }
-        col.addView(genders)
 
         // 这个站点+频道下有哪些榜。
         val genderEnum = if (gender == "female") RankConfig.Gender.FEMALE else RankConfig.Gender.MALE
         val siteEnum = if (site == "qd") RankConfig.Site.QIDIAN else RankConfig.Site.FANQIE
         val avail = discoverRanks().filter { it.site == siteEnum && it.gender == genderEnum }
+        // 没指定就选第一个。两栏布局里右栏空着等于白占一半屏。
+        val sel = avail.firstOrNull { it.key == rankKey } ?: avail.firstOrNull()
+
+        root.addView(Widgets.topBar(this, sel?.name ?: "发现",
+            onBack = { goBackToPrevious() },
+            trailing = listOf("⟳" to { showDiscover(site, gender, rankKey) })))
+
+        // 站点与频道合成一行。手表屏高只有 248dp，两个各带分组标题的区块
+        // 各吃掉约 69dp，两栏就没地方了。
+        val head = Md3.row(this)
+        head.setPadding(Md3.dp(this, Md3.PAD), 0, Md3.dp(this, Md3.PAD), 0)
+        for ((on, label, act) in listOf<Triple<Boolean, String, () -> Unit>>(
+            Triple(site == "fq", "番茄", { if (site != "fq") showDiscover("fq", gender, "") }),
+            Triple(site == "qd", "起点", { if (site != "qd") showDiscover("qd", gender, "") }),
+            Triple(gender == "male", "男频", { if (gender != "male") showDiscover(site, "male", "") }),
+            Triple(gender == "female", "女频", { if (gender != "female") showDiscover(site, "female", "") }),
+        )) {
+            val b = Widgets.button(this, label, if (on) "filled" else "tonal", act)
+            b.contentDescription = label
+            head.addView(b, LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f).apply {
+                if (head.childCount > 0) leftMargin = Md3.dp(this@MainActivity, Md3.GAP / 2)
+            })
+        }
+        head.layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, Md3.BTN),
+        ).apply { bottomMargin = Md3.dp(this@MainActivity, Md3.GAP) }
+        root.addView(head)
+
         if (avail.isEmpty()) {
-            col.addView(Widgets.emptyState(this, "▤", "这个频道暂时没有榜单"))
+            root.addView(Widgets.emptyState(this, "▤", "这个频道暂时没有榜单"), Md3.lpWeight(1f))
             return
         }
+        val cur = sel ?: return
 
-        // 番茄：先选分类，再选阅读/新书。起点：一个平铺的榜列表。
-        col.addView(Widgets.sectionLabel(this, if (site == "qd") "榜单" else "分类"))
-        // 按分类名分组，一个分类一行两个按钮（阅读 / 新书）。
-        val byCat = LinkedHashMap<String, MutableList<RankConfig.Rank>>()
+        // 两栏：左分类（自己滚），右书目（表冠滚）。
+        val split = Md3.row(this)
+        split.layoutParams = Md3.lpWeight(1f)
+        split.setPadding(Md3.dp(this, Md3.PAD), 0, Md3.dp(this, Md3.PAD), Md3.dp(this, Md3.PAD))
+        root.addView(split)
+
+        // 侧栏宽度：手表 189dp 下给 59dp，四字分类刚好放得下；
+        // 手机上放大到 100dp，右栏书名也就没那么挤。
+        val railScroll = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = true
+            scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY
+            layoutParams = LinearLayout.LayoutParams(
+                Md3.dp(this@MainActivity, if (Md3.isWide(this@MainActivity)) 100 else 59),
+                ViewGroup.LayoutParams.MATCH_PARENT)
+        }
+        val rail = Md3.column(this)
+        railScroll.addView(rail, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        split.addView(railScroll)
+
+        // 右侧书目用 scrollBody 是为了白拿它的表冠滚动；它自带的四周 PAD
+        // 在这里会顶出一倍的缝，所以置零，边距由 split 统一给。
+        val paneBody = Widgets.scrollBody(this, crownStep, crownGlide)
+        paneBody.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+            .apply { leftMargin = Md3.dp(this@MainActivity, Md3.GAP) }
+        paneBody.setPadding(0, 0, 0, 0)
+        split.addView(paneBody)
+        val pane = Widgets.contentColumn(paneBody)
+
         for (r in avail) {
-            // 榜单名形如「西方奇幻 · 阅读」，分类名取分隔符前那段。
-            val cat = r.name.substringBefore(" · ")
-            byCat.getOrPut(cat) { mutableListOf() }.add(r)
-        }
-        for ((cat, list) in byCat) {
-            if (site == "qd") {
-                // 起点每个榜独立一个按钮，名字里没有「 · 」。
-                for (r in list) col.addView(rankButton(r, rankKey, site, gender))
-            } else {
-                // 番茄只剩「阅读」榜一个，整行做成按钮 —— 右边不再留一块空白。
-                // 分类名直接当按钮文字，少一层「标签 + 小按钮」的读法。
-                val r = list.first()
-                val on = r.key == rankKey
-                val b = Widgets.button(this, cat, if (on) "filled" else "tonal") {
-                    if (!on) showDiscover(site, gender, r.key)
-                }
-                b.layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, Md3.BTN),
-                ).apply { bottomMargin = Md3.dp(this@MainActivity, Md3.GAP / 2) }
-                col.addView(b)
+            val on = r.key == cur.key
+            // 榜单名形如「西方奇幻 · 阅读」，侧栏只放分类名。
+            val label = if (site == "qd") r.name else r.name.substringBefore(" · ")
+            val item = Md3.text(this, label, Md3.FS_SM,
+                if (on) Md3.onPrimaryContainer else Md3.onSurfaceVariant, bold = on).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                maxLines = 2
+                setPadding(Md3.dp(context, 6), Md3.dp(context, 3), Md3.dp(context, 6), Md3.dp(context, 3))
+                minimumHeight = Md3.dp(context, Md3.ITEM)
+                background = if (on) Md3.bg(Md3.primaryContainer, Md3.R_ITEM.toFloat())
+                             else Md3.ripple(context, Color.TRANSPARENT, Md3.R_ITEM.toFloat())
+                contentDescription = label
+                isClickable = true
+                setOnClickListener { if (!on) showDiscover(site, gender, r.key) }
             }
+            rail.addView(item, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = Md3.dp(this@MainActivity, 2) })
         }
 
-        if (sel == null) {
-            // 还没选榜，屏上只有选择器：这正是后台拉云端配置的好时机。
-            // 拉到了且列表真变了就重画一次；没变就不动，不闪。
-            refreshRanks(Screen.Discover(site, gender, rankKey)) {
-                showDiscover(site, gender, rankKey)
-            }
-            return
-        }
-
-        // 选中了榜：只拉这一个。
-        col.addView(Widgets.sectionLabel(this, sel.name))
-        val holder = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        col.addView(holder)
+        val holder = Md3.column(this)
+        pane.addView(holder)
         holder.addView(Md3.text(this, "正在拉取…", Md3.FS_SM, Md3.onSurfaceVariant))
 
-        bg(Screen.Discover(site, gender, rankKey), { loadOneRank(sel) }) { res ->
+        // 云端配置照旧在后台刷：拉到了且列表真变了就重画一次，没变就不动。
+        refreshRanks(Screen.Discover(site, gender, rankKey)) {
+            showDiscover(site, gender, rankKey)
+        }
+
+        bg(Screen.Discover(site, gender, rankKey), { loadOneRank(cur) }) { res ->
             holder.removeAllViews()
             res.onSuccess { hits ->
                 if (hits.isEmpty()) {
                     holder.addView(Md3.text(this, "这个榜暂时没有内容",
                         Md3.FS_SM, Md3.onSurfaceVariant))
                 } else {
-                    for (h in hits) holder.addView(discoverItem(col, h))
+                    for (h in hits) holder.addView(discoverItem(pane, h))
                 }
             }.onFailure { e ->
                 holder.addView(Md3.text(this, "取不到：${e.message?.take(60)}",
@@ -1314,18 +1417,6 @@ class MainActivity : Activity() {
                 }))
             }
         }
-    }
-
-    /** 起点用：一个榜一个按钮。 */
-    private fun rankButton(r: RankConfig.Rank, cur: String, site: String, gender: String): View {
-        val on = r.key == cur
-        val b = Widgets.button(this, r.name, if (on) "filled" else "tonal", {
-            if (!on) showDiscover(site, gender, r.key)
-        })
-        b.layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, Md3.BTN),
-        ).apply { bottomMargin = Md3.dp(this@MainActivity, 2) }
-        return b
     }
 
     /**
@@ -1414,7 +1505,7 @@ class MainActivity : Activity() {
      * 重渲染前已经靠 [postAlive] 核过屏身份 —— 用户已经走了就不重画。
      */
     private fun refreshRanks(owner: Screen, rerender: () -> Unit) {
-        if (rankRefreshing) return
+        if (rankRefreshing || rankRefreshed) return
         rankRefreshing = true
         bg(owner, { RankConfig.load(File(filesDir, "sources")) }) { res ->
             rankRefreshing = false
@@ -1850,6 +1941,9 @@ class MainActivity : Activity() {
         root.addView(body)
 
         val owner: Screen = Screen.Hits(keyword, emptyList(), offset, 0)
+        // 边跑边上屏：第一个带回命中的源到达就先显示，不等最慢那个源（实测 15 秒）。
+        // 累加器在 UI 线程外被写，同步表包一层。
+        val shown = java.util.Collections.synchronizedList(mutableListOf<BookHit>())
         bg(owner, {
             // 多源聚合：并发 5、总超时 15 秒，单源失败静默跳过。
             // offset 让「换一批源」从下一批开始，而不是重跑同一批。
@@ -1860,7 +1954,21 @@ class MainActivity : Activity() {
                     bar.max = total.coerceAtLeast(1)
                     bar.progress = done
                 }
-            }, offset = offset)
+            }, offset = offset, onPartial = { fresh, done, total ->
+                shown.addAll(fresh)
+                postAlive(owner) {
+                    // 只在「还停在同一关键词的结果屏」且「列表没被滚动」时重绘。
+                    // 用户已经滚下去看别的书时刷屏，比慢更不能忍。
+                    val cur = screen as? Screen.Hits
+                    if (cur != null && cur.keyword == keyword && hitsWinStart == 0) {
+                        // replay = true：不重置窗口、不写 seenHits。
+                        // 写了的话下面的最终结果会被自己过滤成空表。
+                        showHits(keyword, shown.toList(),
+                            MultiSource.Result(shown.toList(), total, done, emptyList()),
+                            offset = offset, replay = true)
+                    }
+                }
+            })
         }) { res ->
             res.onSuccess { r ->
                 DevLog.log("WatchDL",
@@ -1959,7 +2067,11 @@ class MainActivity : Activity() {
         bg(owner, {
             val src = sourceFor(hit)
             val tocAt = System.currentTimeMillis()
-            val got = src.toc(hit.bookId, hit.name, hit.author)
+            val got = src.toc(hit.bookId, hit.name, hit.author).let { t ->
+                // 简介：书源自己的 ruleBookInfo.intro 优先；它为空时用手上已有的摘要
+                // （搜索/榜单带回来的 abstractText），不再发一次请求。
+                if (t.intro.isNotBlank()) t else t.copy(intro = hit.abstractText.trim())
+            }
             DevLog.log("WatchDL", "目录「${hit.sourceName}」${got.chapters.size} 章 ${System.currentTimeMillis() - tocAt}ms")
             // 目录非空但正文规则已坏的书源很常见（实测 m.rulianshi.la 每章只回 21 字）。
             // 以前直接进目录页，用户下完 320 章才发现全书空白。
@@ -1992,7 +2104,15 @@ class MainActivity : Activity() {
                 if (pair.second.truncated) {
                     toast("目录可能不完整（${pair.second.chapters.size} 章），可稍后重试")
                 }
-                showToc(pair.second, pair.first)
+                // SourceEngine.toc 固定返回空 name/author（书源规则里没有稳定书名），
+                // 不回填的话作业名、通知标题、导出文件名全变成「未命名」。
+                showToc(
+                    pair.second.copy(
+                        name = pair.second.name.ifBlank { hit.name },
+                        author = pair.second.author.ifBlank { hit.author },
+                    ),
+                    pair.first,
+                )
             } else {
                 loadToc(name, author, candidates, tried + 1)
             }
@@ -2105,9 +2225,11 @@ class MainActivity : Activity() {
             return
         }
         // M8：主线程只读 job.json。restore 会解析整个 chapters.jsonl。
+        abortHints.remove(info.bookId)
         progressDone = Downloader.restoreLight(jobsStore(), info.bookId)?.count(ChapterStatus.DONE) ?: 0
         progressFailed = 0
         progressStartedAt = System.currentTimeMillis()
+        progressBase = progressDone
         showProgress(info)
         DownloadService.start(this, info, freeOnly = true)
     }
@@ -2429,8 +2551,24 @@ class MainActivity : Activity() {
             .setMessage("将删除“$label”的全部正文")
             .setNegativeButton("取消", null)
             .setPositiveButton("删除") { _, _ ->
-                File(jobsDir(), JobStore.safeDirName(job.bookId)).deleteRecursively()
-                showHome()
+                // 报告 P0-2：先取消再删。以前直接删目录，后台线程还在跑，
+                // 它每章落盘一次就会把目录连同 job.json 一起建回来 —— 书「诈尸」。
+                if (DownloadService.runningBookId == job.bookId) DownloadService.cancel(this)
+                thread {
+                    var waited = 0
+                    while (DownloadService.runningBookId == job.bookId && waited < 3000) {
+                        Thread.sleep(50)
+                        waited += 50
+                    }
+                    // 等不到也不要紧：墓碑会让后面所有落盘都落空。
+                    val gone = jobsStore().markDeleted(job.bookId)
+                    runOnUiThread {
+                        if (gone) {
+                            toast("已删除")
+                            showHome()
+                        } else toast("删除失败：目录仍被占用")
+                    }
+                }
             }.create()).show()
     }
 
@@ -2450,8 +2588,20 @@ class MainActivity : Activity() {
                 android.os.Environment.DIRECTORY_DOCUMENTS)
         }
         return try {
-            val target = contentResolver.insert(uri, values) ?: return null
-            val ok = contentResolver.openOutputStream(target)?.use { out ->
+            // MediaStore 对同名 DISPLAY_NAME 会自动加「(1)」，连点两次导出就在文档里
+            // 堆两份 1 MB 副本。所以先查同名条目，有就覆盖写，没有才新建。
+            val relPath = android.os.Environment.DIRECTORY_DOCUMENTS + "/"
+            val old = contentResolver.query(
+                uri, arrayOf(android.provider.MediaStore.MediaColumns._ID),
+                "${android.provider.MediaStore.MediaColumns.RELATIVE_PATH}=? AND " +
+                    "${android.provider.MediaStore.MediaColumns.DISPLAY_NAME}=?",
+                arrayOf(relPath, src.name), null,
+            )?.use { c ->
+                if (c.moveToFirst()) android.content.ContentUris.withAppendedId(uri, c.getLong(0)) else null
+            }
+            val target = old ?: contentResolver.insert(uri, values) ?: return null
+            // "wt"：截断后重写，否则覆盖短内容时旧文件尾巴会留下来。
+            val ok = contentResolver.openOutputStream(target, "wt")?.use { out ->
                 src.inputStream().use { it.copyTo(out) }
                 true
             } ?: false
@@ -2527,15 +2677,27 @@ class MainActivity : Activity() {
             runCatching {
                 progressDone = intent.getIntExtra(DownloadService.EXTRA_DONE, progressDone)
                 progressFailed = intent.getIntExtra(DownloadService.EXTRA_FAILED, progressFailed)
-            if (progressStartedAt == 0L) progressStartedAt = System.currentTimeMillis()
-            val finished = intent.getBooleanExtra(DownloadService.EXTRA_FINISHED, false)
-            val info = (screen as? Screen.Progress)?.info
-            if (finished) {
-                toast("下载结束：成功 $progressDone，失败 $progressFailed")
-                info?.let { showToc(it) }
-            } else if (info != null) {
-                showProgress(info)
-            }
+                if (progressStartedAt == 0L) progressStartedAt = System.currentTimeMillis()
+                val finished = intent.getBooleanExtra(DownloadService.EXTRA_FINISHED, false)
+                val info = (screen as? Screen.Progress)?.info
+                // 熔断原因跟着广播回来（P0-3-a）。熔断时服务会发 finished=true，
+                // 界面回到目录页——原因要写在那边，进度屏已经没了。
+                val abort = intent.getStringExtra(DownloadService.EXTRA_ABORT)
+                if (abort != null && info != null) abortHints[info.bookId] = abort
+                if (finished) {
+                    toast(abort ?: "下载结束：成功 $progressDone，失败 $progressFailed")
+                    // 结束时首页那一行的数字要变成最终值（P1-1）。
+                    when {
+                        info != null -> showToc(info)
+                        screen is Screen.Home -> showHome()
+                    }
+                } else if (info != null) {
+                    showProgress(info)
+                } else if (screen is Screen.Home) {
+                    DownloadService.runningBookId?.let { id ->
+                        homeProgressRows[id]?.invoke(progressDone, progressFailed)
+                    }
+                }
             }.onFailure { e ->
                 DevLog.log("WatchDL", "进度刷新失败（已忽略）：${e.message}")
             }

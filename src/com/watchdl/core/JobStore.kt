@@ -13,16 +13,37 @@ import java.io.RandomAccessFile
  */
 class JobStore(private val root: File) {
 
-    private fun dirOf(bookId: String): File = File(root, safeDirName(bookId)).apply { mkdirs() }
+    /** 目录路径。**不建目录**：读一个不存在的作业不该凭空造出空壳（见 [markDeleted]）。 */
+    private fun dirOf(bookId: String): File = File(root, safeDirName(bookId))
 
     fun jobFile(bookId: String): File = File(dirOf(bookId), "job.json")
     fun chaptersFile(bookId: String): File = File(dirOf(bookId), "chapters.jsonl")
+
+    /**
+     * 删除作业，并留下墓碑。
+     *
+     * 报告 P0-2：以前直接 `deleteRecursively()` 就完了，可后台线程可能还在跑，
+     * 它每章都会 persist 一次 —— 目录被删之后下一次落盘会连目录一起建回来，
+     * 书就「复活」了。墓碑让后续的落盘直接丢弃，跑着的线程由调用方先取消。
+     * 返回目录是否真的没了。
+     */
+    fun markDeleted(bookId: String): Boolean {
+        deleted.add(bookId)
+        val dir = synchronized(lockFor(bookId)) { dirOf(bookId).also { it.deleteRecursively() } }
+        return !dir.exists()
+    }
+
+    /** 重新下载同一本书时撤销墓碑。 */
+    fun clearDeleted(bookId: String) { deleted.remove(bookId) }
 
     private fun lockFor(bookId: String): Any =
         locks.computeIfAbsent(jobFile(bookId).canonicalPath) { Any() }
 
     companion object {
         private val locks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+
+        /** 已删除的作业（P0-2）。进程重启后墓碑自然清空：那时目录早没了，也没线程在写。 */
+        private val deleted = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
         /**
          * 把 bookId 变成安全的单层目录名。
          *
@@ -52,9 +73,12 @@ class JobStore(private val root: File) {
         // 两路并发时后写的会把前者的状态盖回去 —— 用户取消下载，
         // 界面报的却是「系统中断」，还得从头重下。按 bookId 分锁，不同书互不阻塞。
         synchronized(lockFor(bookId)) {
+            if (bookId in deleted) return
+            // 进锁后再判一次：删除请求可能刚好抢在入锁之前。
+            val dir = dirOf(bookId).apply { mkdirs() }
             val snapshot = if (isCancelled() || (!resume() && TinyJson.path(readJob(bookId) ?: "", "state") == "CANCELLED"))
                 setState(json, JobState.CANCELLED) else json
-            val tmp = File(dirOf(bookId), "job.json.tmp")
+            val tmp = File(dir, "job.json.tmp")
             // 先 fsync 再改名：只 writeText 的话数据还在页缓存里，改名后再断电就是零字节文件。
             java.io.RandomAccessFile(tmp, "rw").use { raf ->
                 raf.setLength(0)
@@ -97,6 +121,8 @@ class JobStore(private val root: File) {
     /** 追加一章并立即 flush。内容里的换行会被 JSON 转义，行分隔安全。 */
     fun appendChapter(bookId: String, chapterJson: String) {
         synchronized(lockFor(bookId)) {
+            if (bookId in deleted) return
+            dirOf(bookId).mkdirs()
             RandomAccessFile(chaptersFile(bookId), "rw").use { raf ->
                 raf.seek(raf.length())
                 raf.write((chapterJson + "\n").toByteArray(Charsets.UTF_8))

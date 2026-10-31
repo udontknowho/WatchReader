@@ -122,6 +122,16 @@ object RankConfig {
     const val FILE_NAME = "ranks.json"
 
     /**
+     * 内置表对应的版本号。缓存和云端配置低于它一律当作过期，不采用。
+     *
+     * 实测过的问题：设备上留着一份 v1 缓存（4 条，番茄分类榜一条都没有），
+     * 它非空，于是 `local()` 永远读它、内置表永远出不来，用户看到的就是
+     * 「分类榜没了」。云端 v2 又因为 jsdelivr 节点滞后一直没拉下来。
+     * 加内置 19+7 个分类榜、改过一次内容就要把这个数往上加。
+     */
+    const val BUILTIN_VERSION = 2
+
+    /**
      * 取配置的候选地址。与 [CloudSource.MIRRORS] 同一套 —— 镜像顺序只维护一处。
      */
     val MIRRORS: List<String> get() = CloudSource.MIRRORS
@@ -134,7 +144,8 @@ object RankConfig {
      * 发现页先用这份立刻出画面，云端配置交给后台线程刷。
      */
     fun local(dir: File): List<Rank> =
-        readCachedVersioned(dir)?.second ?: BUILTIN
+        // 过期缓存不算数。缓存非空不等于缓存有用 —— 见 [BUILTIN_VERSION]。
+        readCachedVersioned(dir)?.takeIf { it.first >= BUILTIN_VERSION }?.second ?: BUILTIN
 
     /**
      * 拉云端配置并落地。
@@ -155,9 +166,10 @@ object RankConfig {
         // 4 个域名都挂住时 4×8 秒 + 后续 45 秒 ≈ 77 秒，与宣称的预算不符。
         // 现在预算从进入 load 就开始计。
         val deadline = System.currentTimeMillis() + budgetMs
-        val cachedPair = readCachedVersioned(dir)
+        // 过期缓存当作没有，理由同 [BUILTIN_VERSION]：缺榜的旧配置比内置表还差。
+        val cachedPair = readCachedVersioned(dir)?.takeIf { it.first >= BUILTIN_VERSION }
         val cached = cachedPair?.second
-        val cachedVersion = cachedPair?.first ?: -1
+        val cachedVersion = cachedPair?.first ?: (BUILTIN_VERSION - 1)
         // 传了 base 就只试它（自检用），否则走镜像列表。
         val bases = if (base.isNotBlank()) listOf(base.trimEnd('/')) else MIRRORS
 
@@ -175,6 +187,8 @@ object RankConfig {
 
             val parsed = runCatching { parseVersioned(text) }.getOrNull()
             if (parsed == null || parsed.second.isEmpty()) continue
+            // 镜像上还挂着的旧版配置也不接，否则会把内置表顶掉。
+            if (parsed.first < BUILTIN_VERSION) continue
             // N8：取**最高版本**，不是第一个能解析的。
             // 设备缓存是 v4，先命中滞后的 gcore 节点（v2）就写回 v2，
             // 榜单列表会在两次进入之间抖动。

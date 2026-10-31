@@ -40,7 +40,42 @@ fun main() {
     check("正文为空也算正文无效", kind(IllegalStateException("正文为空")) == "正文无效")
     check("上层取消", kind(java.io.IOException("请求被取消")) == "取消")
     check("中断", kind(InterruptedException()) == "取消")
-    check("不认识的退回异常类名", kind(IllegalArgumentException("x")) == "IllegalArgumentException")
+    // 兜底分支必须带 message：只留类名的话，日志里四个字概括了一本 2478 章的书。
+    check("不认识的退回异常类名", kind(IllegalArgumentException("x")) == "IllegalArgumentException: x")
+
+    println("[Downloader] 正文与标题去噪")
+    // 真实样本：玄幻阁「斗破苍穹.2」第 1 章开头的推荐位书单。
+    val junk = listOf(
+        "魔道妖女重生后，大佬全是我道侣",
+        "穿越自带炼妖壶：桀桀，顷刻炼化",
+        "百年杂役，我在废丹房捡漏成仙",
+        "末世大佬穿星际，四个竹马悔哭了",
+        "兽世恋综当恶女？怎么顶流排队亲",
+        "词条修仙：从凡女开始叩仙门",
+        "血条是倒着的8？那是特喵无限！",
+        "道化圣人",
+    )
+    val prose = "相逢，注定着终究要到来的离别；而离别孕育着更加珍贵的相逢……" +
+        "七彩的流光包裹着萧炎的身体，巨大的撕扯力牵引着萧炎向天空的云层之中飞去。".repeat(15)
+    val cleaned = Downloader.stripHeadTitleBlock((junk + prose).joinToString("\n"))
+    check("书单块整块丢掉", !cleaned.contains("道化圣人"))
+    check("正文一个字没少", cleaned == prose, cleaned.take(40))
+
+    val dialogue = listOf("“你来了。”", "“我来了。”", "“你不该来。”", "“可她要走。”", "“那又如何？”", "“她等了你三年。”")
+        .joinToString("\n")
+    check("短对白开头的章节不动",
+        Downloader.stripHeadTitleBlock("$dialogue\n$prose") == "$dialogue\n$prose")
+
+    val shortChapter = (junk + prose.take(60)).joinToString("\n")
+    check("短章整块保留", Downloader.stripHeadTitleBlock(shortChapter) == shortChapter)
+
+    // 标题：源站给的「正文_第1章：…」不能再拼一层序号，前缀也要剥掉。
+    check("带源站前缀的标题不重复加序号",
+        Downloader.chapterHead("正文_第1章：结识神秘老者", 1) == "第1章：结识神秘老者")
+    check("无章节号的标题要补序号", Downloader.chapterHead("楔子", 3) == "第3章 楔子")
+    check("已有章节号原样保留",
+        Downloader.chapterHead("第一千五百九十三章 古帝洞府所在", 9) == "第一千五百九十三章 古帝洞府所在")
+    check("空标题只留序号", Downloader.chapterHead("", 7) == "第7章")
 
     println("[Downloader] 双写落盘与恢复")
     val root = File(System.getenv("WD_TEST_DIR") ?: "build/test-state", "wd-${System.nanoTime()}")

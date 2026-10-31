@@ -2546,5 +2546,227 @@
   },
   "searchUrl": "https://www.uukan.org/search/{{key}}.html",
   "weight": 0
+ },
+ {
+  "bookSourceComment": "玄幻文学 m.xhwx8.com。搜索 POST /search（GET 无效）。目录 ul.chapter 第2组为正文。正文章内分页 _N.html，以本章未完判断续页。发现页 || 分支禁止带空格。站点分类页 ?page=N 无效（服务端不处理），故分类只出首页20本；热门榜467本、排行榜84本为补充入口。",
+  "bookSourceGroup": "AI",
+  "bookSourceName": "📖玄幻文学",
+  "bookSourceType": 0,
+  "bookSourceUrl": "https://m.xhwx8.com",
+  "bookUrlPattern": "https?://(?:m|www)\\.xhwx8\\.com/(?:book|[a-z]+)/\\d+\\.html$",
+  "concurrentRate": "2/1000",
+  "customButton": false,
+  "customOrder": 1403,
+  "enabled": true,
+  "enabledCookieJar": true,
+  "enabledExplore": true,
+  "eventListener": false,
+  "exploreUrl": "全本::https://m.xhwx8.com/quanben.html\n热门榜::https://m.xhwx8.com/hot.html\n玄幻::https://m.xhwx8.com/xuanhuan.html\n仙侠::https://m.xhwx8.com/xianxia.html\n都市::https://m.xhwx8.com/dushi.html\n历史::https://m.xhwx8.com/lishi.html\n科幻::https://m.xhwx8.com/kehuan.html\n恐怖::https://m.xhwx8.com/kongbu.html\n其他::https://m.xhwx8.com/qita.html\n排行榜::https://m.xhwx8.com/paixingbang.html",
+  "header": "{\"User-Agent\":\"Mozilla/5.0 (Linux; Android 13; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36\"}",
+  "lastUpdateTime": "1792671196755",
+  "respondTime": 8615,
+  "ruleBookInfo": {
+   "author": "meta[property=og:novel:author]@content",
+   "coverUrl": "meta[property=og:image]@content",
+   "intro": "meta[property=og:description]@content@js:(function(){var t=String(result||\"\");t=t.replace(/^\\s*简介[：:]\\s*/,\"\");t=t.replace(/^\\s*书名[：:]\\s*《[^》]*》\\s*/,\"\");t=t.replace(/^\\s*简介[：:]\\s*/,\"\");t=t.replace(/[\\s！!]+$/,\"\");return t;})()",
+   "kind": "meta[property=og:novel:category]@content",
+   "lastChapter": "meta[property=og:novel:latest_chapter_name]@content",
+   "name": "meta[property=og:novel:book_name]@content"
+  },
+  "ruleContent": {
+   "content": "#nr1@html@js:(function(){var h=String(result||\"\");h=h.replace(/<p[^>]*>[\\s\\S]*?(榴弹怕水提醒您|向你推荐他的其他作品|最新章节网址)[\\s\\S]*?<\\/p>/g,\"\");h=h.replace(/<i\\s*class=\"lb_top2\">[\\s\\S]*?<\\/i>/g,\"\");h=h.replace(/<p class=\"pages\">[\\s\\S]*?<\\/p>/g,\"\");h=h.replace(/<p>\\s*<br\\s*\\/?>\\s*本章未完[\\s\\S]*?<\\/p>/g,\"\");h=h.replace(/<p>[^<]*(xhwx|#中#间#有#缺#失|请退)[^<]*<\\/p>/g,\"\");h=h.replace(/「[^」]*」/g,\"\");h=h.replace(/^<div[^>]*>/,\"\");h=h.replace(/<\\/div>[\\s\\S]*$/,\"\");h=h.replace(/<p>\\s*<\\/p>/g,\"\");h=h.replace(/！\\s*<\\/p>\\s*$/,\"</p>\");return h.trim();})()",
+   "nextContentUrl": "@js:(function(){var h=String(src||\"\");if(h.indexOf(\"本章未完\")<0)return null;var u=String(baseUrl||\"\");var m=u.match(/^(.*?)(?:_(\\d+))?\\.html$/);if(!m)return null;var n=m[2]?parseInt(m[2],10)+1:2;return m[1]+\"_\"+n+\".html\";})()"
+  },
+  "ruleExplore": {
+   "author": "span.s3@text||span.popular-author@text",
+   "bookList": "ul.lis dl,ol.popular-list li.popular-book,div.block ul > li",
+   "bookUrl": "span.s2 a@href||a.popular-title@href||a.black@href",
+   "kind": "@js:(function(){var t=(result&&result.text)?result.text():String(result);var m=t.match(/\\[([^\\]]+)\\]/);return m?m[1]:\"\";})()",
+   "name": "span.s2 a@text||a.popular-title@text||a.black@text"
+  },
+  "ruleSearch": {
+   "author": "span.s3@text",
+   "bookList": "ul.lis dl",
+   "bookUrl": "a@href",
+   "kind": "span.s1@text##[\\[\\]]",
+   "name": "a@text"
+  },
+  "ruleToc": {
+   "chapterList": "ul.chapter:nth-of-type(2) li",
+   "chapterName": "a@text",
+   "chapterUrl": "a@href",
+   "nextTocUrl": "div.listpage span.right a.onclick@href"
+  },
+  "searchUrl": "https://m.xhwx8.com/search,{\"method\":\"POST\",\"body\":\"kw={{key}}&page={{page}}\"}",
+  "weight": 0
+ },
+ {
+  "bookSourceComment": "天空书屋 m.tkshuw.com（移动版）书源\n\n【站点结构】\n· 搜索：GET /search.html?nf=关键词（页面表单虽写 method=post name=s，但 POST 返回 404；必须 GET nf）\n· 搜索无分页，单页最多 100 条；无结果输出「没有关于(xxx)的内容」\n· 详情：/nf_{id}/ 与 /nf_{id}.html 均可，内容一致\n· 目录：/nf_{id}/all.html 全量单页（实测 4058 章仍单页，无分页）\n· 正文：/nf_{id}/{章节序号}.html，章内分页为 {序号}_2.html、{序号}_3.html…\n· pb_next 在「章内最后一页」指向下一章、在「全书最后一章」指向详情页，\n  故 nextContentUrl 用 JS 只接受「数字_数字.html」形态，避免串章/把详情页当正文。\n· 目录里存在「无效章节,已被删除」的空章节，正文页为「章节内容加载失败」，属站点自身数据问题。\n\n【风控】\n· Cloudflare 前置（DYNAMIC，无 JS 挑战）；搜索为服务端检索，响应 1~3s。\n· concurrentRate=1/1500：全站每 1.5 秒最多 1 次请求，既压低搜索频率也保护正文抓取。\n  想更快阅读可改 1/800；想更保守可改 1/3000。切勿用脚本高频试探搜索接口。\n\n【登录】\n· 移动站无登录/注册入口（login.html、user/ 均 404），搜索/详情/目录/正文全部免登录。\n· 未写登录 UI，loginCheckJs 留空。\n\n【UA】\n· header 固定 Android Chrome 移动 UA + Referer；桌面 UA 也能取到同样结构，但本站为 m 站，移动 UA 更贴近真实访问。",
+  "bookSourceGroup": "AI",
+  "bookSourceName": "天空书屋(m.tkshuw.com)",
+  "bookSourceType": 0,
+  "bookSourceUrl": "https://m.tkshuw.com",
+  "bookUrlPattern": "https?://(?:m|www)\\.tkshuw\\.com/nf_\\d+(?:/|\\.html)?$",
+  "concurrentRate": "1/1500",
+  "customButton": false,
+  "customOrder": 1404,
+  "enabled": true,
+  "enabledCookieJar": true,
+  "enabledExplore": true,
+  "eventListener": false,
+  "exploreUrl": "[{\"title\":\"🔥最近更新\",\"url\":\"https://m.tkshuw.com/hots.html\"},{\"title\":\"🏠首页推荐\",\"url\":\"https://m.tkshuw.com/\"},{\"title\":\"仙侠\",\"url\":\"https://m.tkshuw.com/sort/20_0_0_0/?page={{page}}\"},{\"title\":\"都市\",\"url\":\"https://m.tkshuw.com/sort/21_0_0_0/?page={{page}}\"},{\"title\":\"历史\",\"url\":\"https://m.tkshuw.com/sort/22_0_0_0/?page={{page}}\"},{\"title\":\"言情\",\"url\":\"https://m.tkshuw.com/sort/23_0_0_0/?page={{page}}\"},{\"title\":\"网游\",\"url\":\"https://m.tkshuw.com/sort/24_0_0_0/?page={{page}}\"},{\"title\":\"科幻\",\"url\":\"https://m.tkshuw.com/sort/25_0_0_0/?page={{page}}\"},{\"title\":\"武侠\",\"url\":\"https://m.tkshuw.com/sort/26_0_0_0/?page={{page}}\"},{\"title\":\"侦探\",\"url\":\"https://m.tkshuw.com/sort/62_0_0_0/?page={{page}}\"},{\"title\":\"校园\",\"url\":\"https://m.tkshuw.com/sort/64_0_0_0/?page={{page}}\"},{\"title\":\"综合\",\"url\":\"https://m.tkshuw.com/sort/72_0_0_0/?page={{page}}\"}]",
+  "header": "{\"User-Agent\":\"Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36\",\"Accept\":\"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8\",\"Accept-Language\":\"zh-CN,zh;q=0.9\",\"Referer\":\"https://m.tkshuw.com/\"}",
+  "lastUpdateTime": "1792638651891",
+  "respondTime": 180000,
+  "ruleBookInfo": {
+   "author": "meta[property=\"og:novel:author\"]@content||div.synopsisArea_detail p.0@text##^作者：",
+   "coverUrl": "meta[property=\"og:image\"]@content||div.synopsisArea_detail img@data-src",
+   "intro": "meta[name=\"description\"]@content||p.review@text##^《[^》]*》简介:?",
+   "kind": "meta[property=\"og:novel:category\"]@content||div.synopsisArea_detail p.1@text##^类别：",
+   "lastChapter": "meta[property=\"og:novel:latest_chapter_name\"]@content||p.lastchapters a@text",
+   "name": "meta[property=\"og:novel:book_name\"]@content||header h1.title@text",
+   "tocUrl": "p.btn a[href*=\"all.html\"]@href"
+  },
+  "ruleContent": {
+   "content": "#htmlContent@html",
+   "nextContentUrl": "@js:var h=String(result||\"\");var m=h.match(/id=\"pb_next\"[^>]*href=\"([^\"]+)\"/);var u=(m&&/^\\d+_\\d+\\.html$/.test(m[1]))?m[1]:\"\";u?u:null"
+  },
+  "ruleExplore": {
+   "author": "@js:var t=result.text();var i=t.lastIndexOf('/');i<0?null:t.substring(i+1).trim()",
+   "bookList": "div.s_list",
+   "bookUrl": "a@href",
+   "coverUrl": "a@href##/nf_(\\d+)/.*##https://www.tkshuw.com/image/nf_$1.jpg",
+   "kind": "@js:var t=result.text();var m=t.match(/^\\s*\\[([^\\]]*)\\]/);m?m[1]:null",
+   "lastChapter": "a@title##^最新章节：",
+   "name": "a@text"
+  },
+  "ruleSearch": {
+   "author": "@js:var t=result.text();var i=t.lastIndexOf('/');i<0?null:t.substring(i+1).trim()",
+   "bookList": "div.wrap-box div.s_list",
+   "bookUrl": "a@href",
+   "coverUrl": "a@href##/nf_(\\d+)/.*##https://www.tkshuw.com/image/nf_$1.jpg",
+   "kind": "@js:var t=result.text();var m=t.match(/^\\s*\\[([^\\]]*)\\]/);m?m[1]:null",
+   "lastChapter": "a@title##^最新章节：",
+   "name": "a@text"
+  },
+  "ruleToc": {
+   "chapterList": "div.directoryArea p",
+   "chapterName": "a@text",
+   "chapterUrl": "a@href"
+  },
+  "searchUrl": "https://m.tkshuw.com/search.html?nf={{key}}",
+  "weight": 0
+ },
+ {
+  "bookSourceComment": "得奇小说网 www.deqixs.org（杰奇CMS）。支持模糊搜索（书名包含关键词即命中，全部结果单页返回）；注意同一会话约10秒内连续搜索会被网站静默拦截返回空结果，稍等再搜即可。精确命中书名时网站直接返回详情页，模糊时返回列表页，两种布局已用||兜底兼容。正文有章节内分页（已自动拼接），页尾推广行已净化。UTF-8 编码。",
+  "bookSourceGroup": "🌹已检26.10.15",
+  "bookSourceName": "📂得奇小说网",
+  "bookSourceType": 0,
+  "bookSourceUrl": "https://www.deqixs.org",
+  "customOrder": 1405,
+  "enabled": true,
+  "enabledCookieJar": true,
+  "enabledExplore": false,
+  "header": "{\"User-Agent\":\"Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36\"}",
+  "lastUpdateTime": 1790426727473,
+  "respondTime": 8912,
+  "ruleBookInfo": {
+   "author": "class.itemtxt@tag.p.1@tag.a@text##^作者：",
+   "coverUrl": "class.item@tag.img@src",
+   "intro": "class.des.0@textNodes",
+   "kind": "class.itemtxt@tag.p.0@tag.span@text",
+   "lastChapter": "class.itemtxt@tag.ul@tag.li.0@tag.a@text",
+   "name": "class.itemtxt@tag.h1@tag.a@text",
+   "wordCount": "class.itemtxt@tag.p.0@tag.span.2@text"
+  },
+  "ruleContent": {
+   "content": "class.con@html##求书、催更、报错.*?deqixs",
+   "nextContentUrl": "text.下一页@href"
+  },
+  "ruleExplore": {},
+  "ruleSearch": {
+   "author": "class.itemtxt@tag.p.1@tag.a@text||class.itemtxt@tag.ul@tag.li.0@text##^作者：",
+   "bookList": "class.item",
+   "bookUrl": "tag.h1@tag.a@href||tag.h3@tag.a@href###dir",
+   "coverUrl": "tag.img@src",
+   "intro": "class.itemtxt@tag.p.0@text##^简介：\\s*|^连载中.*",
+   "kind": "class.itemtxt@tag.p.0@tag.span@text",
+   "lastChapter": "class.itemtxt@tag.ul@tag.li.0@tag.a@text||class.itemtxt@tag.ul@tag.li.2@tag.a@text",
+   "name": "tag.h1@tag.a@text||tag.h3@tag.a@text",
+   "wordCount": "class.itemtxt@tag.p.0@tag.span.2@text"
+  },
+  "ruleToc": {
+   "chapterList": "id.list@tag.li",
+   "chapterName": "tag.a@text",
+   "chapterUrl": "tag.a@href"
+  },
+  "searchUrl": "https://www.deqixs.org/modules/article/search.php,{\"method\":\"POST\",\"body\":\"searchkey={{key}}&action=login&searchtype=articlename\"}",
+  "weight": 0
+ },
+ {
+  "bookSourceComment": "error:Unable to resolve host \"www.botaodz.com\": No address associated with hostname\n",
+  "bookSourceGroup": "🌹已检26.10.15",
+  "bookSourceName": "快眼看书botaodz",
+  "bookSourceType": 0,
+  "bookSourceUrl": "http://www.botaodz.com/",
+  "bookUrlPattern": "",
+  "customOrder": 1406,
+  "enabled": true,
+  "enabledCookieJar": false,
+  "enabledExplore": true,
+  "exploreUrl": "全部::/category/all/\n玄幻::/category/xuanhuan/\n奇幻::/category/qihuan/\n武侠::/category/wuxia/\n仙侠::/category/xianxia/\n都市::/category/dushi/\n历史::/category/lishi/\n军事::/category/junshi/\n游戏::/category/youxi/\n竞技::/category/jingji/\n科幻::/category/kehuan/\n灵异::/category/lingyi/\n同人::/category/tongren/\n女生::/category/nvsheng/",
+  "header": "",
+  "lastUpdateTime": 1613151983426,
+  "loginUrl": "",
+  "respondTime": 17430,
+  "ruleBookInfo": {
+   "author": "[property=\"og:novel:author\"]@content",
+   "coverUrl": "[property=\"og:image\"]@content",
+   "init": "meta",
+   "intro": "[property=\"og:description\"]@content##各位书友要是觉得.+",
+   "kind": "[property=\"og:novel:category\"]@content&&[property=\"og:novel:status\"]@content",
+   "lastChapter": "[property=\"og:novel:latest_chapter_name\"]@content",
+   "name": "[property=\"og:novel:book_name\"]@content",
+   "tocUrl": "",
+   "wordCount": ""
+  },
+  "ruleContent": {
+   "content": "id.chaptercontent@textNodes",
+   "nextContentUrl": "",
+   "sourceRegex": "",
+   "webJs": ""
+  },
+  "ruleExplore": {
+   "author": "",
+   "bookList": "",
+   "bookUrl": "",
+   "coverUrl": "",
+   "intro": "",
+   "kind": "",
+   "lastChapter": "",
+   "name": "",
+   "wordCount": ""
+  },
+  "ruleSearch": {
+   "author": "class.info@tag.span.1@text##作者：",
+   "bookList": "class.librarylist@tag.li",
+   "bookUrl": "tag.a.0@href",
+   "coverUrl": "tag.img.0@src",
+   "intro": "class.intro@text",
+   "kind": "",
+   "lastChapter": "class.last@tag.a@text",
+   "name": "class.novelname@text",
+   "wordCount": ""
+  },
+  "ruleToc": {
+   "chapterList": "class.hide@tag.a",
+   "chapterName": "text##(?<=\\d章\\h)\\d+(\\+\\d+)?[，、]|(?<!^|[章卷部集]\\h?|[零一二三四五六七八九十][、\\h])[（［【\\{\\[\\(](?![一二三四五六七八九十]{1,3}\\W$|\\d{1,3}\\D$|[上中下完终续]\\W)[^（［【\\{\\[\\(]+|^(?=请\\w{0,2}假|解释|上架|推封|新书)\\S{2,}$",
+   "chapterUrl": "href",
+   "isVip": "",
+   "nextTocUrl": "",
+   "updateTime": ""
+  },
+  "searchUrl": "/modules/article/search.php?searchkey={{key}}",
+  "weight": 0
  }
 ]

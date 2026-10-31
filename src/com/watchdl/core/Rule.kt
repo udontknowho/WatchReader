@@ -464,6 +464,13 @@ data class TocRule(
      */
     val tocUrlRule: FieldRule? = null,
     /**
+     * 简介（legado 的 `ruleBookInfo.intro`）。
+     *
+     * 以前只导了 `ruleBookInfo` 的 `init` / `tocUrl`，简介字段直接丢掉，
+     * 目录屏因此没有简介可显。作用域与 [tocUrlRule] 一样是**书籍页**。
+     */
+    val intro: FieldRule = FieldRule(),
+    /**
      * 书页正文的收窄规则（legado 的 `ruleBookInfo.init`）。19/175 条源在用。
      *
      * legado 的语义：先拿 `init` 从书页里取出子对象，**该子串成为后续所有
@@ -577,3 +584,21 @@ data class BookSourceRule(
     }
 
 }
+
+// ── `AnalyzeUrl.analyzeJs()` 的等价物（legado 里处理「脚本块 + 尾部文本」）──
+//
+// 约定：`<js>…</js>` 块只做副作用；块**之后**的文本才是 URL，
+// 文本里的 `@result` 用块的结果替换。uu书库、最终小说网都这么写。
+private val JS_BLOCK = Regex("<js>([\\w\\W]*?)</js>", RegexOption.IGNORE_CASE)
+
+/** 按出现顺序取出所有 `<js>…</js>` 的块体。 */
+fun jsBlockBodies(raw: String): List<String> =
+    JS_BLOCK.findAll(raw).map { it.groupValues[1].trim() }.toList()
+
+/** 最后一个 `</js>` 之后的文本；没有块或块后为空则返回空串。 */
+fun textAfterLastJsBlock(raw: String): String =
+    JS_BLOCK.findAll(raw).lastOrNull()?.let { raw.substring(it.range.last + 1).trim() } ?: ""
+
+/** `@result` 回填。脚本结果为空时也把占位符换成空串，不留脏字符。 */
+fun applyResult(template: String, jsOut: String?): String =
+    if (jsOut == null) template else template.replace("@result", jsOut)

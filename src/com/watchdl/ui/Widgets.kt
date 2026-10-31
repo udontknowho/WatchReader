@@ -181,6 +181,16 @@ object Widgets {
             }
             box.addView(row, Md3.lpDp(ctx, null, 40))
         }
+        // 手表没有返回键，菜单必须自带关闭条目。以前只靠“点外部关闭”，
+        // 可在 189 dp 宽的屏上菜单几乎占满，两侧剩余几像素，实测点不中，
+        // 选完导出就卡在弹窗里。
+        box.addView(Md3.text(ctx, "取消", Md3.FS_MD, Md3.onSurfaceVariant).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(Md3.dp(ctx, 14), 0, Md3.dp(ctx, 14), 0)
+            background = Md3.ripple(ctx, Color.TRANSPARENT, 0f)
+            isClickable = true
+            setOnClickListener { dlg?.dismiss() }
+        }, Md3.lpDp(ctx, null, 40))
         dlg = android.app.AlertDialog.Builder(ctx).setView(box).create()
         dlg.setCanceledOnTouchOutside(true)
         return dlg

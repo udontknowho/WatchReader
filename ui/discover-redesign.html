@@ -1,0 +1,869 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WatchReader · 发现页选榜重构设计预览</title>
+<style>
+  /* ============================================================
+   尺寸令牌（全部照抄 App 里的 Md3.kt）
+     手表 189 × 248 dp，1dp = 2px，即帧 font-size: 2px
+     手机 360 × 600 dp，1dp = 1.15px，即帧 font-size: 1.15px
+     帧内一切尺寸与字号写成 em，1em = 1dp。换档只换 .frame 的 font-size。
+     PAD 8  GAP 6  BTN 38  ITEM 42  TOP_BAR 36  R_CARD 12  R_ITEM 10  HIT 44
+     FS_SM 11  FS_MD 12  FS_LG 14  FS_XL 17
+     ============================================================ */
+  :root {
+    --md-primary:            #D0BCFF;
+    --md-on-primary:         #381E72;
+    --md-primary-cont:       #4F378B;
+    --md-on-primary-cont:    #EADDFF;
+    --md-secondary-cont:     #4A4458;
+    --md-on-secondary-cont:  #E8DEF8;
+    --md-surface:            #141218;
+    --md-s1:                 #1D1B20;
+    --md-s2:                 #211F26;
+    --md-s3:                 #2B2930;
+    --md-s4:                 #36343B;
+    --md-on-surface:         #E6E0E9;
+    --md-on-surface-var:     #CAC4D0;
+    --md-outline:            #938F99;
+    --md-outline-var:        #49454F;
+    --md-error:              #F2B8B5;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0a0a0c;
+    color: var(--md-on-surface);
+    font-family: "Roboto", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    padding: 36px 22px 90px;
+  }
+
+  .wrap { max-width: 1560px; margin: 0 auto; }
+  .page-title { font-size: 22px; font-weight: 500; letter-spacing: .4px; }
+  .page-sub {
+    font-size: 12.5px; color: var(--md-outline); line-height: 1.7;
+    margin: 8px 0 30px; font-variant-numeric: tabular-nums;
+  }
+  .page-sub code {
+    font-family: ui-monospace, Menlo, monospace;
+    background: #1b1a1f; border: 1px solid var(--md-outline-var);
+    border-radius: 4px; padding: 1px 5px; color: var(--md-on-surface-var);
+  }
+
+  /* ---------- 方案卡片（页面外框，px 计。帧内才用 em） ---------- */
+  .card {
+    background: #131217; border: 1px solid #26242b; border-radius: 16px;
+    padding: 22px 22px 18px; margin-bottom: 26px;
+  }
+  .card h2 { font-size: 17px; font-weight: 500; letter-spacing: .3px; }
+  .card h2 .tag {
+    font-size: 11px; font-weight: 400; color: var(--md-on-primary);
+    background: var(--md-primary); border-radius: 9px;
+    padding: 1px 7px; margin-left: 8px; vertical-align: 2px;
+  }
+  .card .lede { font-size: 12.5px; color: var(--md-on-surface-var); line-height: 1.65; margin-top: 6px; }
+  .card .lede b { color: var(--md-primary); font-weight: 500; }
+
+  .frames { display: flex; gap: 30px; flex-wrap: wrap; align-items: flex-start; margin-top: 22px; }
+
+  /* 设备外框：只做观感，不参与尺寸令牌 */
+  .dev {
+    background: linear-gradient(145deg, #35343a 0%, #1a1a1d 58%, #26252a 100%);
+    padding: 11px; border-radius: 42px; flex-shrink: 0;
+    box-shadow: 0 0 0 1px #43424a, 0 18px 44px rgba(0,0,0,.7),
+                inset 0 1px 1px rgba(255,255,255,.09);
+  }
+  .dev.phone { padding: 13px; border-radius: 50px; }
+  .fig { display: flex; flex-direction: column; }
+  .cap {
+    font-size: 12px; color: var(--md-outline); line-height: 1.6;
+    margin-top: 12px; max-width: 420px;
+  }
+  .fig > .cap { max-width: 24ch; }
+  .fig.ph > .cap  { max-width: 30ch; }
+
+  /* ============================================================
+     帧：唯一被复用的骨架。字号 1em = 1dp。
+     ============================================================ */
+  .frame {
+    font-size: 2px;                 /* 手表档：1dp = 2px */
+    width: 189em; height: 248em;
+    border-radius: 28em;
+    background: var(--md-surface);
+    color: var(--md-on-surface);
+    overflow: hidden; position: relative;
+    display: flex; flex-direction: column;
+    flex-shrink: 0;
+  }
+  .frame.phone {
+    font-size: 1.15px;              /* 手机档：1dp = 1.15px */
+    width: 360em; height: 600em;
+  }
+
+  /* --- 顶栏 TOP_BAR 36 --- */
+  .f-top {
+    height: 36em; flex: 0 0 auto;
+    display: flex; align-items: center; gap: 2em;
+    padding: 0 4em; background: var(--md-s1);
+  }
+  .f-top .ttl {
+    flex: 1; min-width: 0; overflow: hidden; white-space: nowrap;
+    text-overflow: ellipsis; padding-left: 4em; color: var(--md-on-surface);
+  }
+  .f-top .ttl.sm { padding-left: 2em; }
+  .ic {
+    width: 36em; height: 36em; flex: 0 0 auto;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--md-on-surface-var);
+  }
+  .ic.on { color: var(--md-primary); }
+
+  /* --- 正文区 --- */
+  .f-body {
+    flex: 1; min-height: 0; position: relative;
+    display: flex; flex-direction: column; gap: 6em;
+    padding: 0 8em 8em; overflow: hidden;
+  }
+  .f-body.rowy { flex-direction: row; }
+
+  /* --- 字号（写在叶子 span 上，父级不留 em 内距，保证 1em 永远等于 1dp） --- */
+  .sp11 { font-size: 11em; line-height: 1.3; }
+  .sp12 { font-size: 12em; line-height: 1.3; }
+  .sp14 { font-size: 14em; line-height: 1.25; }
+  .sp17 { font-size: 17em; line-height: 1.2; }
+
+  .lbl { color: var(--md-on-surface-var); flex: 0 0 auto; }
+
+  /* --- 按钮 BTN 38 --- */
+  .btn {
+    height: 38em; border-radius: 19em; flex: 0 0 auto;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--md-secondary-cont); color: var(--md-on-secondary-cont);
+    overflow: hidden;
+  }
+  .btn.on { background: var(--md-primary); color: var(--md-on-primary); }
+  .row { display: flex; gap: 6em; flex: 0 0 auto; }
+  .row > .btn { flex: 1; min-width: 0; }
+
+  /* --- 通栏分类按钮列（现状用） --- */
+  .cats { display: flex; flex-direction: column; gap: 3em; overflow: hidden; min-height: 0; }
+  .cats > .btn { width: 100%; }
+
+  /* --- 书目项 ITEM 42 / R_ITEM 10 --- */
+  .list { display: flex; flex-direction: column; gap: 2em; overflow: hidden; min-height: 0; }
+  .it {
+    min-height: 42em; border-radius: 10em; padding: 4em 6em; flex: 0 0 auto;
+    display: flex; flex-direction: column; justify-content: center; gap: 1em;
+    background: var(--md-s2);
+  }
+  .it .t { color: var(--md-on-surface); }
+  .it .s { color: var(--md-on-surface-var); }
+
+  /* --- 侧栏（方案 A） --- */
+  .side {
+    width: 59em; flex: 0 0 auto; overflow: hidden;
+    display: flex; flex-direction: column; gap: 2em;
+  }
+  .side.wide { width: 100em; }
+  .si {
+    height: 26em; border-radius: 10em; flex: 0 0 auto;
+    display: flex; align-items: center; padding: 0 5em;
+    color: var(--md-on-surface-var); overflow: hidden;
+  }
+  .si.on { background: var(--md-primary-cont); color: var(--md-on-primary-cont); }
+  .side .hd { height: 22em; flex: 0 0 auto; display: flex; align-items: center; padding: 0 5em; color: var(--md-outline); }
+  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4em; overflow: hidden; }
+
+  /* --- 抽屉（方案 B） --- */
+  .scrim { position: absolute; inset: 0; background: rgba(0,0,0,.45); z-index: 1; }
+  .drawer {
+    position: absolute; left: 0; top: 0; bottom: 0; width: 126em; z-index: 2;
+    background: var(--md-s2); padding: 6em 6em 8em;
+    display: flex; flex-direction: column; gap: 3em;
+    box-shadow: 6em 0 18em rgba(0,0,0,.6);
+    border-radius: 0 14em 14em 0;
+  }
+  .drawer.wide { width: 240em; }
+
+  /* --- 横条 chip（方案 C） --- */
+  .chips {
+    display: flex; gap: 4em; flex: 0 0 auto;
+    overflow: hidden; padding: 2em 0;
+  }
+  .chip {
+    height: 30em; border-radius: 15em; flex: 0 0 auto;
+    display: flex; align-items: center; padding: 0 10em;
+    background: var(--md-s3); color: var(--md-on-surface-var);
+    white-space: nowrap;
+  }
+  .chip.on { background: var(--md-primary); color: var(--md-on-primary); }
+  .chips .cut-l { margin-left: -20em; }   /* 左边露半个 → 可滑提示 */
+  .chips .cut-r { margin-right: -14em; }
+
+  /* --- 鼓轮（方案 E） --- */
+  .drum {
+    flex: 0 0 auto; border-radius: 12em; background: var(--md-s1);
+    padding: 2em 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    box-shadow: inset 0 8em 10em -8em rgba(0,0,0,.9), inset 0 -8em 10em -8em rgba(0,0,0,.9);
+  }
+  .dr { height: 22em; display: flex; align-items: center; color: var(--md-on-surface-var); opacity: .38; }
+  .dr.cur {
+    height: 28em; opacity: 1; color: var(--md-primary); font-weight: 500;
+    padding: 0 12em; border-radius: 14em; background: var(--md-s3);
+  }
+
+  /* --- 滚动条示意 --- */
+  .sb {
+    position: absolute; right: 2em; width: 2em; border-radius: 1em;
+    background: var(--md-outline); opacity: .5; z-index: 3;
+  }
+
+  /* --- 换分类这一条 --- */
+  .swap {
+    height: 30em; border-radius: 12em; flex: 0 0 auto;
+    display: flex; align-items: center; gap: 6em; padding: 0 6em;
+    border: 1px solid var(--md-outline-var); color: var(--md-primary);
+  }
+
+  /* ---------- 优点 / 代价 ---------- */
+  .pros { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 24px; }
+  .pros > div { background: #17161b; border: 1px solid #26242b; border-radius: 12px; padding: 14px 16px; }
+  .pros h4 { font-size: 12px; font-weight: 500; letter-spacing: .6px; margin-bottom: 8px; }
+  .pros .plus h4 { color: var(--md-primary); }
+  .pros .minus h4 { color: var(--md-error); }
+  .pros ul { list-style: none; }
+  .pros li {
+    font-size: 12.5px; line-height: 1.72; color: var(--md-on-surface-var);
+    padding-left: 14px; position: relative;
+  }
+  .pros li::before { content: "·"; position: absolute; left: 3px; color: var(--md-outline); }
+  .pros li b { color: var(--md-on-surface); font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  .reco { border-color: var(--md-primary-cont); background: #17131f; }
+  .reco ol { margin: 14px 0 0 20px; }
+  .reco li { font-size: 13px; line-height: 1.8; color: var(--md-on-surface-var); }
+  .reco li b { color: var(--md-primary); font-weight: 500; }
+
+  @media (max-width: 900px) { .pros { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="page-title">WatchReader · 发现页选榜重构</div>
+  <div class="page-sub">
+    手表逻辑屏 <code>189 × 248 dp</code>（渲染 <code>scale 1.0</code> → 378×496 px）· 手机 <code>360 × 600 dp</code>（<code>scale 1.15</code>）。<br>
+    两档共用同一份 markup：帧元素设 <code>font-size</code>，帧内一切尺寸与字号写 <code>em</code>，1em = 1dp。<br>
+    现状是 26 个通栏分类按钮，手表上要滚约 <code>5.8</code> 屏，加上三段选择器约 <code>6.6</code> 屏。下面六个方案都在解这一件事。
+  </div>
+
+  <!-- ============ 0 · 现状 ============ -->
+  <div class="card">
+    <h2>现状：三段选择器 + 26 个通栏按钮</h2>
+    <div class="lede">
+      站点（番茄/起点）→ 频道（男频/女频）→ 26 个分类按钮，点中一个才拉那个榜。
+      顶部两段选择器吃掉 <b>76dp</b>，三条标签吃掉 <b>39dp</b>，一屏只剩 <b>73dp</b> 给分类 —— 刚好一个半按钮。
+    </div>
+    <div class="frames">
+
+      <div class="fig">
+        <div class="dev"><div class="frame">
+          <div class="f-top">
+            <div class="ic"><span class="sp14">‹</span></div>
+            <div class="ttl"><span class="sp14">发现</span></div>
+            <div class="ic"><span class="sp14">⟳</span></div>
+          </div>
+          <div class="f-body">
+            <div class="lbl"><span class="sp11">站点</span></div>
+            <div class="row">
+              <div class="btn on"><span class="sp12">番茄</span></div>
+              <div class="btn"><span class="sp12">起点</span></div>
+            </div>
+            <div class="lbl"><span class="sp11">频道</span></div>
+            <div class="row">
+              <div class="btn on"><span class="sp12">男频</span></div>
+              <div class="btn"><span class="sp12">女频</span></div>
+            </div>
+            <div class="lbl"><span class="sp11">分类</span></div>
+            <div class="cats">
+              <div class="btn"><span class="sp12">西方奇幻</span></div>
+              <div class="btn"><span class="sp12">东方仙侠</span></div>
+            </div>
+            <div class="sb" style="top:0;height:34em"></div>
+          </div>
+        </div></div>
+        <div class="cap">第一屏：三个选择器占满，分类只露出 1 个半。看不出「还有 24 个」。</div>
+      </div>
+
+      <div class="fig">
+        <div class="dev"><div class="frame">
+          <div class="f-top">
+            <div class="ic"><span class="sp14">‹</span></div>
+            <div class="ttl"><span class="sp14">发现</span></div>
+            <div class="ic"><span class="sp14">⟳</span></div>
+          </div>
+          <div class="f-body">
+            <div class="lbl"><span class="sp11">分类</span></div>
+            <div class="cats">
+              <div class="btn"><span class="sp12">玄幻洞脑</span></div>
+              <div class="btn"><span class="sp12">悬疑灵异</span></div>
+              <div class="btn"><span class="sp12">抗战谍战</span></div>
+              <div class="btn"><span class="sp12">游戏体育</span></div>
+              <div class="btn"><span class="sp12">动漫衍生</span></div>
+              <div class="btn"><span class="sp12">男频衍生</span></div>
+            </div>
+            <div class="sb" style="bottom:8em;height:34em"></div>
+          </div>
+        </div></div>
+        <div class="cap">滚到第 6 屏：前面 20 个已经全滚过去了，手指要来回找。</div>
+      </div>
+
+      <div class="fig ph">
+        <div class="dev phone"><div class="frame phone">
+          <div class="f-top">
+            <div class="ic"><span class="sp14">‹</span></div>
+            <div class="ttl"><span class="sp14">发现</span></div>
+            <div class="ic"><span class="sp14">⟳</span></div>
+          </div>
+          <div class="f-body">
+            <div class="lbl"><span class="sp11">站点</span></div>
+            <div class="row">
+              <div class="btn on"><span class="sp12">番茄</span></div>
+              <div class="btn"><span class="sp12">起点</span></div>
+            </div>
+            <div class="lbl"><span class="sp11">频道</span></div>
+            <div class="row">
+              <div class="btn on"><span class="sp12">男频</span></div>
+              <div class="btn"><span class="sp12">女频</span></div>
+            </div>
+            <div class="lbl"><span class="sp11">分类（26 个，通栏）</span></div>
+            <div class="cats">
+              <div class="btn"><span class="sp12">西方奇幻</span></div>
+              <div class="btn"><span class="sp12">东方仙侠</span></div>
+              <div class="btn"><span class="sp12">科幻末世</span></div>
+              <div class="btn"><span class="sp12">都市日常</span></div>
+              <div class="btn"><span class="sp12">都市修真</span></div>
+              <div class="btn"><span class="sp12">都市高武</span></div>
+              <div class="btn"><span class="sp12">历史古代</span></div>
+              <div class="btn"><span class="sp12">战神赘婿</span></div>
+              <div class="btn"><span class="sp12">都市种田</span></div>
+              <div class="btn"><span class="sp12">传统玄幻</span></div>
+              <div class="btn"><span class="sp12">历史洞脑</span></div>
+            </div>
+            <div class="sb" style="top:0;height:120em"></div>
+          </div>
+        </div></div>
+        <div class="cap">手机档同一份 markup：一屏 7 个，仍要滚 3.7 屏才到底。</div>
+      </div>
+
+    </div>
+    <div class="pros">
+      <div class="plus">
+        <h4>优点</h4>
+        <ul>
+          <li>零学习成本：一路点下去，<b>3</b> 次点击就到榜</li>
+          <li>实现最简单，现有 <b>showDiscover</b> 一行不用改</li>
+        </ul>
+      </div>
+      <div class="minus">
+        <h4>代价</h4>
+        <ul>
+          <li>手表上要滚 <b>6.6</b> 屏才见到一个榜，分类名是全部信息</li>
+          <li>一屏只有 <b>73dp</b> 留给 26 个分类，看不到全貌，来回找</li>
+          <li>选择器 <b>76dp</b> 常驻，选中榜之后仍然占着</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ A · 固定侧栏 ============ -->
+  <div class="card">
+    <h2>A · 固定侧栏（两栏）<span class="tag">一屏同见</span></h2>
+    <div class="lede">
+      左边 <b>59dp</b> 竖列放 19 个分类，自己滚，选中高亮；右边 <b>108dp</b> 直接是书目。
+      分类和书在同一屏，换分类不离开书目。
+    </div>
+    <div class="frames">
+
+      <div class="fig">
+        <div class="dev"><div class="frame">
+          <div class="f-top">
+            <div class="ic"><span class="sp14">‹</span></div>
+            <div class="ttl"><span class="sp14">番茄 · 男频</span></div>
+            <div class="ic"><span class="sp14">⟳</span></div>
+          </div>
+          <div class="f-body rowy pick">
+            <div class="side">
+              <div class="si"><span class="sp11">西方奇幻</span></div>
+              <div class="si"><span class="sp11">东方仙侠</span></div>
+              <div class="si"><span class="sp11">科幻末世</span></div>
+              <div class="si on"><span class="sp11">都市日常</span></div>
+              <div class="si"><span class="sp11">都市修真</span></div>
+              <div class="si"><span class="sp11">都市高武</span></div>
+              <div class="si"><span class="sp11">历史古代</span></div>
+              <div class="si"><span class="sp11">战神赘婿</span></div>
+            </div>
+            <div class="main">
+              <div class="list">
+                <div class="it"><span class="t sp12">我在精神病院学斩神</span><span class="s sp11">第 7 名 · 328 万字</span></div>
+                <div class="it"><span class="t sp12">夜的命名术</span><span class="s sp11">第 2 名 · 412 万字</span></div>
+                <div class="it"><span class="t sp12">十日终焉</span><span class="s sp11">第 4 名 · 196 万字</span></div>
+                <div class="it"><span class="t sp12">灵境行者</span><span class="s sp11">第 6 名 · 289 万字</span></div>
+              </div>
+            </div>
+            <div class="sb" style="top:0;height:44em"></div>
+          </div>
+        </div></div>
+        <div class="cap">手表 A：左 59dp 分类竖列（露 7 行）+ 右 108dp 书目。</div>
+      </div>
+
+      <div class="fig ph">
+        <div class="dev phone"><div class="frame phone">
+          <div class="f-top">
+            <div class="ic"><span class="sp14">‹</span></div>
+            <div class="ttl"><span class="sp14">发现</span></div>
+            <div class="ic"><span class="sp14">☰</span></div>
+            <div class="ic"><span class="sp14">⟳</span></div>
+          </div>
+          <div class="f-body rowy pick">
+            <div class="side wide">
+              <div class="hd"><span class="sp11">番茄 · 男频 19</span></div>
+              <div class="si"><span class="sp12">西方奇幻</span></div>
+              <div class="si"><span class="sp12">东方仙侠</span></div>
+              <div class="si"><span class="sp12">科幻末世</span></div>
+              <div class="si on"><span class="sp12">都市日常</span></div>
+              <div class="si"><span class="sp12">都市修真</span></div>
+              <div class="si"><span class="sp12">都市高武</span></div>
+              <div class="si"><span class="sp12">历史古代</span></div>
+              <div class="si"><span class="sp12">战神赘婿</span></div>
+              <div class="si"><span class="sp12">都市种田</span></div>
+              <div class="si"><span class="sp12">传统玄幻</span></div>
+            </div>
+            <div class="main">
+              <div class="list">
+                <div class="it"><span class="t sp14">我在精神病院学斩神</span><span class="s sp11">三九音域 · 第 7 名 · 328 万字</span></div>
+                <div class="it"><span class="t sp14">夜的命名术</span><span class="s sp11">会说话的肘子 · 第 2 名 · 412 万字</span></div>
+                <div class="it"><span class="t sp14">十日终焉</span><span class="s sp11">杀虫队队员 · 第 4 名 · 196 万字</span></div>
+                <div class="it"><span class="t sp14">大奉打更人</span><span class="s sp11">卖报小郎君 · 第 11 名 · 486 万字</span></div>
+                <div class="it"><span class="t sp14">灵境行者</span><span class="s sp11">卖报小郎君 · 第 6 名 · 289 万字</span></div>
+                <div class="it"><span class="t sp14">万相之王</span><span class="s sp11">天蚕土豆 · 第 9 名 · 402 万字</span></div>
+              </div>
+            </div>
+            <div class="sb" style="top:0;height:150em"></div>
+          </div>
+        </div></div>
+        <div class="cap">手机 A：侧栏放宽到 100dp，书目仍有 244dp，书名一行放得下。</div>
+      </div>
+
+    </div>
+    <div class="pros">
+      <div class="plus">
+        <h4>优点</h4>
+        <ul>
+          <li>分类与书目<b>同屏</b>，换榜不用返回，点一下即换</li>
+          <li>19 个分类在侧栏里 <b>3</b> 屏滚完，比现状 5.8 屏快</li>
+          <li>手机档侧栏 100dp 后书目仍有 <b>244dp</b>，一行一个书名</li>
+        </ul>
+      </div>
+      <div class="minus">
+        <h4>代价</h4>
+        <ul>
+          <li>手表上书目栏只剩 <b>108dp</b>，书名两行折行，一行书占 60dp 高</li>
+          <li>侧栏 59dp 放 4 字分类（「都市日常」）刚好，5 字「男频衍生」要缩到 10sp</li>
+          <li>两栏各自滚，手势容易滚错一边</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ B · 抽屉侧栏 ============ -->
+  <div class="card">
+    <h2>B · 抽屉侧栏<span class="tag">平时全给书目</span></h2>
+    <div class="lede">
+      默认就是书目列表（全宽 <b>173dp</b>），顶栏一个 ☰，点开后侧栏从左滑出盖住左边 <b>2/3</b>（126dp）。
+      收起态与现状的「选中之后」长得一样，没有额外层级。
+    </div>
+    <div class="frames">
+
+      <div class="fig">
+        <div class="dev"><div class="frame">
+          <div class="f-top">
+            <div class="ic on"><span class="sp14">☰</span></div>
+            <div class="ttl"><span class="sp14">都市日常</span></div>
+            <div class="ic"><span class="sp14">⟳</span></div>
+          </div>
+          <div class="f-body">
+            <div class="list">
+              <div class="it"><span class="t sp12">我在精神病院学斩神</span><span class="s sp11">第 7 名 · 328 万字</span></div>
+              <div class="it"><span class="t sp12">夜的命名术</span><span class="s sp11">第 2 名 · 412 万字</span></div>
+              <div class="it"><span class="t sp12">十日终焉</span><span class="s sp11">第 4 名 · 196 万字</span></div>
+              <div class="it"><span class="t sp12">灵境行者</span><span class="s sp11">第 6 名 · 289 万字</span></div>
+            </div>
+            <div class="sb" style="top:0;height:40em"></div>
+          </div>
+        </div></div>
+        <div class="cap">收起态：书目吃满 173dp，书名一行半。</div>
+      </div>
+
+      <div class="fig">
+        <div class="dev"><div class="frame">
+          <div class="f-top">
+            <div class="ic on"><span class="sp14">☰</span></div>
+            <div class="ttl"><span class="sp14">都市日常</span></div>
+            <div class="ic"><span class="sp14">⟳</span></div>
+          </div>
+          <div class="f-body">
+            <div class="list">
+              <div class="it"><span class="t sp12">我在精神病院学斩神</span><span class="s sp11">第 7 名 · 328 万字</span></div>
+              <div class="it"><span class="t sp12">夜的命名术</span><span class="s sp11">第 2 名 · 412 万字</span></div>
+              <div class="it"><span class="t sp12">十日终焉</span><span class="s sp11">第 4 名 · 196 万字</span></div>
+            </div>
+          </div>
+          <div class="scrim"></div>
+          <div class="drawer pick">
+            <div class="hd"><span class="sp11">番茄 · 男频</span></div>
+            <div class="si"><span class="sp11">西方奇幻</span></div>
+            <div class="si"><span class="sp11">东方仙侠</span></div>
+            <div class="si"><span class="sp11">科幻末世</span></div>
+            <div class="si on"><span class="sp11">都市日常</span></div>
+            <div class="si"><span class="sp11">都市修真</span></div>
+            <div class="si"><span class="sp11">都市高武</span></div>
+            <div class="si"><span class="sp11">历史古代</span></div>
+            <div class="si"><span class="sp11">战神赘婿</span></div>
+          </div>
+        </div></div>
+        <div class="cap">打开态：侧栏 126dp 盖住左 2/3，右边 63dp 露出书目做上下文。</div>
+      </div>
+
+      <div class="fig ph">
+        <div class="dev phone"><div class="frame phone">
+          <div class="f-top">
+            <div class="ic on"><span class="sp14">☰</span></div>
+            <div class="ttl"><span class="sp14">都市日常</span></div>
+            <div class="ic"><span class="sp14">⟳</span></div>
+          </div>
+          <div class="f-body">
+            <div class="list">
+              <div class="it"><span class="t sp14">我在精神病院学斩神</span><span class="s sp11">三九音域 · 第 7 名 · 328 万字</span></div>
+              <div class="it"><span class="t sp14">夜的命名术</span><span class="s sp11">会说话的肘子 · 第 2 名</span></div>
+              <div class="it"><span class="t sp14">十日终焉</span><span class="s sp11">杀虫队队员 · 第 4 名</span></div>
+              <div class="it"><span class="t sp14">大奉打更人</span><span class="s sp11">卖报小郎君 · 第 11 名</span></div>
+            </div>
+          </div>
+          <div class="scrim"></div>
+          <div class="drawer wide pick">
+            <div class="hd"><span class="sp12">番茄 · 男频 19 个分类</span></div>
+            <div class="si"><span class="sp12">西方奇幻</span></div>
+            <div class="si"><span class="sp12">东方仙侠</span></div>
+            <div class="si"><span class="sp12">科幻末世</span></div>
+            <div class="si on"><span class="sp12">都市日常</span></div>
+            <div class="si"><span class="sp12">都市修真</span></div>
+            <div class="si"><span class="sp12">都市高武</span></div>
+            <div class="si"><span class="sp12">历史古代</span></div>
+            <div class="si"><span class="sp12">战神赘婿</span></div>
+            <div class="si"><span class="sp12">都市种田</span></div>
+            <div class="si"><span class="sp12">传统玄幻</span></div>
+            <div class="si"><span class="sp12">历史洞脑</span></div>
+            <div class="si"><span class="sp12">悬疑洞脑</span></div>
+          </div>
+        </div></div>
+        <div class="cap">手机打开态：抽屉 240dp（2/3），一屏看到 12 个分类。</div>
+      </div>
+
+    </div>
+    <div class="pros">
+      <div class="plus">
+        <h4>优点</h4>
+        <ul>
+          <li>平时书目全宽 <b>173dp</b>，手表上书名一至两行就够</li>
+          <li>打开后 19 个分类一屏 <b>8</b> 行，选中即收起，比 A 少一次滚动</li>
+          <li>只在顶栏多一个 ☰，层级不变</li>
+        </ul>
+      </div>
+      <div class="minus">
+        <h4>代价</h4>
+        <ul>
+          <li>打开时盖住左 <b>126dp</b>，选之前看不到书目，要开合一次</li>
+          <li>抽屉里 126dp 宽，6 字分类「都市高武」外要缩到 10sp 才不折行</li>
+          <li>☰ 与返回 ‹ 两个图标挤在 36dp 顶栏，手表上误触风险高</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ C · 顶部横条 ============ -->
+  <div class="card">
+    <h2>C · 顶部横条 chip<span class="tag">最高效</span></h2>
+    <div class="lede">
+      一条可左右滑的分类 chip，一屏露 <b>3</b> 个整的、两边各半个表示能滑；下面书目列表。
+      只多占 <b>34dp</b> 高度，其余全给书。
+    </div>
+    <div class="frames">
+
+      <div class="fig">
+        <div class="dev"><div class="frame">
+          <div class="f-top">
+            <div class="ic"><span class="sp14">‹</span></div>
+            <div class="ttl"><span class="sp14">番茄 · 男频</span></div>
+            <div class="ic"><span class="sp14">⋮</span></div>
+          </div>
+          <div class="f-body">
+            <div class="chips pick">
+              <div class="chip cut-l"><span class="sp11">科幻末世</span></div>
+              <div class="chip on"><span class="sp11">都市日常</span></div>
+              <div class="chip"><span class="sp11">都市修真</span></div>
+              <div class="chip"><span class="sp11">都市高武</span></div>
+              <div class="chip cut-r"><span class="sp11">历史古代</span></div>
+            </div>
+            <div class="list">
+              <div class="it"><span class="t sp12">我在精神病院学斩神</span><span class="s sp11">第 7 名 · 328 万字</span></div>
+              <div class="it"><span class="t sp12">夜的命名术</span><span class="s sp11">第 2 名 · 412 万字</span></div>
+              <div class="it"><span class="t sp12">十日终焉</span><span class="s sp11">第 4 名 · 196 万字</span></div>
+              <div class="it"><span class="t sp12">灵境行者</span><span class="s sp11">第 6 名 · 289 万字</span></div>
+            </div>
+            <div class="sb" style="top:42em;height:40em"></div>
+          </div>
+        </div></div>
+        <div class="cap">手表 C：chip 只占 34dp，书目 3 行半。</div>
+      </div>
+
+      <div class="fig ph">
+        <div class="dev phone"><div class="frame phone">
+          <div class="f-top">
+            <div class="ic"><span class="sp14">‹</span></div>
+            <div class="ttl"><span class="sp14">发现</span></div>
+            <div class="ic"><span class="sp14">☰</span></div>
+            <div class="ic"><span class="sp14">⟳</span></div>
+          </div>
+          <div class="f-body">
+            <div class="chips pick">
+              <div class="chip cut-l"><span class="sp12">科幻末世</span></div>
+              <div class="chip on"><span class="sp12">都市日常</span></div>
+              <div class="chip"><span class="sp12">都市修真</span></div>
+              <div class="chip"><span class="sp12">都市高武</span></div>
+              <div class="chip"><span class="sp12">历史古代</span></div>
+              <div class="chip cut-r"><span class="sp12">战神赘婿</span></div>
+            </div>
+            <div class="list">
+              <div class="it"><span class="t sp14">我在精神病院学斩神</span><span class="s sp11">三九音域 · 第 7 名 · 328 万字</span></div>
+              <div class="it"><span class="t sp14">夜的命名术</span><span class="s sp11">会说话的肘子 · 第 2 名</span></div>
+              <div class="it"><span class="t sp14">十日终焉</span><span class="s sp11">杀虫队队员 · 第 4 名</span></div>
+              <div class="it"><span class="t sp14">大奉打更人</span><span class="s sp11">卖报小郎君 · 第 11 名</span></div>
+              <div class="it"><span class="t sp14">灵境行者</span><span class="s sp11">卖报小郎君 · 第 6 名</span></div>
+              <div class="it"><span class="t sp14">万相之王</span><span class="s sp11">天蚕土豆 · 第 9 名</span></div>
+            </div>
+            <div class="sb" style="top:42em;height:180em"></div>
+          </div>
+        </div></div>
+        <div class="cap">手机 C：一屏 4 个整 chip，书目 6 行。</div>
+      </div>
+
+    </div>
+    <div class="pros">
+      <div class="plus">
+        <h4>优点</h4>
+        <ul>
+          <li>只占 <b>34dp</b>，手表上书目从 4 行起，比现状多 2 行</li>
+          <li>左右滑动换分类，手势与常见阅读 App 一致</li>
+          <li>实现最轻：一个横向滚动容器 + chip 样式，不加新屏</li>
+        </ul>
+      </div>
+      <div class="minus">
+        <h4>代价</h4>
+        <ul>
+          <li>19 个分类横向约 <b>6.8</b> 屏，比现状 5.8 屏还长，且没有纵向定位感</li>
+          <li>chip 宽度随分类名变，滑动时选中的 chip 会滑出屏幕，看不见当前在哪个榜</li>
+          <li>手表屏幕 189dp 宽，chip 上 6 字分类要缩到 10sp</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ D · 分类下钻 ============ -->
+  <div class="card">
+    <h2>D · 分类下钻<span class="tag">推荐</span></h2>
+    <div class="lede">
+      两页：分类列表页（整屏 19 行，带返回）→ 选中后进书目页，顶栏显示当前分类名，书目上方一条「换分类」。
+      每一页只有一件事，一屏只放一种东西。
+    </div>
+    <div class="frames">
+
+      <div class="fig">
+        <div class="dev"><div class="frame">
+          <div class="f-top">
+            <div class="ic"><span class="sp14">‹</span></div>
+            <div class="ttl"><span class="sp14">番茄 · 男频 · 19 个分类</span></div>
+          </div>
+          <div class="f-body pick">
+            <div class="list">
+              <div class="si"><span class="sp12">西方奇幻</span></div>
+              <div class="si"><span class="sp12">东方仙侠</span></div>
+              <div class="si"><span class="sp12">科幻末世</span></div>
+              <div class="si on"><span class="sp12">都市日常</span></div>
+              <div class="si"><span class="sp12">都市修真</span></div>
+              <div class="si"><span class="sp12">都市高武</span></div>
+              <div class="si"><span class="sp12">历史古代</span></div>
+              <div class="si"><span class="sp12">战神赘婿</span></div>
+            </div>
+            <div class="sb" style="top:0;height:62em"></div>
+          </div>
+        </div></div>
+        <div class="cap">分类页：整屏 19 行，一屏 7 行，滚 2.7 屏看完。返回就是 ‹。</div>
+      </div>
+
+      <div class="fig">
+        <div class="dev"><div class="frame">
+          <div class="f-top">
+            <div class="ic"><span class="sp14">‹</span></div>
+            <div class="ttl sm"><span class="sp14">都市日常</span></div>
+            <div class="ic"><span class="sp14">⟳</span></div>
+          </div>
+          <div class="f-body">
+            <div class="swap"><span class="sp11">▤ 换分类</span></div>
+            <div class="list">
+              <div class="it"><span class="t sp12">我在精神病院学斩神</span><span class="s sp11">第 7 名 · 328 万字</span></div>
+              <div class="it"><span class="t sp12">夜的命名术</span><span class="s sp11">第 2 名 · 412 万字</span></div>
+              <div class="it"><span class="t sp12">十日终焉</span><span class="s sp11">第 4 名 · 196 万字</span></div>
+              <div class="it"><span class="t sp12">灵境行者</span><span class="s sp11">第 6 名 · 289 万字</span></div>
+            </div>
+            <div class="sb" style="top:0;height:46em"></div>
+          </div>
+        </div></div>
+        <div class="cap">书目页：顶栏是分类名，「换分类」一条 30dp，书目仍占 4 行。</div>
+      </div>
+
+      <div class="fig ph">
+        <div class="dev phone"><div class="frame phone">
+          <div class="f-top">
+            <div class="ic"><span class="sp14">‹</span></div>
+            <div class="ttl"><span class="sp14">都市日常</span></div>
+            <div class="ic"><span class="sp14">⟳</span></div>
+          </div>
+          <div class="f-body">
+            <div class="swap"><span class="sp12">▤ 换分类 · 番茄男频 19</span></div>
+            <div class="list">
+              <div class="it"><span class="t sp14">我在精神病院学斩神</span><span class="s sp11">三九音域 · 第 7 名 · 328 万字</span></div>
+              <div class="it"><span class="t sp14">夜的命名术</span><span class="s sp11">会说话的肘子 · 第 2 名 · 412 万字</span></div>
+              <div class="it"><span class="t sp14">十日终焉</span><span class="s sp11">杀虫队队员 · 第 4 名 · 196 万字</span></div>
+              <div class="it"><span class="t sp14">大奉打更人</span><span class="s sp11">卖报小郎君 · 第 11 名 · 486 万字</span></div>
+              <div class="it"><span class="t sp14">灵境行者</span><span class="s sp11">卖报小郎君 · 第 6 名 · 289 万字</span></div>
+              <div class="it"><span class="t sp14">万相之王</span><span class="s sp11">天蚕土豆 · 第 9 名 · 402 万字</span></div>
+            </div>
+            <div class="sb" style="top:0;height:190em"></div>
+          </div>
+        </div></div>
+        <div class="cap">手机书目页：换分类一条 34dp 可带站点频道，书目 6 行。</div>
+      </div>
+
+    </div>
+    <div class="pros">
+      <div class="plus">
+        <h4>优点</h4>
+        <ul>
+          <li>每页只有一件事，189dp 屏上不挤；书目页书目占 <b>4</b> 行</li>
+          <li>19 行分类一屏 <b>8</b> 个，比现状 1.5 个多 5 倍</li>
+          <li>站点与频道可合成顶栏一行（省 <b>69dp</b>），分类页不再有选择器</li>
+        </ul>
+      </div>
+      <div class="minus">
+        <h4>代价</h4>
+        <ul>
+          <li>多一层跳转：进分类 → 返回 → 换榜，比 A 多 1 次点击</li>
+          <li>分类页 19 行仍要滚 <b>2.4</b> 屏，只是每屏信息量大了</li>
+          <li>「换分类」占 <b>34dp</b>，「返回」与它功能重叠，要挑一个</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ E · 表冠鼓轮 ============ -->
+  <div class="card">
+    <h2>E · 表冠鼓轮<span class="tag">只用转，不用滑</span></h2>
+    <div class="lede">
+      顶部三行鼓轮：中间一行 17sp 放大高亮，上下两行 11sp 淡出。转表冠就是换分类，手指可以不离开屏。
+      鼓轮占 <b>76dp</b>，下面书目 3 行。
+    </div>
+    <div class="frames">
+
+      <div class="fig">
+        <div class="dev"><div class="frame">
+          <div class="f-top">
+            <div class="ic"><span class="sp14">‹</span></div>
+            <div class="ttl"><span class="sp14">番茄 · 男频</span></div>
+            <div class="ic"><span class="sp14">⟳</span></div>
+          </div>
+          <div class="f-body">
+            <div class="drum">
+              <div class="dr"><span class="sp11">科幻末世</span></div>
+              <div class="dr cur"><span class="sp17">都市日常</span></div>
+              <div class="dr"><span class="sp11">都市修真</span></div>
+            </div>
+            <div class="list">
+              <div class="it"><span class="t sp12">我在精神病院学斩神</span><span class="s sp11">第 7 名 · 328 万字</span></div>
+              <div class="it"><span class="t sp12">夜的命名术</span><span class="s sp11">第 2 名 · 412 万字</span></div>
+              <div class="it"><span class="t sp12">十日终焉</span><span class="s sp11">第 4 名 · 196 万字</span></div>
+            </div>
+            <div class="sb" style="bottom:8em;height:60em"></div>
+          </div>
+        </div></div>
+        <div class="cap">表冠上下转 → 只改鼓轮中间那行，书目跟着换；鼓轮不参与滚动。</div>
+      </div>
+
+    </div>
+    <div class="pros">
+      <div class="plus">
+        <h4>优点</h4>
+        <ul>
+          <li>表冠本来就是本 App 的滚动输入，换分类不用改手势</li>
+          <li>中间行 17sp 高亮，当前在哪个榜一眼看到，不用记</li>
+          <li>鼓轮 76dp 定高，书目稳定占 3 行，不随分类名长短抖</li>
+        </ul>
+      </div>
+      <div class="minus">
+        <h4>代价</h4>
+        <ul>
+          <li>19 个分类转过去平均要 <b>9</b> 下，比点两下慢</li>
+          <li>鼓轮吞掉纵向滚动，书目 3 行一屏要另找办法翻页</li>
+          <li>点第 14 个分类要先转到附近，不能直接跳</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 推荐 ============ -->
+  <div class="card reco">
+    <h2>推荐：D 分类下钻 + 站点频道合成一行</h2>
+    <div class="lede">
+      理由按重量排：
+    </div>
+    <ol>
+      <li><b>先解决屏数。</b>现状 6.6 屏里 5.8 屏是 26 个通栏按钮。D 把分类放进独立一页，一屏 7 个，19 行 2.7 屏看完。</li>
+      <li><b>再省 69dp。</b>站点（番茄/起点）与频道（男频/女频）在顶栏合成一行「番茄 · 男频 ›」，点开才展开两个选择器。这样分类页顶部只剩 36dp 顶栏，一屏 7 行而非 5 行。</li>
+      <li><b>书目页不缩水。</b>「换分类」一条 30dp，书目仍有 4 行 42dp 的项，书名 12sp 两行折行不裁剪。</li>
+      <li><b>A 与 B 作为备选。</b>它们的好处是一屏同见、换榜只点一下，但手表上书目栏被压到 108dp（A）或要开合抽屉（B）。若用户更看重「不离开书目就换榜」，A 是最小改动版；若更看重书目宽度，选 B。</li>
+    </ol>
+    <div class="page-sub" style="margin:14px 0 0">
+      C 的横条只省高度不省距离（横向 6.3 屏），E 的鼓轮适合已有表冠习惯的人但平均要转 9 下。两者可作后续增强，不作主方案。
+    </div>
+  </div>
+
+</div>
+
+<script>
+  // 点一下就切换选中态，让预览能点（静态演示用）
+  document.querySelectorAll('.pick').forEach(function (g) {
+    g.addEventListener('click', function (e) {
+      var t = e.target.closest('.si, .chip');
+      if (!t) return;
+      var sel = t.classList.contains('si') ? '.si' : '.chip';
+      g.querySelectorAll(sel).forEach(function (x) { x.classList.remove('on'); });
+      t.classList.add('on');
+    });
+  });
+</script>
+</body>
+</html>

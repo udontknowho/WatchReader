@@ -20,8 +20,8 @@ KOTLIN_LIB="${KOTLIN_LIB:-$PREFIX/opt/kotlin/lib}"
 OUT="$ROOT/build"
 MIN_SDK=30
 TARGET_SDK=34
-APP_VERSION="${APP_VERSION:-1.3.8}"
-APP_VERSION_CODE="${APP_VERSION_CODE:-21}"
+APP_VERSION="${APP_VERSION:-1.4.0-beta6}"
+APP_VERSION_CODE="${APP_VERSION_CODE:-28}"
 
 # kotlinc 读 JAVA_OPTS（$PREFIX/bin/kotlinc 只在未设置时用默认 -Xmx512M）。
 # 本机内存被系统压到只剩几百兆，编译峰值必须自己封顶：串行 GC 不占并发 GC 线程池，
@@ -171,7 +171,7 @@ if [ "${1:-}" = "test" ]; then
   run_kotlinc "$OUT/uicheck.jar" $(find "$ROOT/src" -name '*.kt')
   rm -f "$OUT/uicheck.jar"
   echo "== 运行 =="
-  for t in CoreTest ChapterOrderTest CloudSourceTest DownloadTest EngineTest HttpTest P0RegressionTest FinishTest SignTest RankConfigTest RotationTest AsyncGuardTest NavProgressTest JobLockTest com.watchdl.core.RuleBoundaryTest TocBudgetTest TextSelectorTest LegadoDefaultTest DevLogTest; do
+  for t in CoreTest ChapterOrderTest CloudSourceTest DownloadTest EngineTest HttpTest P0RegressionTest FinishTest SignTest RankConfigTest RotationTest AsyncGuardTest NavProgressTest JobLockTest com.watchdl.core.RuleBoundaryTest TocBudgetTest TextSelectorTest LegadoDefaultTest DevLogTest JsSyntaxProbeTest Es5CompatTest JsApiSurfaceTest UrlJsTest SearchPartialTest; do
     echo "--- $t ---"
     CHARSET_JSON="${CHARSET_JSON:-$HOME/novel/sources/fanqie-booksource/charset.json}" \
       SONOVEL_RULES="${SONOVEL_RULES:-$HOME/novel/sonovel/rules/main.json}" \
@@ -206,6 +206,14 @@ if [ ! -f "$ROOT/app/assets/sources/legado.json" ]; then
 else
   echo "   源库：$(stat -c %s "$ROOT/app/assets/sources/legado.json") 字节（app/assets/sources/legado.json）"
 fi
+
+# 版本号自检：README 要求每次改动都同时改 build.sh 默认值与 manifest。
+# 只改一处时打包出的包版本对不上，且 aapt2 的 --version-* 会被 manifest 里的值压过，
+# 这里事先比一次，省得打完包才发现。
+MF_VC="$(grep -o 'android:versionCode="[0-9]*"' "$ROOT/app/AndroidManifest.xml" | head -1 | grep -o '[0-9]*')"
+MF_VN="$(grep -o 'android:versionName="[^"]*"' "$ROOT/app/AndroidManifest.xml" | head -1 | sed 's/.*="//; s/"$//')"
+[ "$MF_VC" = "$APP_VERSION_CODE" ] || die "版本号不一致：AndroidManifest.xml versionCode=$MF_VC，build.sh=$APP_VERSION_CODE"
+[ "$MF_VN" = "$APP_VERSION" ] || die "版本号不一致：AndroidManifest.xml versionName=$MF_VN，build.sh=$APP_VERSION"
 
 echo "== 4/6 aapt2 编译 + 链接 =="
 # 资源必须先 compile 成 zip：link 的 -R 只收编译单元，不收目录

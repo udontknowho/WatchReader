@@ -94,16 +94,26 @@ object LegadoImport {
 
         val issues = mutableListOf<String>()
         at.set("searchUrl")
+        // legado 的 `AnalyzeUrl.analyzeJs()`：`<js>…</js>` 块只做副作用，**块后面的文本才是 URL**，
+        // 文本里的 `@result` 用块的结果替换。以前整条当脚本，尾部 URL 被吞掉：
+        // 最终小说网拼出空 URL（`no protocol: `），uu书库把带引号的查询串当 URL。
+        val jsBlocks = jsBlockBodies(searchUrlRaw)
+        val urlTail = textAfterLastJsBlock(searchUrlRaw)
+        val hasJsPrefix = jsBlocks.isNotEmpty() && urlTail.isNotBlank()
         // `@js:` 开头的 searchUrl 整段都是脚本，**不能走 parseUrlOptions**：
         // 它按 `,\s*[{[]` 找「URL,选项」的分界，而脚本里到处是 `,{`
         // （`baseUrl+\"/so/x.html,{'method':'GET'...}`），一切就把字符串截断在引号中间，
         // Rhino 报 `unterminated string literal`。XIU2 那批 22 条里有 6 条栽在这。
-        val searchUrlIsPureJs = FieldRule.jsCodeOf(searchUrlRaw.trim()) != null
-        val (searchUrlRaw2, searchOpts) = if (searchUrlIsPureJs) searchUrlRaw.trim() to UrlOptions()
-                                           else parseUrlOptions(searchUrlRaw)
+        val searchUrlIsPureJs = !hasJsPrefix && FieldRule.jsCodeOf(searchUrlRaw.trim()) != null
+        // 前置脚本时，选项只能从尾部文本里切 —— 脚本里到处是 `,{`，对整条切会把代码截断。
+        val (searchUrlRaw2, searchOpts) = when {
+            hasJsPrefix -> parseUrlOptions(urlTail)
+            searchUrlIsPureJs -> searchUrlRaw.trim() to UrlOptions()
+            else -> parseUrlOptions(searchUrlRaw)
+        }
         // searchUrl 可能是 JS（实测 60 条里 12 条），在请求时求值（见 SearchRule.urlJs）。
         // 在导入期就拦掉等于放弃这些源。
-        val searchUrlJs = FieldRule.jsCodeOf(searchUrlRaw2) != null
+        val searchUrlJs = !hasJsPrefix && FieldRule.jsCodeOf(searchUrlRaw2) != null
         // searchUrl 用脚本是**支持的**（存成 SearchRule.urlJs，请求期求值），
         // 不算问题、不报警。以前这里 issues += "searchUrl(脚本)"，
         // 让 10 条完全正常的源在界面上显得「部分字段用脚本」，是假警报。
@@ -239,7 +249,8 @@ object LegadoImport {
             host = host,
             search = SearchRule(
                 url = searchUrl,
-                urlJs = if (searchUrlJs) FieldRule.jsCodeOf(searchUrlRaw2) else null,
+                urlJs = if (hasJsPrefix) jsBlocks.joinToString("\n\n")
+                        else if (searchUrlJs) FieldRule.jsCodeOf(searchUrlRaw2) else null,
                 method = searchOpts.method,
                 body = searchOpts.body,
                 headers = mergedHeaders,
@@ -254,6 +265,19 @@ object LegadoImport {
             ),
             toc = TocRule(
                 url = "",   // 目录就在书籍页上，由 tocUrl 或书链接决定
+                // 简介也写在 ruleBookInfo 里。取目录时书页已经在手里，顺手求一次，
+                // 不另发请求。脚本字段照样交给 JsEngine，非 @js 脚本不做。
+                intro = bookInfoMap.getStr("intro")
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { it0 ->
+                        when {
+                            FieldRule.jsCodeOf(it0) != null -> FieldRule(it0)
+                            LegadoSelector.usesScript(FieldRule.selectorPartOf(it0)) -> FieldRule()
+                            else -> runCatching {
+                                FieldRule.parse(LegadoSelector.normaliseChain(stripLegadoNoise(it0)))
+                            }.getOrDefault(FieldRule())
+                        }
+                    } ?: FieldRule(),
                 name = tocField("chapterName"),
                 link = tocField("chapterUrl"),
                 nextTocUrl = tocMap.getStr("nextTocUrl")

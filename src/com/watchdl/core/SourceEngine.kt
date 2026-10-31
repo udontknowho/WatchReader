@@ -36,25 +36,31 @@ class SourceEngine(
             "page" to page.toString(),
         )
         // searchUrl 是脚本时，在请求时算 URL。脚本里常用 key/keyword/page/baseUrl。
+        var jsOut: String? = null
         val url = rule.search.urlJs?.let { js ->
             // 脚本里也会写 `baseUrl+"/so/{{key}}.html"`。`{{key}}` 直接交给 Rhino
             // 是非法语法，必须先把模板变量渲染掉（XIU2 起点中文这样写）。
             val code = Template.render(js, ctx)
-            JsEngine.eval(rule.jsLib?.let { "$it\n$code" } ?: code, JsEngine.Env(
+            val out = JsEngine.eval(rule.jsLib?.let { "$it\n$code" } ?: code, JsEngine.Env(
                 baseUrl = rule.host,
                 result = "",
                 vars = mutableMapOf("key" to keyword, "keyword" to keyword, "page" to page.toString()),
                 // 书源 searchUrl 常用 {{source.getKey()}} 拼本站地址。
                 sourceKey = rule.host,
-            )).trim()
+            ), budgetMs = 6000).trim()
+            jsOut = out
+            // 前置脚本 + 尾部 URL（legado 的 analyzeJs）：脚本结果只填 `@result`。
+            // 纯脚本源里尾部 URL 为空，此时脚本结果就是 URL。
+            if (rule.search.url.isBlank()) out
+            else Template.render(applyResult(rule.search.url, out), ctx)
         } ?: rule.expand(rule.search.url, ctx)
         // 脚本算出的 URL 可能是相对路径（实测七猫小说返回 `/api/v5/search/...`），
         // 直接交给 Http 会报 `MalformedURLException: no protocol`。用源主机补全。
         val absUrl = if (url.startsWith("/") && rule.host.isNotBlank())
             rule.host.trimEnd('/') + url else url
-        val body = rule.search.body?.let { Template.render(it, ctx) }
+        // 请求体里也可能写 `"body":@result`（uu书库：脚本算查询串，尾部给网址）。
+        val body = rule.search.body?.let { Template.render(applyResult(it, jsOut), ctx) }
         val raw = fetch(absUrl, normaliseMethod(rule.search.method), body, rule.search.headers)
-
         // 结果列表：先取出每一项的原文，字段再**相对于该项**求值。
         //
         // 这是 legado 的语义：`bookList: $.data[*]` 取数组，`name: $.novelName`
@@ -239,12 +245,15 @@ class SourceEngine(
             absolute(rule.expand(rule.toc.url, ctx), bookUrl)
         } else bookUrl
         var raw: String
+        // 书页原文，留给简介求值用（简介在书页上，不在目录页上）。
+        var bookPageRaw: String? = null
         if (tocUrlRule != null && rule.toc.url.isBlank()) {
             // 书籍页可能与当前 url 相同，不重复请求。
             val bookRaw0 = request(bookUrl)
             // legado 的 ruleBookInfo.init：把书页响应收窄到子对象，作为后续字段的 result。
             // 必须在求值 tocUrl **之前**做，否则 `{{$.bookId}}` 只能在顶层找，取到空。
             val bookRaw = narrow(bookRaw0)
+            bookPageRaw = bookRaw
             val tocPath = runCatching { tocUrlRule.eval(bookRaw, jsLib = rule.jsLib).firstOrNull() }
                 .getOrNull()?.trim().orEmpty()
             if (tocPath.isNotEmpty()) {
@@ -257,7 +266,14 @@ class SourceEngine(
             } else raw = bookRaw
         } else {
             raw = narrow(request(url))
+            bookPageRaw = raw
         }
+
+        // 简介：在书页那次响应上白求一次，不另发请求。
+        // 求不到就是空串，界面退回用搜索结果里的摘要（见 MainActivity.loadToc）。
+        val intro = runCatching {
+            rule.toc.intro.eval(bookPageRaw ?: raw, jsLib = rule.jsLib).firstOrNull()
+        }.getOrNull()?.let { plainText(it) }?.trim().orEmpty()
 
 
         // chapterList 自己返回**对象数组**时（实测 5 条源），每个对象就是一个项作用域：
@@ -372,6 +388,7 @@ class SourceEngine(
             bookId = book, name = "", author = "",
             chapters = ChapterOrder.normalise(chapters),
             truncated = tocCut,
+            intro = intro,
         )
     }
 
@@ -427,7 +444,9 @@ class SourceEngine(
         val raw = fetch(url, normaliseMethod(rule.content.method), null, rule.content.headers)
         // 选择器为空说明规则没提供（例如用了脚本），直接返回原文，交给上层处理
         val body = if (rule.content.content.selector.isBlank()) raw else contentBody(raw)
-        return applyReplaceRegex(paged(url, raw, body))
+        val cleaned = applyReplaceRegex(paged(url, raw, body))
+        // 选择器为空时 body 是整页 HTML，按行清理会误伤，所以只清提取过的正文。
+        return if (rule.content.content.selector.isBlank()) cleaned else Downloader.stripHeadTitleBlock(cleaned)
     }
 
     /**

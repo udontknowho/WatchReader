@@ -124,6 +124,8 @@ object Http {
         val msHeaders: Long = 0,
         val msBody: Long = 0,
         val contentType: String? = null,
+        /** 响应头（键已小写）。书源脚本要读 `location` 这类头时用得上。 */
+        val headers: Map<String, String> = emptyMap(),
     )
 
     /**
@@ -350,6 +352,9 @@ object Http {
         var connectMs = 0L
         var headersMs = 0L
         var bodyMs = 0L
+        // 跟随重定向后最终的响应头里已经没有 Location 了，但书源常靠它取 searchid，
+        // 所以把跳转途中第一次拿到的 Location 一并带出去。
+        var firstLocation: String? = null
 
         val totalBudget = minOf(timeoutMs.toLong() * TOTAL_FACTOR, totalTimeoutMs?.toLong() ?: Long.MAX_VALUE)
         // 整次请求（含建连、重定向、读响应体）共用一份预算。
@@ -408,6 +413,7 @@ object Http {
             if (code in 300..399) {
                 cut.interrupt()
                 val loc = conn.getHeaderField("Location")
+                if (firstLocation == null && !loc.isNullOrBlank()) firstLocation = loc
                 conn.disconnect()
                 if (loc.isNullOrBlank() || redirects >= MAX_REDIRECTS) {
                     error("HTTP $code 重定向失败（Location=$loc）")
@@ -443,6 +449,11 @@ object Http {
             }
             cut.interrupt()
             val charset = sniffCharset(bytes, contentType)
+            val respHeaders: MutableMap<String, String> = runCatching {
+                conn.headerFields.entries.filter { it.key != null }
+                    .associate { it.key.lowercase() to (it.value?.firstOrNull() ?: "") }.toMutableMap()
+            }.getOrDefault(mutableMapOf())
+            firstLocation?.let { respHeaders["location"] = it }
             conn.disconnect()
             return Response(
                 body = decode(bytes, charset),
@@ -455,6 +466,7 @@ object Http {
                 msHeaders = headersMs,
                 msBody = bodyMs,
                 contentType = contentType,
+                headers = respHeaders,
             )
         }
     }

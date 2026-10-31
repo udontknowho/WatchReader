@@ -93,6 +93,19 @@ fun main() {
         val cached = RankConfig.local(emptyDir)
         check("有缓存就用缓存", cached.size == 1 && cached[0].key == "only",
             "实际 ${cached.map { it.key }}")
+
+        // 设备上真实出现过的那份 v1：非空，但番茄分类榜一条都没有。
+        // 它不能顶掉内置表 —— 否则发现页里分类榜整类消失。
+        cfg.writeText("""{"version":1,"ranks":[
+          {"key":"fanqie","name":"番茄推荐","kind":"fanqie"},
+          {"key":"qd:yuepiaolist","name":"起点月票","kind":"qidian","board":"yuepiaolist"}
+        ]}""")
+        val stale = RankConfig.local(emptyDir)
+        check("过期缓存退回内置表", stale.size == RankConfig.BUILTIN.size,
+            "实际 ${stale.size} 条")
+        check("分类榜又回来了",
+            stale.count { it.kind == RankConfig.Kind.FANQIE_RANK } == 26,
+            "实际 ${stale.count { it.kind == RankConfig.Kind.FANQIE_RANK }} 个")
         emptyDir.deleteRecursively()
     }
 

@@ -68,6 +68,8 @@ class DownloadService : Service() {
         const val EXTRA_FAILED = "failed"
         const val EXTRA_TOTAL = "total"
         const val EXTRA_TITLE = "title"
+        /** 非空表示本次是被熔断停下的，界面要把原因说出来（P0-3-a）。 */
+        const val EXTRA_ABORT = "abort"
         const val EXTRA_FINISHED = "finished"
 
         fun start(ctx: Context, info: BookInfo, freeOnly: Boolean = true) {
@@ -260,7 +262,7 @@ class DownloadService : Service() {
         val done = java.util.concurrent.atomic.AtomicInteger(job.count(ChapterStatus.DONE))
         val failed = java.util.concurrent.atomic.AtomicInteger(job.count(ChapterStatus.FAILED))
         val total = job.total
-        fun publish(title: String, finished: Boolean = false, current: Int = -1) {
+        fun publish(title: String, finished: Boolean = false, current: Int = -1, abort: String? = null) {
             val d = done.get()
             val f = failed.get()
             notify(buildNotification(title, d, f, total, !finished, current))
@@ -271,6 +273,7 @@ class DownloadService : Service() {
                 putExtra(EXTRA_TOTAL, total)
                 putExtra(EXTRA_TITLE, title)
                 putExtra(EXTRA_FINISHED, finished)
+                abort?.let { putExtra(EXTRA_ABORT, it) }
             })
         }
 
@@ -320,7 +323,9 @@ class DownloadService : Service() {
             }
             // N10：取消时 dl.run() 是正常返回，以前无条件报「下载完成」，
             // finally 再补一句「已取消」，界面先看到完成再看到取消。
-            if (!cancelFlag.get()) publish(msg, finished = true)
+            // 熔断（P0-3-a）不是完成：把原因原样带给界面，否则用户只看到「结束」
+            // 却不知道为什么停在 40 章。
+            if (!cancelFlag.get()) publish(r.abortReason ?: msg, finished = true, abort = r.abortReason)
         } catch (e: Exception) {
             publish("下载中断：${e.message}", finished = true)
         } finally {
@@ -369,7 +374,24 @@ class DownloadService : Service() {
         if (ongoing && total > 0) {
             b.setProgress(total, pos.coerceIn(0, total), false)
         }
+        // 报告 P0-1：通知上没有取消入口，用户想停只能进 App 找进度屏。
+        if (ongoing) {
+            b.addAction(
+                Notification.Action.Builder(null, "取消", cancelIntent()).build()
+            )
+        }
         return b.build()
+    }
+
+    /** 通知上的「取消」直连服务，不必先开界面。 */
+    private fun cancelIntent(): android.app.PendingIntent {
+        val i = android.content.Intent(this, DownloadService::class.java).apply {
+            action = ACTION_CANCEL
+        }
+        val flag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        else android.app.PendingIntent.FLAG_UPDATE_CURRENT
+        return android.app.PendingIntent.getService(this, 1, i, flag)
     }
 
     /** 点通知回到 App 的进度屏。 */

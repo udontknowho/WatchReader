@@ -94,6 +94,9 @@ class Downloader(
         var size = BatchPlan.initialSize(todo.size)
         var ok = 0
         var fail = 0
+        // 连续失败章数（任何一次成功就清零）与熔断原因。
+        var consecFail = 0
+        var abortReason: String? = null
         // 并发跑时多个线程会同时改 statuses / 计数器 / 落盘，全部走这把锁。
         val lock = Any()
 
@@ -129,6 +132,7 @@ class Downloader(
                                 synchronized(lock) {
                                     statuses[i] = ChapterStatus.DONE
                                     ok++
+                                    consecFail = 0
                                 }
                                 onChapter?.invoke(i, ChapterStatus.DONE, ch.title)
                                 log("第 ${i + 1} 章 ${ch.title.take(12)} 成功 ${System.currentTimeMillis() - t0}ms $chars 字")
@@ -158,6 +162,7 @@ class Downloader(
                             synchronized(lock) {
                                 statuses[i] = ChapterStatus.FAILED
                                 fail++
+                                consecFail++
                                 batchFailed = true
                             }
                             onChapter?.invoke(i, ChapterStatus.FAILED, "${ch.title}（$lastError）")
@@ -196,6 +201,7 @@ class Downloader(
                             writeChapter(job, job.chapters[i], html)
                             statuses[i] = ChapterStatus.DONE
                             ok++; fail--
+                            consecFail = 0
                             onChapter?.invoke(i, ChapterStatus.DONE, job.chapters[i].title)
                         } catch (e: Exception) {
                             if (e is InterruptedException) interrupted.set(true)
@@ -206,6 +212,14 @@ class Downloader(
                 }
             }
             cursor += batch.size
+
+            // 熔断：一连 FAIL_BREAK 章全挂、全书零成功，就整本停下。
+            // 三方源坏掉时跑满 2478 章只是白烧流量和电，实测一晚上爬了 187 个失败。
+            if (ok == 0 && consecFail >= FAIL_BREAK && !cancelled()) {
+                abortReason = "连续 $consecFail 章全部失败，已暂停"
+                log(abortReason)
+                break
+            }
         }
 
         val finished = job.chapters.indices.all {
@@ -231,6 +245,7 @@ class Downloader(
             doneTotal = doneTotal,
             lockedTotal = lockedTotal,
             failTotal = failTotal,
+            abortReason = abortReason,
         )
     }
 
@@ -255,6 +270,8 @@ class Downloader(
         val doneTotal: Int = success,
         val lockedTotal: Int = 0,
         val failTotal: Int = failed,
+        /** 非空表示因连续失败被熔断，界面要把这句显示出来。 */
+        val abortReason: String? = null,
     )
 
     /** 单章取数超时。单独列一个类型，好跟网络错误区分开 —— 超时不重试。 */
@@ -379,7 +396,9 @@ class Downloader(
                 m.startsWith("HTTP 403") -> "403 风控"
                 m.startsWith("HTTP ") -> "HTTP 错"
                 m.contains("正文") -> "正文无效"
-                else -> e.javaClass.simpleName
+                // 兜底分支以前只留类名，实测日志全是「IllegalStateException」四个字，
+                // message 一丢就没法判断是解析、编码还是连接复用。
+                else -> e.javaClass.simpleName + (if (m.isNotBlank()) ": ${m.take(80)}" else "")
             }
         }
         /**
@@ -407,6 +426,9 @@ class Downloader(
          */
         const val MAX_FETCH_THREADS = 16
 
+        /** 连续失败多少章就整本熔断。先取 20，按真机失败率再调。 */
+        const val FAIL_BREAK = 20
+
         /**
          * 把目录落进 job.json，供下载服务自己读。
          *
@@ -420,6 +442,8 @@ class Downloader(
          */
         fun saveCatalog(store: JobStore, info: BookInfo) {
             if (store.readJob(info.bookId) != null) return
+            // 删掉后又在同一进程里重新下载：先撤销墓碑，否则下面的落盘会被丢弃。
+            store.clearDeleted(info.bookId)
             val sb = StringBuilder()
             sb.append("{\"bookId\":").append(quote(info.bookId))
             sb.append(",\"name\":").append(quote(info.name))
@@ -617,9 +641,26 @@ class Downloader(
         private fun convert(line: String, seq: Int): String? {
             val title = TinyJson.path(line, "title") ?: ""
             val content = TinyJson.path(line, "content") ?: return null
-            val head = if (title.trimStart().matches(Regex("^第\\s*[\\d零〇一二三四五六七八九十百千万两]+\\s*[章节回卷篇].*")))
-                title else "第${seq}章 ${title.ifBlank { "" }}".trimEnd()
-            return "$head\n\n${htmlToText(content)}\n\n"
+            return "${chapterHead(title, seq)}\n\n${htmlToText(content)}\n\n"
+        }
+
+        /** 「第 N 章」「第 5 节」这类章节号。 */
+        private val CHAPTER_NO = Regex("""第\s*[零〇一二三四五六七八九十百千万两\d]+\s*[章节回卷篇]""")
+
+        /** 源站目录里粘在标题前面的噪音：`正文_第3章`、`废柴逆袭_第22章`。 */
+        private val TITLE_PREFIX = Regex("""^[\u4e00-\u9fa5A-Za-z]{1,8}_""")
+
+        /**
+         * 导出用的章节标题行。
+         *
+         * 序号只在标题里没有「第N章」时补。[CHAPTER_NO] 用 `containsMatchIn` 而不是匹配开头：
+         * 玄幻阁的标题是「正文_第1章：…」，按开头判断不成立，以前会拼成「第1章 正文_第1章：…」。
+         * 顺带剥掉源站的「正文_」「废柴逆袭_」前缀。
+         */
+        fun chapterHead(title: String, seq: Int): String {
+            val t = title.replace(TITLE_PREFIX, "").trim()
+            if (t.isEmpty()) return "第${seq}章"
+            return if (CHAPTER_NO.containsMatchIn(t)) t else "第${seq}章 $t"
         }
 
         /**
@@ -636,7 +677,48 @@ class Downloader(
             val body = if (lines.size > 1 && lines[0].length < 40 && lines[0].contains(lines.getOrNull(1)?.take(6) ?: "\u0000")) {
                 lines.drop(1)
             } else lines
-            return body.joinToString("\n") { "　　$it" }
+            // 老作业里存的正文还带着推荐位书单（新下载在 SourceEngine 里就清掉了），导出时兜一次。
+            val clean = stripHeadTitleBlock(body.joinToString("\n"))
+            return clean.split('\n').filter { it.isNotEmpty() }.joinToString("\n") { "　　$it" }
+        }
+
+        /**
+         * 丢掉正文开头的「推荐位书单」块。
+         *
+         * 玄幻阁这类站点把一整列别书书名塞在正文容器最前面（实测本书 327 章全部命中，
+         * 每块 8–10 行、单行 4–17 字），不清掉的话阅读器每章第一屏都是别人的书名，
+         * 导出的 TXT 也没法直接用。块里的书名逐章变化，固定正则修不住，只能按形状判。
+         *
+         * 三道门同时成立才丢，宁可漏也不能把正文吃掉：
+         * 1. 头部连续 ≥5 个非空行、每行 ≤30 字；
+         * 2. 这块占全文不到 1/6 —— 短章因此整块保留；
+         * 3. 块内 ≥6 成的行不以「。」「”」「，」这类句读收尾 —— 正常段落几乎都以它们收尾。
+         *
+         * 已知边界：真有章节以 5 行以上的短句（诗行、极短对白）开头，且这些短句不带句读，
+         * 会被一并吞掉。实测 56 条源与本书 327 章都没有这种正文。
+         */
+        fun stripHeadTitleBlock(text: String): String {
+            if (text.length < 200) return text
+            val lines = text.split('\n')
+            val head = ArrayList<Int>()
+            for (i in lines.indices) {
+                val t = lines[i].trim()
+                if (t.isEmpty()) continue
+                if (t.length > 30 || t.contains('“') || t.contains('”')) break
+                if (t.any { it == '。' || it == '；' || it == '…' }) break
+                head.add(i)
+                if (head.size >= 12) break
+            }
+            if (head.size < 5) return text
+            if (head.sumOf { lines[it].trim().length } * 6 > text.length) return text
+            val noEnd = head.count { i ->
+                val t = lines[i].trim()
+                !(t.endsWith("。") || t.endsWith("”") || t.endsWith("，") ||
+                    t.endsWith("；") || t.endsWith("：") || t.endsWith("！") || t.endsWith("？"))
+            }
+            if (noEnd * 10 < head.size * 6) return text
+            val drop = head.toHashSet()
+            return lines.indices.filter { it !in drop }.joinToString("\n") { lines[it] }.trimStart('\n')
         }
 
         /** 常见实体还原。TND 用有界多轮，这里做一轮够用，避免 `&amp;lt;` 之类被反复解。 */

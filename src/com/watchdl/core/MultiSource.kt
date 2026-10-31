@@ -79,6 +79,13 @@ class MultiSource(
         onProgress: ((done: Int, total: Int) -> Unit)? = null,
         /** 从第几个源开始取本轮集合（换一批源）。 */
         offset: Int = 0,
+        /**
+         * 边跑边报：每有一个源返回命中就回调一次，带**本次新到的**已清洗、已去重条目。
+         *
+         * 以前用 `invokeAll` 等全部完成才返回，首屏要等最慢的源（实测 15 秒）。
+         * 现在慢源不再挡住快的。回调在任意线程上，UI 层自己切主线程。
+         */
+        onPartial: ((hits: List<BookHit>, done: Int, total: Int) -> Unit)? = null,
     ): Result {
         val sources = rotation(offset)
         if (sources.isEmpty()) return Result(emptyList(), 0, 0, emptyList())
@@ -87,6 +94,7 @@ class MultiSource(
 
         val runner = Executors.newFixedThreadPool(lanes)
         val finished = java.util.concurrent.atomic.AtomicInteger(0)
+        // 进度回调只在主循环里发，避免任务线程与本线程各发一次、进度条超过 100%。
         // N6：以前是 List，同一源会被记两次（onFailure 一次、invokeAll 取消后又一次），
         // 于是 responded = size - failed.size 可能变成负数。
         // 用 Set 去重，responded 单独计数。
@@ -94,42 +102,73 @@ class MultiSource(
         // 有响应的源数（成功返回，不管有没有结果）。
         val respondedCount = java.util.concurrent.atomic.AtomicInteger(0)
         val collected = java.util.Collections.synchronizedList(mutableListOf<BookHit>())
+        // 已经报给界面的条目：跨源去重键。边跑边报不能让同一本书报两次。
+        val sent = HashMap<String, Boolean>()
+        // 跑完过的源名。完成顺序与列表顺序无关，超时后不能按位置推算剩下了谁。
+        val doneNames = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+        /** 一个源的结局。任务内不抛异常 —— 抛了 CompletionService 就分不清是哪个源。 */
+        class Lane(val ns: NamedSource, val hits: List<BookHit>?, val error: Throwable?, val ms: Long)
 
         try {
-            val tasks = sources.map { ns ->
-                Callable {
+            val service = java.util.concurrent.ExecutorCompletionService<Lane>(runner)
+            val futures = sources.map { ns ->
+                service.submit(Callable {
                     val t0 = System.currentTimeMillis()
                     runCatching { ns.source.search(keyword, page) }
-                        .onSuccess { hits ->
-                            respondedCount.incrementAndGet()
-                            DevLog.log("SRC", "「${ns.name}」命中 ${hits.size} 本 ${System.currentTimeMillis() - t0}ms")
-                            // 源自己没填来源名时，用我们在 MultiSource 里登记的名字补上。
-                            // 这样界面无论从哪条路都拿得到来源标注。
-                            hits.forEach { h ->
-                                collected.add(if (h.sourceName.isBlank()) h.copy(sourceName = ns.name) else h)
-                            }
-                        }
-                        .onFailure {
-                            failed.add(ns.name)
-                            // 被上层 cancel 的源这里只记一行：以前 onFailure 记「失败」、
-                            // 下面 isCancelled 分支又记「超时被取消」，同一个源两行噪音。
-                            val why = if (isCancelLike(it)) "本轮超时被取消"
-                                      else "${it.javaClass.simpleName}: ${it.message}"
-                            DevLog.log("SRC", "「${ns.name}」失败 ${System.currentTimeMillis() - t0}ms $why")
-                        }
-                    // 跑完一条报一次进度（成功失败都算）。
-                    onProgress?.invoke(finished.incrementAndGet(), sources.size)
-                }
+                        .fold(
+                            onSuccess = { hits ->
+                                DevLog.log("SRC", "「${ns.name}」命中 ${hits.size} 本 ${System.currentTimeMillis() - t0}ms")
+                                // 源自己没填来源名时，用我们在 MultiSource 里登记的名字补上。
+                                Lane(ns, hits.map { if (it.sourceName.isBlank()) it.copy(sourceName = ns.name) else it },
+                                     null, System.currentTimeMillis() - t0)
+                            },
+                            onFailure = { Lane(ns, null, it, System.currentTimeMillis() - t0) },
+                        )
+                })
             }
-            val futures = runner.invokeAll(tasks, timeoutMs, TimeUnit.MILLISECONDS)
-            // invokeAll 超时后会把没跑完的 future cancel 掉，这里补记成失败
-            futures.forEachIndexed { i, f ->
-                if (f.isCancelled) {
-                    // 只记账，不再记日志：onFailure 已经记过（或这个任务根本没跑到），
-                    // 两行写同一件事只会把真正的原因埋掉。
-                    failed.add(sources[i].name)
-                    // 被取消的源不会再走到上面的回调，这里补报，否则进度条永远不到 100%。
-                    onProgress?.invoke(finished.incrementAndGet(), sources.size)
+            // 用单调时钟算预算：手表上 wall clock 会被网络校时前后跳，
+            // 往回跳一下 poll 就可能多等几秒（实测一次 8 秒）。
+            val startNs = System.nanoTime()
+            val budgetNs = timeoutMs * 1_000_000L
+            var remaining = sources.size
+            while (remaining > 0) {
+                val leftNs = budgetNs - (System.nanoTime() - startNs)
+                if (leftNs <= 0) break
+                val f = service.poll(leftNs / 1_000_000L, TimeUnit.MILLISECONDS) ?: break
+                remaining--
+                val lane = runCatching { f.get() }.getOrNull()
+                if (lane == null) { finished.incrementAndGet(); onProgress?.invoke(finished.get(), sources.size); continue }
+                doneNames.add(lane.ns.name)
+                val err = lane.error
+                if (err != null) {
+                    failed.add(lane.ns.name)
+                    // 被上层取消的源这里只记一行：以前 onFailure 记「失败」、
+                    // 下面 isCancelled 分支又记「超时被取消」，同一个源两行噪音。
+                    val why = if (isCancelLike(err)) "本轮超时被取消"
+                              else "${err.javaClass.simpleName}: ${err.message}"
+                    DevLog.log("SRC", "「${lane.ns.name}」失败 ${lane.ms}ms $why")
+                } else {
+                    respondedCount.incrementAndGet()
+                    val rows = lane.hits ?: emptyList()
+                    collected.addAll(rows)
+                    // 只把「界面还没见过」的发出去。清洗规则与 [dedupe] 一致，否则
+                    // 报出去的是 `<em>斗破</em>`、最终列表里是 `斗破`，对不上就会重复一行。
+                    val fresh = dedupe(rows).filter { sent.put(hitKey(it), true) == null }
+                    if (fresh.isNotEmpty()) onPartial?.invoke(fresh, finished.get() + 1, sources.size)
+                }
+                val doneNow = finished.incrementAndGet()
+                onProgress?.invoke(doneNow, sources.size)
+            }
+            // 没轮到的源：取消并把名字记进失败，否则进度条永远不到 100%。
+            if (remaining > 0) {
+                futures.forEach { runCatching { it.cancel(true) } }
+                sources.filter { it.name !in doneNames }.forEach { failed.add(it.name) }
+                // 不能写成 `onProgress?.invoke(finished.incrementAndGet(), …)`：
+                // 回调为 null 时 Kotlin 不求解参数，计数器原地不动 → 死循环。
+                while (finished.get() < sources.size) {
+                    val n = finished.incrementAndGet()
+                    onProgress?.invoke(n, sources.size)
                 }
             }
         } finally {
@@ -177,6 +216,10 @@ class MultiSource(
      * 去重键改成「书名 + 作者 + 源名」：同一个源重复返回同一本书仍然要去掉，
      * 但不同源的同名书**各占一行**。
      */
+    /** 去重键：书名 + 作者 + 源名。边跑边报和最终列表必须用同一个键。 */
+    private fun hitKey(h: BookHit): String =
+        h.name.trim() + "\u0001" + h.author.trim() + "\u0001" + h.sourceName.trim()
+
     private fun dedupe(hits: List<BookHit>): List<BookHit> {
         val byKey = LinkedHashMap<String, BookHit>()
         for (raw in hits) {
@@ -188,7 +231,7 @@ class MultiSource(
                 byKey["\u0000" + h.bookId] = h.copy(sourceName = src)
                 continue
             }
-            val key = h.name.trim() + "\u0001" + h.author.trim() + "\u0001" + src
+            val key = hitKey(h.copy(sourceName = src))
             if (!byKey.containsKey(key)) byKey[key] = h.copy(sourceName = src)
         }
         return byKey.values.toList()
