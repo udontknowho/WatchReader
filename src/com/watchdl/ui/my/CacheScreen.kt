@@ -320,8 +320,9 @@ private fun MainActivity.addCacheBook(col: LinearLayout, u: CacheUsage) {
 /**
  * 展开 / 收起一本书。
  *
- * 展开时把窗口直接落到第一个缺章上：一本 3000 章的书点开停在目录头，
- * 想找缺的那几章得翻一百屏。已下完的书就从第一章开始看。
+ * 窗口一律从第 1 章起画，**不跳到第一个缺章**：上一版这么做了，结果已缓存的章
+ * 全都落在窗口前面，用户看到的是「↑ 前面还有 200 章」，跟 legado 里那些
+ * 「下载完成」的行一样点不着。缺章靠状态标记和缺章筛选去找，不靠把窗口搬过去。
  */
 private fun MainActivity.toggleCacheBook(u: CacheUsage) {
     if (CacheUi.open == u.bookId) {
@@ -331,13 +332,6 @@ private fun MainActivity.toggleCacheBook(u: CacheUsage) {
     }
     CacheUi.open = u.bookId
     CacheUi.win = 0
-    val job = Downloader.restoreLight(jobsStore(), u.bookId)
-    if (job != null && job.chapters.isNotEmpty()) {
-        val cached = jobsStore().cachedItemIds(u.bookId)
-        CacheUi.win = job.chapters.indices.firstOrNull {
-            job.chapters[it].itemId !in cached && !job.chapters[it].locked
-        } ?: 0
-    }
     showCache()
 }
 
