@@ -11,6 +11,7 @@ import com.watchdl.core.ChapterRef
 import com.watchdl.core.ChapterStatus
 import com.watchdl.core.Downloader
 import com.watchdl.core.JobState
+import com.watchdl.core.QueueItem
 import com.watchdl.core.Screen
 import com.watchdl.ui.search.askText
 import com.watchdl.ui.theme.Md3
@@ -174,6 +175,57 @@ internal fun MainActivity.showCache() {
             "书源失效就取不回来。要整库腾空间，去「文件管理」。",
         Md3.FS_SM, Md3.onSurfaceVariant))
     root.addView(body, Md3.lpWeight(1f))
+    addCacheQueueBar(shown)
+}
+
+/**
+ * 屏底固定动作：全部开始 / 全部停止。
+ *
+ * legado 那里是个 FAB。手表屏上 FAB 会把最后一张书卡的底遮掉，改成屏底一条通栅按钮，
+ * 位置和语义一样：整库的动作只在这一个地方，不必逐本点。
+ */
+private fun MainActivity.addCacheQueueBar(rows: List<CacheUsage>) {
+    val bar = Md3.row(this).apply {
+        setPadding(Md3.dp(this@addCacheQueueBar, Md3.PAD), Md3.dp(this@addCacheQueueBar, Md3.GAP / 2),
+            Md3.dp(this@addCacheQueueBar, Md3.PAD), Md3.dp(this@addCacheQueueBar, Md3.GAP))
+    }
+    if (DownloadService.runningBookId != null) {
+        bar.addView(Widgets.button(this, "全部停止", "tonal") {
+            DownloadService.cancel(this)
+            toast("已要求停止，队列一并清空")
+            // 服务先落盘再收工，过一会儿回来把按钮换回「全部开始」。
+            thread {
+                Thread.sleep(800)
+                postAlive(Screen.Cache) { showCache() }
+            }
+        }, Md3.lpWeight(1f))
+    } else {
+        val missing = rows.filter { it.cached < it.total }
+        val queued = DownloadService.queueOf(filesDir).items().size
+        if (missing.isEmpty() && queued == 0) return
+        val label = if (missing.isNotEmpty()) "全部开始（缺章 ${missing.size} 本）" else "继续队列（$queued 本）"
+        bar.addView(Widgets.button(this, label, "filled") { startAllCache(missing) },
+            Md3.lpWeight(1f))
+    }
+    root.addView(bar)
+}
+
+/**
+ * 全部开始：把缺章的书排进队，再叫服务跑队头。
+ *
+ * 不在这里直接 startDownload 第一本：那会走 ACTION_START，而单本启动要清队列
+ * （用户点明只要这本）。队列本身走 ACTION_QUEUE，两个意图分得开。
+ */
+private fun MainActivity.startAllCache(list: List<CacheUsage>) {
+    val q = DownloadService.queueOf(filesDir)
+    val n = q.enqueue(list.map { QueueItem(it.bookId, it.name, it.author) })
+    if (n == 0) {
+        toast("队列里没有书")
+        return
+    }
+    DownloadService.startQueue(this)
+    toast("已排队 $n 本，一本下完接着下一本")
+    showCache()
 }
 
 /**

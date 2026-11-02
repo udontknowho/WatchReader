@@ -55,6 +55,13 @@ class DownloadService : Service() {
         const val CHANNEL_ID = "watchdl_download"
         const val NOTIFY_ID = 1001
         const val ACTION_START = "com.watchdl.START"
+        /**
+         * 跑队列：不传书名，从 queue.json 取队头开跑（「全部开始」用）。
+         *
+         * 不复用 ACTION_START —— 单独开一本书时要清掉队列（用户点明只要这本），
+         * 两个意图必需分开，否则「全部开始」排好的队会被自己的第一步清空。
+         */
+        const val ACTION_QUEUE = "com.watchdl.QUEUE"
         const val ACTION_CANCEL = "com.watchdl.CANCEL"
         const val EXTRA_BOOK_ID = "bookId"
         const val EXTRA_NAME = "name"
@@ -106,6 +113,16 @@ class DownloadService : Service() {
         fun cancel(ctx: Context) {
             ctx.startService(Intent(ctx, DownloadService::class.java).apply { action = ACTION_CANCEL })
         }
+
+        /** 队列文件。服务与缓存页两边都用这一个名字。 */
+        fun queueOf(filesDir: File): DownloadQueue = DownloadQueue(File(filesDir, "queue.json"))
+
+        /** 叫醒服务去跑队列头。队列为空时服务会自己收尾退出。 */
+        fun startQueue(ctx: Context) {
+            ctx.startForegroundService(
+                Intent(ctx, DownloadService::class.java).apply { action = ACTION_QUEUE }
+            )
+        }
     }
 
     private val cancelFlag = AtomicBoolean(false)
@@ -131,6 +148,9 @@ class DownloadService : Service() {
                     }
                 }
                 worker.get()?.interrupt()
+                // 取消连带把队列作废：用户点「全部停止」是要停整队，
+                // 不是停一本然后自己一本一本冒出来。
+                runCatching { queueOf(filesDir).clear() }
                 // S14：没有工作线程时直接退出，但两个「正在跑哪本」的状态要一起清，
                 // 否则界面读 runningBookId 会一直以为后台还在跑，
                 // 「继续下载」按钮点了永远走不到真正启动。
@@ -139,6 +159,41 @@ class DownloadService : Service() {
                     currentBookId.set(null)
                     stopSelf()
                 }
+                return START_NOT_STICKY
+            }
+            ACTION_QUEUE -> {
+                createChannel()
+                // startForegroundService 必须在 5 秒内见到 startForeground，
+                // 所以先挂个通知再判有没有活。
+                startForeground(NOTIFY_ID, buildNotification("准备下载", 0, 0, 0, true))
+                if (worker.get() != null) {
+                    val running = currentBookId.get()
+                    val existing = running?.let {
+                        runCatching { Downloader.restore(JobStore(File(filesDir, "books")), it) }.getOrNull()
+                    }
+                    startForeground(NOTIFY_ID, buildNotification(
+                        "下载任务尚未结束", existing?.count(ChapterStatus.DONE) ?: 0,
+                        existing?.count(ChapterStatus.FAILED) ?: 0, existing?.total ?: 0, true))
+                    return START_NOT_STICKY
+                }
+                val next = queueOf(filesDir).pop()
+                if (next == null) {
+                    stopForeground(STOP_FOREGROUND_DETACH)
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+                val chapters = runCatching {
+                    Downloader.restore(JobStore(File(filesDir, "books")), next.bookId)?.chapters
+                }.getOrNull() ?: emptyList()
+                if (chapters.isEmpty()) {
+                    // 目录丢了的作业排在队头会把整队卡住，直接跳过，剩下的留给下一次收尾继续。
+                    notify(buildNotification("跳过《${next.name}》：目录不在了", 0, 0, 0, false))
+                    stopForeground(STOP_FOREGROUND_DETACH)
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+                startForeground(NOTIFY_ID, buildNotification("准备下载：${next.name}", 0, 0, 0, true))
+                launch(BookInfo(next.bookId, next.name, next.author, chapters), true, null)
                 return START_NOT_STICKY
             }
             ACTION_START -> {
@@ -167,8 +222,10 @@ class DownloadService : Service() {
                     return START_NOT_STICKY
                 }
                 createChannel()
-                cancelFlag.set(false)
                 startForeground(NOTIFY_ID, buildNotification("准备下载", 0, 0, 0, true))
+                // 单本启动是用户点明「只要这本」：把上一轮的队列作废，
+                // 否则这本下完会接着跑一堆用户已经不记得排过的书。
+                runCatching { queueOf(filesDir).clear() }
                 val info = parseInfo(intent)
                 val freeOnly = intent.getBooleanExtra(EXTRA_FREE_ONLY, true)
                 // 指定章节（单章重建）。解析失败就当没传，退回整本/免费章的旧行为。
@@ -177,27 +234,7 @@ class DownloadService : Service() {
                     ?.mapNotNull { it.trim().toIntOrNull() }
                     ?.filter { it >= 0 }
                     ?.takeIf { it.isNotEmpty() }
-                val t = Thread {
-                    val owner = Thread.currentThread()
-                    try {
-                        runJob(info, freeOnly, explicit)
-                    } catch (e: Exception) {
-                        runCatching { notify(buildNotification("下载中断：${e.message}", 0, 0, 0, false)) }
-                    } finally {
-                        android.os.Handler(mainLooper).post {
-                            if (worker.compareAndSet(owner, null)) {
-                                runningBookId = null
-                                currentBookId.set(null)
-                                stopForeground(STOP_FOREGROUND_DETACH)
-                                stopSelf()
-                            }
-                        }
-                    }
-                }.apply { isDaemon = false }
-                worker.set(t)
-                currentBookId.set(bookId)
-                runningBookId = bookId
-                t.start()
+                launch(info, freeOnly, explicit)
             }
         }
         return START_NOT_STICKY
@@ -254,6 +291,53 @@ class DownloadService : Service() {
             Downloader.restore(JobStore(File(filesDir, "books")), bookId)?.chapters ?: emptyList()
         }
         return BookInfo(bookId, name, author, chapters)
+    }
+
+    /**
+     * 起一条下载线程。onStartCommand 与队列收尾都用它，两边行为必需一致：
+     * 三个「正在跑哪本」的状态一起设，收尾统一走 [finishJob]。
+     */
+    private fun launch(info: BookInfo, freeOnly: Boolean, explicit: List<Int>?) {
+        cancelFlag.set(false)
+        val t = Thread {
+            val owner = Thread.currentThread()
+            try {
+                runJob(info, freeOnly, explicit)
+            } catch (e: Exception) {
+                runCatching { notify(buildNotification("下载中断：${e.message}", 0, 0, 0, false)) }
+            } finally {
+                android.os.Handler(mainLooper).post { finishJob(owner) }
+            }
+        }.apply { isDaemon = false }
+        worker.set(t)
+        currentBookId.set(info.bookId)
+        runningBookId = info.bookId
+        t.start()
+    }
+
+    /**
+     * 作业收尾：清状态，队列还有下一本就接着跑，否则停服。
+     *
+     * 主线程上跑（线程自己的 finally 里 post 过来），所以这里可以建界面要用的通知。
+     * 队列里的书目录直接从 job.json 读：入队时挑的都是下载过的书，目录早在盘上。
+     */
+    private fun finishJob(owner: Thread) {
+        if (!worker.compareAndSet(owner, null)) return
+        runningBookId = null
+        currentBookId.set(null)
+        val store = JobStore(File(filesDir, "books"))
+        while (!cancelFlag.get()) {
+            val next = queueOf(filesDir).pop() ?: break
+            val chapters = runCatching { Downloader.restore(store, next.bookId)?.chapters }
+                .getOrNull() ?: emptyList()
+            if (chapters.isEmpty()) continue
+            createChannel()
+            startForeground(NOTIFY_ID, buildNotification("准备下载：${next.name}", 0, 0, 0, true))
+            launch(BookInfo(next.bookId, next.name, next.author, chapters), true, null)
+            return
+        }
+        stopForeground(STOP_FOREGROUND_DETACH)
+        stopSelf()
     }
 
     /**

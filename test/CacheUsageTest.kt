@@ -1,4 +1,6 @@
+import com.watchdl.core.DownloadQueue
 import com.watchdl.core.JobStore
+import com.watchdl.core.QueueItem
 import java.io.File
 
 /**
@@ -64,6 +66,29 @@ fun main() {
     val d = store.cacheUsages().first { it.bookId == "d" }
     check("失败章数从 job.json 数出来", d.failed == 2, d.failed.toString())
     check("作业状态读得到", d.state == com.watchdl.core.JobState.PAUSED, d.state.toString())
+
+    // 队列：『全部开始』排进去的书要能落盘、能按顺序取，重复排不得重复下。
+    val qf = File(root, "queue.json")
+    val q = DownloadQueue(qf)
+    check("空队列没有队头", q.pop() == null)
+    val n1 = q.enqueue(listOf(
+        QueueItem("https://a/1", "甲", "A"),
+        QueueItem("https://b/2", "乙", "B"),
+    ))
+    check("两本入队", n1 == 2, n1.toString())
+    check("重复排不重复下", q.enqueue(listOf(QueueItem("https://a/1", "甲", "A"))) == 2,
+        q.items().size.toString())
+    check("落盘后能读回", DownloadQueue(qf).items().map { it.name } == listOf("甲", "乙"),
+        DownloadQueue(qf).items().map { it.name }.toString())
+    check("带引号的 id 不坏 json",
+        q.enqueue(listOf(QueueItem("a\"b", "丙", "C"))) == 3 &&
+            DownloadQueue(qf).items().last().bookId == "a\"b",
+        DownloadQueue(qf).items().joinToString { it.bookId })
+    check("队头先出", q.pop()?.bookId == "https://a/1", q.items().firstOrNull()?.bookId.orEmpty())
+    check("出队后剩两本", q.items().size == 2, q.items().size.toString())
+    q.clear()
+    check("清队后为空", q.items().isEmpty())
+    check("文件也删了", !qf.exists())
 
     root.deleteRecursively()
     println()
