@@ -62,6 +62,13 @@ class DownloadService : Service() {
         const val EXTRA_CHAPTERS = "chapters"     // 旧协议："itemId\u0001title\u0001locked" 用 \n 连接
         const val EXTRA_FREE_ONLY = "freeOnly"
 
+        /**
+         * 只下指定的几章（逗号连接的目录下标）。
+         *
+         * 缓存管理页的「下载本章」用它 —— 单章重建走同一条服务，不另写一条下载链。
+         */
+        const val EXTRA_INDEXES = "indexes"
+
         /** 进度广播，Activity 在线时直接刷新界面。 */
         const val ACTION_PROGRESS = "com.watchdl.PROGRESS"
         const val EXTRA_DONE = "done"
@@ -72,7 +79,12 @@ class DownloadService : Service() {
         const val EXTRA_ABORT = "abort"
         const val EXTRA_FINISHED = "finished"
 
-        fun start(ctx: Context, info: BookInfo, freeOnly: Boolean = true) {
+        fun start(
+            ctx: Context,
+            info: BookInfo,
+            freeOnly: Boolean = true,
+            indexes: List<Int>? = null,
+        ) {
             // 章节不再走 Intent。整份目录 join 成字符串走 Binder，硬上限 1 MB：
             // 通用书源 itemId 是完整 URL（60–90 字符），6000 章就超限，
             // startForegroundService 在主线程抛 TransactionTooLargeException，
@@ -86,6 +98,7 @@ class DownloadService : Service() {
                 putExtra(EXTRA_NAME, info.name)
                 putExtra(EXTRA_AUTHOR, info.author)
                 putExtra(EXTRA_FREE_ONLY, freeOnly)
+                if (!indexes.isNullOrEmpty()) putExtra(EXTRA_INDEXES, indexes.joinToString(","))
             }
             ctx.startForegroundService(i)
         }
@@ -158,10 +171,16 @@ class DownloadService : Service() {
                 startForeground(NOTIFY_ID, buildNotification("准备下载", 0, 0, 0, true))
                 val info = parseInfo(intent)
                 val freeOnly = intent.getBooleanExtra(EXTRA_FREE_ONLY, true)
+                // 指定章节（单章重建）。解析失败就当没传，退回整本/免费章的旧行为。
+                val explicit = intent.getStringExtra(EXTRA_INDEXES)
+                    ?.split(',')
+                    ?.mapNotNull { it.trim().toIntOrNull() }
+                    ?.filter { it >= 0 }
+                    ?.takeIf { it.isNotEmpty() }
                 val t = Thread {
                     val owner = Thread.currentThread()
                     try {
-                        runJob(info, freeOnly)
+                        runJob(info, freeOnly, explicit)
                     } catch (e: Exception) {
                         runCatching { notify(buildNotification("下载中断：${e.message}", 0, 0, 0, false)) }
                     } finally {
@@ -237,7 +256,13 @@ class DownloadService : Service() {
         return BookInfo(bookId, name, author, chapters)
     }
 
-    private fun runJob(info: BookInfo, freeOnly: Boolean) {
+    /**
+     * 跑一本次下载。
+     *
+     * [explicit] 非空时只下这几章（缓存页的「下载本章」）。它优先于 [freeOnly]：
+     * 用户点明要哪一章，就不该再拿「免费章」这个规则把它筛掉。
+     */
+    private fun runJob(info: BookInfo, freeOnly: Boolean, explicit: List<Int>? = null) {
         val store = JobStore(File(filesDir, "books"))
         val startedAt = System.currentTimeMillis()
         // APP 接口给完整正文（网页端只给 185 字试读片段）。
@@ -306,8 +331,9 @@ class DownloadService : Service() {
             dl.onChapterStart = { i, title ->
                 if (!cancelFlag.get()) publish("正在下载：${title.take(24)}", current = i)
             }
-            val targets = if (freeOnly) job.chapters.indices.filter { !job.chapters[it].locked }
-                          else job.chapters.indices.toList()
+            val targets = explicit
+                ?: if (freeOnly) job.chapters.indices.filter { !job.chapters[it].locked }
+                   else job.chapters.indices.toList()
             val r = dl.run(job, targets)
             DevLog.log("DL", "结束：${info.name.ifBlank { "未命名" }} 成功 ${r.success} 失败 ${r.failed}" +
                 "，全书 ${r.doneTotal}/${r.total}，用时 ${(System.currentTimeMillis() - startedAt) / 1000}s")

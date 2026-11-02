@@ -322,9 +322,36 @@ private fun MainActivity.showCacheChapter(u: CacheUsage, index: Int, ch: Chapter
         items.add("删除本章正文" to { askDeleteChapter(u, index, ch) })
     } else if (ch.locked) {
         items.add("本章需登录，不能下载" to { toast("这本的付费章需要登录后才能下") })
+    } else {
+        items.add("下载本章" to { downloadChapter(u, index) })
     }
-    if (items.isEmpty()) items.add("这章还没缓存" to { toast("这章还没缓存") })
     Widgets.menuDialog(this, "第 ${index + 1} 章 · ${ch.title}", items).show()
+}
+
+/**
+ * 补一章。
+ *
+ * 走服务里的 [DownloadService.EXTRA_INDEXES]：目录在 job.json 里，
+ * 服务自己会读；这里只交下标，不拼章节表，也不会碰到 Binder 的 1 MB 限。
+ */
+private fun MainActivity.downloadChapter(u: CacheUsage, index: Int) {
+    val running = DownloadService.runningBookId
+    if (running != null && running != u.bookId) {
+        toast("正在下载另一本，等它下完再试")
+        return
+    }
+    val job = Downloader.restoreLight(jobsStore(), u.bookId)
+    if (job == null || job.chapters.isEmpty()) {
+        toast("读不到这本书的目录，先去书页重新取一次")
+        return
+    }
+    DownloadService.start(
+        this,
+        BookInfo(job.bookId, job.name, job.author, job.chapters),
+        freeOnly = false,
+        indexes = listOf(index),
+    )
+    toast("已交给后台下载第 ${index + 1} 章")
 }
 
 /** 单章删除的确认。文案与整本清理一致：删的是正文副本，不是目录。 */
