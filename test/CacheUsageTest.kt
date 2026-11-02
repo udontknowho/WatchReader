@@ -15,6 +15,8 @@ import com.watchdl.core.detailRemoveMessage
 import com.watchdl.core.detailShelfAction
 import com.watchdl.core.detailStatParts
 import com.watchdl.core.detailTotalText
+import com.watchdl.core.ReaderFind
+import com.watchdl.core.ReaderStyle
 import com.watchdl.core.resolveChapterCacheStatus
 import com.watchdl.core.SEARCH_HISTORY_MAX
 import com.watchdl.core.SEARCH_HISTORY_SHOWN
@@ -369,6 +371,50 @@ fun main() {
     check("重复搜同一词不涨条数", SearchHistoryStore.add(hisDir, "丙").size == 3)
     check("清空后读回为空",
         SearchHistoryStore.clear(hisDir).isEmpty() && SearchHistoryStore.load(hisDir).isEmpty())
+
+    // ── 阅读页排版、亮度与章内查找（ReaderStyle） ─────────
+    check("亮度三档取值", ReaderStyle.brightValue(0) == 0.35f &&
+        ReaderStyle.brightValue(1) == 0.6f && ReaderStyle.brightValue(2) == 1.0f)
+    check("亮度越界档按最近一档", ReaderStyle.brightValue(-3) == 0.35f &&
+        ReaderStyle.brightValue(9) == 1.0f)
+    check("亮度值落回档位", ReaderStyle.brightTier(0.35f) == 0 &&
+        ReaderStyle.brightTier(0.6f) == 1 && ReaderStyle.brightTier(1.0f) == 2)
+    check("跟随系统亮度落回中档", ReaderStyle.brightTier(-1f) == 1 &&
+        ReaderStyle.brightTier(0f) == 1)
+    check("档位存盘再读回不变",
+        (0..2).all { ReaderStyle.brightTier(ReaderStyle.brightValue(it)) == it })
+    check("段距三档比例", ReaderStyle.paraRatio(0) == 0f &&
+        ReaderStyle.paraRatio(1) == 0.5f && ReaderStyle.paraRatio(2) == 1f)
+    check("段距越界档夹到两端", ReaderStyle.paraRatio(-1) == 0f &&
+        ReaderStyle.paraRatio(7) == 1f)
+    check("段距像素按字号行距密度换算",
+        ReaderStyle.paraExtraPx(2, 16f, 1.75f, 2f) == 56)
+    check("无段距不给像素", ReaderStyle.paraExtraPx(0, 16f, 1.75f, 2f) == 0)
+    check("密度为零不出负数像素", ReaderStyle.paraExtraPx(2, 16f, 1.75f, 0f) == 0)
+    check("段尾只取换行符", ReaderStyle.paraEnds("甲乙\n丙丁\n戊").toList() == listOf(2, 5))
+    check("段尾条数受限", ReaderStyle.paraEnds("a\nb\nc\nd", 2).size == 2)
+    check("首行缩进每段两个全角空格",
+        ReaderStyle.indent("甲\n\n乙") == "　　甲\n\n　　乙")
+    check("空正文不缩进", ReaderStyle.indent("").isEmpty())
+    check("滚动定位加正文顶边与内边距", ReaderStyle.scrollTarget(120, 4, 300, 900) == 424)
+    check("滚动定位夹在内容范围", ReaderStyle.scrollTarget(0, 0, 9999, 700) == 700 &&
+        ReaderStyle.scrollTarget(0, 0, -50, 700) == 0)
+    check("内容比屏短就滚到顶", ReaderStyle.scrollTarget(0, 0, 30, -20) == 0)
+    check("下一处首尾循环", ReaderStyle.step(2, 1, 3) == 0)
+    check("上一处从末尾回绕", ReaderStyle.step(0, -1, 3) == 2)
+    check("还没有位置时前后都对", ReaderStyle.step(-1, 1, 3) == 0 &&
+        ReaderStyle.step(-1, -1, 3) == 2)
+    check("没有命中就没有下一处", ReaderStyle.step(-1, 1, 0) == -1)
+    check("命中计数带单位", ReaderStyle.counterText(0, 7) == "第 1 / 共 7 处" &&
+        ReaderStyle.counterText(-1, 0) == "共 0 处")
+    check("缩进后命中偏移按屏上正文算", run {
+        val shown = ReaderStyle.indent("第一段\n第二段有目标")
+        val hit = ReaderFind.inText(shown, "目标").firstOrNull()
+        hit != null && shown.substring(hit.start, hit.start + 2) == "目标"
+    })
+    check("护眼遮罩是暖橙低透明", ReaderStyle.eyeColor() ==
+        ((28 shl 24) or (255 shl 16) or (180 shl 8) or 80))
+    check("护眼透明度夹到 0", ReaderStyle.eyeColor(-5) == ReaderStyle.eyeColor(0))
 
     root.deleteRecursively()
     println()

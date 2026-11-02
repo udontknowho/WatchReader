@@ -1,0 +1,117 @@
+package com.watchdl.core
+
+/**
+ * 阅读页排版与查找的换算。
+ *
+ * 纯算术，不碰 Android 图形类 —— 手表上每加一个滑杆就要多占一行，
+ * 档位换算一旦写进界面代码就没法自检，所以全部搬到这里。
+ */
+object ReaderStyle {
+
+    // ── 亮度：legado 是 0–100 滑杆，手表屏只够三档 ──────────
+    const val BRIGHT_DIM = 0.35f
+    const val BRIGHT_MID = 0.6f
+    const val BRIGHT_FULL = 1.0f
+
+    /** 档位对应的窗口亮度。越界的档按最近一档处理。 */
+    fun brightValue(tier: Int): Float = when (tier.coerceIn(0, 2)) {
+        0 -> BRIGHT_DIM
+        2 -> BRIGHT_FULL
+        else -> BRIGHT_MID
+    }
+
+    /**
+     * 亮度值落回档位。
+     *
+     * 负值来自系统默认（-1，表示跟随系统亮度），落回“中”。
+     * 档位边界取相邻两档的中点，读回来的值原样再存也不会漂。
+     */
+    fun brightTier(value: Float): Int = when {
+        value <= 0f -> 1
+        value <= 0.45f -> 0
+        value < 0.85f -> 1
+        else -> 2
+    }
+
+    // ── 段距：legado 是滑杆，手表取三档 ────────────────────
+    /** 段距额外行高占“一行”的比例。0 / 半行 / 一行。 */
+    fun paraRatio(level: Int): Float = when (level.coerceIn(0, 2)) {
+        1 -> 0.5f
+        2 -> 1f
+        else -> 0f
+    }
+
+    /**
+     * 段距的额外像素。
+     *
+     * 一行的像素 = 字号 sp × 行距倍数 × 密度；sp 与 dp 都按 density 换算，
+     * 所以这里直接乘密度，不做二次缩放。
+     */
+    fun paraExtraPx(level: Int, sizeSp: Float, spacingMult: Float, density: Float): Int {
+        val ratio = paraRatio(level)
+        if (ratio <= 0f || density <= 0f) return 0
+        return (sizeSp * spacingMult * density * ratio).toInt().coerceAtLeast(0)
+    }
+
+    /**
+     * 段落结尾的字符下标，最多 [limit] 条。
+     *
+     * 正文是一个 TextView，段距只能靠段末那个换行符上的行高 span 实现，
+     * 所以这里只给换行符位置。末段没有换行符就不加段距 —— 章末本来就不需要。
+     */
+    fun paraEnds(text: CharSequence, limit: Int = 2000): IntArray {
+        val out = ArrayList<Int>()
+        var i = 0
+        while (i < text.length && out.size < limit) {
+            if (text[i] == '\n') out.add(i)
+            i++
+        }
+        return out.toIntArray()
+    }
+
+    /** 首行缩进：每个非空段落前加两个全角空格。legado 叫“首行缩进 2 字”。 */
+    fun indent(text: String): String {
+        if (text.isEmpty()) return text
+        return text.split('\n').joinToString("\n") { p -> if (p.isBlank()) p else "　　$p" }
+    }
+
+    // ── 章内查找：定位与计数 ───────────────────────────────
+    /**
+     * 命中处应滚到的 y。
+     *
+     * [textTop] 是正文在滚动内容里的顶边，[padTop] 是正文自身的内边距，
+     * 两者相加才是行顶的屏幕坐标；结果夹在可滚范围内，免得上一次读到的
+     * 位置比新章更长时滚过头。
+     */
+    fun scrollTarget(textTop: Int, padTop: Int, lineTop: Int, maxScroll: Int): Int =
+        (textTop + padTop + lineTop).coerceIn(0, maxScroll.coerceAtLeast(0))
+
+    /**
+     * “上一处 / 下一处”的目标下标，首尾循环。
+     *
+     * [current] 为 -1 表示还没有当前位置：往下走从 0 开始，往上走从末尾开始。
+     * [count] 为 0 时返回 -1，界面据此关掉翻页。
+     */
+    fun step(current: Int, delta: Int, count: Int): Int {
+        if (count <= 0) return -1
+        val from = if (current < 0) if (delta >= 0) -1 else 0 else current
+        return ((from + delta) % count + count) % count
+    }
+
+    /** 命中计数。legado 写作“n / 共 m”，这里补上单位免得误读成页码。 */
+    fun counterText(current: Int, count: Int): String =
+        if (count <= 0) "共 0 处" else "第 ${current.coerceIn(0, count - 1) + 1} / 共 $count 处"
+
+    // ── 护眼：整屏暖色遮罩 ─────────────────────────────────
+    const val EYE_ALPHA = 28
+
+    /**
+     * 护眼遮罩色。ARGB 整数，暖橙、低透明。
+     *
+     * 用位运算拼，不调 android.graphics.Color：自检要能在纯 JVM 上跑。
+     */
+    fun eyeColor(alpha: Int = EYE_ALPHA): Int {
+        val a = alpha.coerceIn(0, 255)
+        return (a shl 24) or (255 shl 16) or (180 shl 8) or 80
+    }
+}
