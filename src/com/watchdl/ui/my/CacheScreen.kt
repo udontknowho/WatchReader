@@ -137,7 +137,8 @@ internal fun MainActivity.showCache() {
         this, "缓存管理",
         onBack = { showMy() },
         subtitle = cacheSummary(rows),
-        trailing = listOf("list" to { showCacheFilter() }),
+        // 搜索在顶栏，跟 legado 同一个位置：列表上方不再占一行搜索框。
+        trailing = listOf("search" to { askCacheQuery() }, "list" to { showCacheFilter() }),
     ))
 
     val body = Widgets.scrollBody(this, crownStep, crownGlide)
@@ -149,11 +150,7 @@ internal fun MainActivity.showCache() {
         return
     }
 
-    // 搜索框：提示里带上当前关键词，不用另开一行告诉用户在过滤什么。
-    col.addView(Widgets.searchBar(this,
-        if (CacheUi.query.isBlank()) "搜索书名或作者" else "「${CacheUi.query}」· 点按修改"
-    ) { askCacheQuery() })
-
+    // 搜索条已搬到顶栏，这里不再画。
     val shown = rows.filter { CacheUi.matches(it) }
     if (shown.isEmpty()) {
         col.addView(Widgets.emptyState(this, "search", "没有匹配的书。换关键词或把筛选改回「全部」。"))
@@ -175,9 +172,20 @@ internal fun MainActivity.showCache() {
         col.addView(Widgets.sectionLabel(this, "待重新下载 ${noBody.size} 本"))
         for (u in noBody) addCacheBook(col, u)
     }
-    // 只有真在筛选时才提一句总数，否则这句话每屏都占一行，读的人又不需要它。
-    if (shown.size != rows.size) {
-        col.addView(Md3.text(this, "筛出 ${shown.size}/${rows.size} 本", Md3.FS_SM, Md3.onSurfaceVariant))
+    // 搜索框搬到顶栏后，关键词得有个地方看得见，否则用户不知道自己在筛什么。
+    if (CacheUi.query.isNotBlank()) {
+        col.addView(Widgets.button(this,
+            "「${CacheUi.query}」· 筛出 ${shown.size}/${rows.size} 本，点按清除", "text") {
+            CacheUi.query = ""
+            CacheUi.open = null
+            showCache()
+        }, Md3.lpDp(this, null, 32))
+    } else if (shown.size != rows.size) {
+        // 只有真在筛状态时才提一句，否则这句话每屏都占一行，读的人又不需要它。
+        col.addView(Md3.ellipsize(Md3.text(this,
+            "筛出 ${shown.size}/${rows.size} 本", Md3.FS_SM, Md3.onSurfaceVariant)).apply {
+            setPadding(Md3.dp(this@showCache, 4), 0, Md3.dp(this@showCache, 4), 0)
+        })
     }
     root.addView(body, Md3.lpWeight(1f))
     addCacheQueueBar(shown)
