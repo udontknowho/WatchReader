@@ -6,6 +6,7 @@ import android.view.ViewGroup
 import android.widget.LinearLayout
 import com.watchdl.MainActivity
 import com.watchdl.core.*
+import com.watchdl.ui.my.showMy
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
 
@@ -72,6 +73,68 @@ private fun MainActivity.jumpToMark(info: BookInfo, b: Bookmark) {
     // 那时候再写就和「上次读到哪」混在一起了。
     if (b.offset > 0) saveOffset(info.bookId, b.index, b.offset, sync = true)
     preview(info, b.index)
+}
+
+/**
+ * 全书书签（#24）：把所有书的书签聚到一屏。
+ *
+ * 单书书签页要从那本书的目录进，用户想找「上次停住的地方」时
+ * 得先想起是哪个书 —— 而 [BookmarkStore.list] 本来就是全量的，
+ * 差的就是这一页。条目按书名分组、组内按章号排。
+ */
+internal fun MainActivity.showAllMarks() {
+    setScreen(Screen.MarksAll)
+    root.removeAllViews()
+    root.addView(Widgets.topBar(this, "书签", onBack = { showMy() }))
+
+    val body = Widgets.scrollBody(this, crownStep, crownGlide)
+    val col = Widgets.contentColumn(body)
+    val all = BookmarkStore.list().sortedWith(compareBy({ it.bookName }, { it.index }))
+
+    if (all.isEmpty()) {
+        col.addView(Widgets.emptyState(this, "bookmark", "还没有书签。\n阅读页点「设置」可以加一条。"))
+        root.addView(body, Md3.lpWeight(1f))
+        return
+    }
+
+    col.addView(Widgets.sectionLabel(this, "共 ${all.size} 条 · ${all.map { it.bookId }.distinct().size} 本"))
+    for (b in all.take(MARKS_SHOWN)) {
+        col.addView(Widgets.listItem(
+            ctx = this,
+            title = b.title.ifBlank { "第${b.index + 1}章" },
+            subtitle = "《${b.bookName}》" + b.excerpt.replace(Regex("\\s+"), " ").trim().take(EXCERPT_MAX),
+            twoLine = b.excerpt.isNotBlank(),
+            trailing = "✕",
+            // 删一条就地重画：手表上没有长按菜单，右侧叉是最短的路。
+            onTrailingClick = {
+                BookmarkStore.remove(b.bookId, b.index)
+                toast("已删一条书签")
+                showAllMarks()
+            },
+            onClick = { jumpToAnyMark(b) },
+        ))
+    }
+    if (all.size > MARKS_SHOWN) {
+        col.addView(Md3.text(this, "另有 ${all.size - MARKS_SHOWN} 条未显示", Md3.FS_SM, Md3.onSurfaceVariant))
+    }
+    root.addView(body, Md3.lpWeight(1f))
+}
+
+/** 从全书书签跳到一章：先读回这本书的目录，再确认章号没失效。 */
+private fun MainActivity.jumpToAnyMark(b: Bookmark) {
+    val job = Downloader.restore(jobsStore(), b.bookId)
+    if (job == null) {
+        toast("《${b.bookName}》已经不在本地了")
+        return
+    }
+    val info = BookInfo(b.bookId, job.name.ifBlank { b.bookName }, job.author, job.chapters)
+    // 换源之后旧书签的章号会指错章，越界就不跳，说一句比默默打开第一章好。
+    if (b.index !in info.chapters.indices) {
+        toast("这一章已经失效了")
+        return
+    }
+    rememberReturn()
+    jumpToMark(info, b)
 }
 
 /**
