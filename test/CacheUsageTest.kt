@@ -17,6 +17,29 @@ import com.watchdl.core.detailStatParts
 import com.watchdl.core.detailTotalText
 import com.watchdl.core.ReaderFind
 import com.watchdl.core.ReaderStyle
+import com.watchdl.core.ReplacePrefs
+import com.watchdl.core.ReplaceRule
+import com.watchdl.core.ReplaceSort
+import com.watchdl.core.replaceApplyOrder
+import com.watchdl.core.replaceDeleteMessage
+import com.watchdl.core.replaceFlipEnabled
+import com.watchdl.core.replaceKey
+import com.watchdl.core.replaceListLabel
+import com.watchdl.core.replaceMatch
+import com.watchdl.core.replaceMoveToEdge
+import com.watchdl.core.replacePruneSelection
+import com.watchdl.core.replaceRemove
+import com.watchdl.core.replaceRowSubtitle
+import com.watchdl.core.replaceSelectAll
+import com.watchdl.core.replaceSelectTitle
+import com.watchdl.core.replaceSetEnabled
+import com.watchdl.core.replaceSorted
+import com.watchdl.core.replaceStateJson
+import com.watchdl.core.replaceStateParse
+import com.watchdl.core.replaceSubtitle
+import com.watchdl.core.replaceToggleSelect
+import com.watchdl.core.replaceUpsert
+import com.watchdl.core.replaceValidate
 import com.watchdl.core.resolveChapterCacheStatus
 import com.watchdl.core.SEARCH_HISTORY_MAX
 import com.watchdl.core.SEARCH_HISTORY_SHOWN
@@ -415,6 +438,97 @@ fun main() {
     check("护眼遮罩是暖橙低透明", ReaderStyle.eyeColor() ==
         ((28 shl 24) or (255 shl 16) or (180 shl 8) or 80))
     check("护眼透明度夹到 0", ReaderStyle.eyeColor(-5) == ReaderStyle.eyeColor(0))
+
+    // ── 替换净化：搜索 / 排序 / 置顶置底 / 多选 / 编辑合并（core/ReplaceState.kt）──
+    run {
+        val rules = listOf(
+            ReplaceRule("甲规则", "请记住本站", "", isRegex = true, scope = "text", enabled = true),
+            ReplaceRule("乙规则", "求月票", "[投票]", isRegex = false, scope = "both", enabled = false),
+            ReplaceRule("丙规则", "本章未完", "", isRegex = true, scope = "title", enabled = true),
+        )
+        val ka = replaceKey("甲规则", "请记住本站")
+        val kb = replaceKey("乙规则", "求月票")
+        val kc = replaceKey("丙规则", "本章未完")
+        check("替换键用名称加模式", ka == "甲规则\u0000请记住本站" && ka != kb)
+        check("搜索按名称命中", replaceMatch(rules, "甲规").size == 1)
+        check("搜索按模式命中", replaceMatch(rules, "月票").map { it.name } == listOf("乙规则"))
+        check("空搜索等于不过滤", replaceMatch(rules, "  ").size == 3)
+        check("搜索忽略大小写", replaceMatch(
+            listOf(ReplaceRule("r", "AdBlock", "", false, "text", true)), "adblock").size == 1)
+        check("原文顺序听手动表",
+            replaceSorted(rules, ReplaceSort.Order, listOf(kc)).map { it.name } ==
+                listOf("丙规则", "甲规则", "乙规则"))
+        check("名称排序按拼音不按码位",
+            replaceSorted(rules, ReplaceSort.Name, emptyList()).map { it.name } ==
+                listOf("丙规则", "甲规则", "乙规则"))
+        check("启用优先把关着的沉底且保住相对顺序",
+            replaceSorted(rules, ReplaceSort.Enabled, emptyList()).map { it.name } ==
+                listOf("甲规则", "丙规则", "乙规则"))
+        check("手动顺序表为空就原样返回", replaceApplyOrder(rules, emptyList()) == rules)
+        check("置顶挪到最前", replaceMoveToEdge(rules, emptyList(), listOf(kc), true) ==
+            listOf(kc, ka, kb))
+        check("置底挪到最后", replaceMoveToEdge(rules, emptyList(), listOf(kc), false) ==
+            listOf(ka, kb, kc))
+        check("置顶结果覆盖全部规则",
+            replaceMoveToEdge(rules, emptyList(), listOf(kc), true).size == 3)
+        check("批量启用只动所选", run {
+            val out = replaceSetEnabled(rules, listOf(kb), true)
+            out[1].enabled && out[0].enabled && !replaceSetEnabled(rules, listOf(ka), false)[0].enabled
+        })
+        check("翻启用只翻一条", run {
+            val out = replaceFlipEnabled(rules, ka)
+            !out[0].enabled && out[2].enabled
+        })
+        check("删除移掉所选", replaceRemove(rules, listOf(kb)).map { it.name } ==
+            listOf("甲规则", "丙规则"))
+        check("编辑按旧键替换含改名", run {
+            val out = replaceUpsert(rules, ka,
+                ReplaceRule("甲改名", "请记住本站", "", true, "text", true))
+            out.size == 3 && out[0].name == "甲改名"
+        })
+        check("新建追加到末尾", replaceUpsert(rules, null,
+            ReplaceRule("新规则", "广告", "", false, "text", true)).size == 4)
+        check("旧键找不到也追加不覆盖",
+            replaceUpsert(rules, "不存在的键",
+                ReplaceRule("新规则", "广告", "", false, "text", true)).size == 4)
+        check("校验拦住空模式",
+            replaceValidate("有名字", "  ") == "查找内容不能空" &&
+                replaceValidate(" ", "有模式") == "名称不能空")
+        check("校验放过正常规则", replaceValidate("名", "模式") == null)
+        check("行的副标题写清正则与否和替换成什么",
+            replaceRowSubtitle(rules[1]) == "纯文本 · 正文+标题 · 替换为「[投票]」")
+        check("空替换写成一个空字", replaceRowSubtitle(rules[0]).endsWith("替换为空"))
+        check("顶栏统计夹住越界", replaceSubtitle(3, 5) == "3 条 · 启用 3 条" &&
+            replaceSubtitle(-1, 0) == "0 条 · 启用 0 条")
+        check("列表标题搜索态优先", replaceListLabel("月票", 1) == "「月票」1 条" &&
+            replaceListLabel("", 3) == "全部规则（3）")
+        check("多选选中再点取消", run {
+            val s = linkedSetOf<String>()
+            replaceToggleSelect(s, ka) && s.size == 1 && !replaceToggleSelect(s, ka)
+        })
+        check("全选再点变全不选", run {
+            val s = linkedSetOf<String>()
+            replaceSelectAll(s, listOf(ka, kb)) && s.size == 2 &&
+                !replaceSelectAll(s, listOf(ka, kb)) && s.isEmpty()
+        })
+        check("消失的选中被清掉", run {
+            val s = linkedSetOf(ka, kb)
+            replacePruneSelection(s, listOf(kb)) && s == setOf(kb)
+        })
+        check("全没了就是没有选中", run {
+            val s = linkedSetOf(ka)
+            !replacePruneSelection(s, emptyList())
+        })
+        check("多选标题与书架屏同形", replaceSelectTitle(3) == "已选 3" &&
+            replaceSelectTitle(-1) == "已选 0")
+        check("状态往返保住排序与顺序", run {
+            val p = ReplacePrefs(ReplaceSort.Name, listOf(ka, kc))
+            replaceStateParse(replaceStateJson(p)) == p
+        })
+        check("状态文件是合法 JSON 片段", replaceStateJson(ReplacePrefs()).startsWith("{\"sort\":"))
+        check("坏状态文件退回默认", replaceStateParse("{坏") == ReplacePrefs())
+        check("删除文案写明找不回来", replaceDeleteMessage(2).contains("找不回来"))
+    }
 
     root.deleteRecursively()
     println()
