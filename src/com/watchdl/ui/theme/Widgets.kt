@@ -383,11 +383,12 @@ object Widgets {
             item.setOnClickListener { onClick() }
         }
 
-        if (leading != null) {
-            item.addView(leading, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { rightMargin = Md3.dp(ctx, 7) })
-        }
+        // 图标只在单行项直接挂在行上；双行项要挂到内层横排里（见下面 twoLine 分支），
+        // 否则竖排会把图标顶到标题上方独占一行，文字整块左移。
+        val leadLp = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { rightMargin = Md3.dp(ctx, 7) }
+        if (leading != null && !twoLine) item.addView(leading, leadLp)
 
         val titleView = Md3.ellipsize(Md3.text(ctx, title, Md3.FS_MD, titleColor))
         val trailingView = trailing?.let { t ->
@@ -420,6 +421,13 @@ object Widgets {
             }
         }
         if (twoLine) {
+            // 外层横排：图标在左，标题与副标题在右侧内层竖排。
+            val outer = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            if (leading != null) outer.addView(leading, leadLp)
+            val col = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
             val titleRow = LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -427,10 +435,10 @@ object Widgets {
             titleRow.addView(titleView, LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             trailingView?.let { titleRow.addView(it) }
-            item.addView(titleRow, LinearLayout.LayoutParams(
+            col.addView(titleRow, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
             if (subtitle != null) {
-                item.addView(
+                col.addView(
                     // legado 副标题压 30% 透明，否则两行权重一样，主次不分。
                     Md3.ellipsize(Md3.text(ctx, subtitle, Md3.FS_SM, Md3.onSurfaceVariant))
                         .apply { alpha = 0.7f },
@@ -438,6 +446,10 @@ object Widgets {
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
                 )
             }
+            outer.addView(col, LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            item.addView(outer, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         } else {
             // 单行分支以前直接丢掉 subtitle —— 调用方算好了「作者 · 源名」传进来，
             // 界面上却只剩书名。现在补成「书名 —— 副标题」跟在标题末尾。
