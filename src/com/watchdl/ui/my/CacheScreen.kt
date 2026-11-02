@@ -375,7 +375,7 @@ private fun MainActivity.cacheChapterWindow(col: LinearLayout, u: CacheUsage) {
         col.addView(Widgets.chapterItem(
             ctx = this, index = i + 1, title = ch.title,
             status = mark, statusColor = color,
-            onClick = { showCacheChapter(u, i, ch, done) },
+            onClick = { cacheChapterTap(u, i, ch, done) },
         ))
     }
     if (end < last) {
@@ -401,17 +401,19 @@ private fun MainActivity.cacheChapterWindow(col: LinearLayout, u: CacheUsage) {
     })
 }
 
-/** 单章菜单：删除与（C7 的）重下成对给，跟全书一样。 */
-private fun MainActivity.showCacheChapter(u: CacheUsage, index: Int, ch: ChapterRef, cached: Boolean) {
-    val items = ArrayList<Pair<CharSequence, () -> Unit>>(2)
-    if (cached) {
-        items.add("删除本章正文" to { askDeleteChapter(u, index, ch) })
-    } else if (ch.locked) {
-        items.add("本章需登录，不能下载" to { toast("这本的付费章需要登录后才能下") })
-    } else {
-        items.add("下载本章" to { downloadChapter(u, index) })
+/**
+ * 点一行章：直接做，不再过一层菜单。
+ *
+ * 上一版点行先弹单项菜单（「下载本章」/「删除本章正文」），菜单里只有一条，
+ * 多一步不说，弹窗本身不现形时表现就是「章节点不动」。现在点未缓存章就下发下载，
+ * 点已缓存章才弹删除确认 —— 两个动作都有 toast 或确认框回报。
+ */
+private fun MainActivity.cacheChapterTap(u: CacheUsage, index: Int, ch: ChapterRef, cached: Boolean) {
+    when {
+        cached -> askDeleteChapter(u, index, ch)
+        ch.locked -> toast("这是付费章，需要登录后才下得了")
+        else -> downloadChapter(u, index)
     }
-    Widgets.menuDialog(this, "第 ${index + 1} 章 · ${ch.title}", items).show()
 }
 
 /**
