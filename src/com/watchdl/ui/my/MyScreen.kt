@@ -48,7 +48,8 @@ internal fun MainActivity.showMy() {
         }
         // legado 这一项带副标题「新建 · 导入 · 编辑或管理书源」。
         e("书源管理", "cloud", "新建 · 导入 · 编辑或管理书源") { showSources() }
-        e("替换净化", "refresh")
+        // 替换净化（#28）：正文的广告尾巴/求票行靠它对掉，可逐条关。
+        e("替换净化", "refresh") { showReplace() }
         e("TXT 目录规则", "list")
         e("字典规则", "shelf")
         e("标签规则", "bookmark")

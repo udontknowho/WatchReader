@@ -216,7 +216,11 @@ internal fun MainActivity.preview(info: BookInfo, index: Int) {
             val localHtml = line?.let { TinyJson.path(it, "content") }
             val actualSrc = if (localHtml == null) (src ?: source) else src
             val html = localHtml ?: actualSrc!!.content(ch.itemId, info.bookId)
-            val text = Downloader.htmlToText(html).ifEmpty { html.replace(Regex("<[^>]+>"), "\n").trim() }
+            val raw = Downloader.htmlToText(html).ifEmpty { html.replace(Regex("<[^>]+>"), "\n").trim() }
+            // 只过滤正文，章标题**不过滤**：目录里的标题一旦被规则吃掉，用户就找不到章，
+            // 这个代价比「标题里的广告尾巴没去掉」大得多。所以在 preview 这一处做，
+            // 不在目录、不在 showReader。
+            val text = ReplaceRuleStore.apply(raw, isTitle = false)
             postAlive(owner) { showReader(info, index, text, actualSrc) }
         } catch (e: Exception) {
             postAlive(owner) { toast("正文失败：${e.message}"); showToc(info, src) }

@@ -111,6 +111,12 @@ sealed interface Screen {
      * 不带数据 —— 大小每次进屏现算（要递归整棵树，所以放后台），删完重画就是新值。
      */
     object Files : Screen
+    /**
+     * 替换净化（#28）：正文替换规则的开关表。
+     *
+     * 不带数据 —— 规则存在 replace.json，每次进屏现读，改完回来不会看到旧值。
+     */
+    object Replace : Screen
     /** 「我的」页：规则与其它两组入口，照 legado `ui/main/my`。不带数据，每次进屏现读。 */
     object My : Screen
     /**
@@ -146,6 +152,7 @@ fun screenId(s: Screen?): String = when (s) {
     Screen.Records -> "records"
     Screen.Cache -> "cache"
     Screen.Files -> "files"
+    Screen.Replace -> "replace"
     is Screen.Swap -> "swap:" + s.info.bookId.ifBlank { s.info.name + s.info.author }
     is Screen.Discover -> "discover:${s.site}:${s.gender}:${s.rankKey}"
     is Screen.Market -> "market:${s.page}"

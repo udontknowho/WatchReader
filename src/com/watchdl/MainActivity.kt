@@ -18,6 +18,7 @@ import com.watchdl.ui.book.showSwap
 import com.watchdl.ui.my.showMy
 import com.watchdl.ui.my.showCache
 import com.watchdl.ui.my.showFiles
+import com.watchdl.ui.my.showReplace
 import com.watchdl.ui.reader.*
 import com.watchdl.ui.search.*
 import com.watchdl.ui.shelf.*
@@ -266,6 +267,7 @@ class MainActivity : Activity() {
             Screen.Records -> showRecords()
             Screen.Cache -> showCache()
             Screen.Files -> showFiles()
+            Screen.Replace -> showReplace()
             is Screen.Swap -> showSwap(s.info, s.src)
             is Screen.Find -> showFind(s.query, s.hits, s.scanned, s.done)
             Screen.Shelf -> showShelf()
@@ -444,6 +446,7 @@ class MainActivity : Activity() {
         loadReaderPrefs()
         DevLog.file = File(filesDir, "dev.log")
         BookmarkStore.file = File(filesDir, "bookmarks.json")
+        ReplaceRuleStore.file = File(filesDir, "replace.json")
         DevLog.setEnabled(getSharedPreferences("reader", MODE_PRIVATE).getBoolean("devlog", false))
         // 幂等；无论开关开没开都挂上（崩溃现场是开关来不及开的那类问题），
         // 关着时只多一行 logcat。
@@ -1819,6 +1822,7 @@ class MainActivity : Activity() {
             Screen.Records -> showRecords()
             Screen.Cache -> showCache()
             Screen.Files -> showFiles()
+            Screen.Replace -> showReplace()
             is Screen.Swap -> showSwap(s.info, s.src)
             is Screen.Find -> showFind(s.query, s.hits, s.scanned, s.done)
             Screen.My -> showMy()
@@ -1845,6 +1849,7 @@ class MainActivity : Activity() {
             Screen.Records -> showMy()
             Screen.Cache -> showMy()
             Screen.Files -> showMy()
+            Screen.Replace -> showMy()
             is Screen.Swap -> goBackToPrevious()
             is Screen.Find -> showMy()
             is Screen.Detail -> goBackToPrevious()
