@@ -34,11 +34,17 @@ internal fun MainActivity.showMy() {
     // 有对应图标的（书源 cloud、设置 settings、书签 bookmark、记录 history、
     // 缓存 download、关于 more）照 legado 的 Material 图标补上。
     col.addView(Widgets.groupCard(this, "规则") { g ->
-        fun e(title: String, glyph: String? = null, action: (() -> Unit)? = null) {
-            g.addView(Widgets.groupItem(ctx = this@showMy, title = title, glyph = glyph,
-                onClick = action ?: { toast("$title 还没做") }))
+        fun e(
+            title: String,
+            glyph: String? = null,
+            sub: String? = null,
+            action: (() -> Unit)? = null,
+        ) {
+            g.addView(Widgets.groupItem(ctx = this@showMy, title = title, subtitle = sub,
+                glyph = glyph, onClick = action ?: { toast("$title 还没做") }))
         }
-        e("书源管理", "cloud") { showSources() }
+        // legado 这一项带副标题「新建 · 导入 · 编辑或管理书源」。
+        e("书源管理", "cloud", "新建 · 导入 · 编辑或管理书源") { showSources() }
         e("替换净化", "refresh")
         e("TXT 目录规则", "list")
         e("字典规则", "shelf")

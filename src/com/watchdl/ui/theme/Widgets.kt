@@ -25,13 +25,14 @@ object Widgets {
     }
 
 
-    /** 应用栏。36dp 高，左返回 / 标题 / 右侧动作。 */
+    /** 应用栏。36dp 高，左返回 / 标题 / 右侧动作。传 [subtitle] 时标题行分两行。 */
     fun topBar(
         ctx: Context,
         title: CharSequence,
         onBack: (() -> Unit)? = null,
         backGlyph: String = "back",
         trailing: List<Pair<String, () -> Unit>> = emptyList(),
+        subtitle: CharSequence? = null,
     ): LinearLayout {
         val bar = Md3.row(ctx)
         bar.setPadding(Md3.dp(ctx, Md3.PAD / 2), 0, Md3.dp(ctx, Md3.PAD / 2), 0)
@@ -41,7 +42,21 @@ object Widgets {
         }
         val t = Md3.ellipsize(Md3.text(ctx, title, Md3.FS_LG, Md3.onSurface, bold = true))
         t.setPadding(Md3.dp(ctx, Md3.PAD * 0.6), 0, 0, 0)
-        bar.addView(t, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        if (subtitle.isNullOrBlank()) {
+            bar.addView(t, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        } else {
+            // 两行标题：legado 顶栏是「书名」加「章名 · 书源名」。189 dp 一行装不下。
+            val stack = Md3.column(ctx)
+            stack.addView(t, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            stack.addView(
+                Md3.ellipsize(Md3.text(ctx, subtitle, Md3.FS_SM, Md3.onSurfaceVariant))
+                    .apply { alpha = 0.85f },
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+            )
+            bar.addView(stack, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }
         for ((glyph, act) in trailing) {
             bar.addView(Md3.iconButton(ctx, glyph, act),
                 LinearLayout.LayoutParams(Md3.dp(ctx, Md3.TAP), Md3.dp(ctx, Md3.TAP)))
@@ -135,9 +150,10 @@ object Widgets {
 
     /** 分组标题。 */
     fun sectionLabel(ctx: Context, label: CharSequence): TextView =
-        Md3.text(ctx, label, Md3.FS_SM, Md3.primary, bold = true).apply {
+        Md3.text(ctx, label, Md3.FS_MD, Md3.primary, bold = true).apply {
             letterSpacing = 0.05f
-            setPadding(Md3.dp(ctx, 2), Md3.dp(ctx, 5), Md3.dp(ctx, 2), Md3.dp(ctx, 3))
+            // 缩进与卡片内容左缘对齐（legado 分组标题也是 16dp），原来 2dp 会顶到屏边。
+            setPadding(Md3.dp(ctx, Md3.PAD), Md3.dp(ctx, 5), Md3.dp(ctx, Md3.PAD), Md3.dp(ctx, 3))
         }
 
     /**
@@ -343,7 +359,10 @@ object Widgets {
         highlight: Boolean = false,
         leading: View? = null,
         trailing: CharSequence? = null,
-        trailingColor: Int = Md3.onSurfaceVariant,
+        // legado 的列表项右侧文字用主色，不是次级灰。滑杆行早就这么做了。
+        trailingColor: Int = Md3.primary,
+        /** 标题文字色。当前阅读章要用 primary，所以开个口子。 */
+        titleColor: Int = Md3.onSurface,
         onTrailingClick: (() -> Unit)? = null,
         onClick: (() -> Unit)? = null,
     ): LinearLayout {
@@ -370,11 +389,11 @@ object Widgets {
             ).apply { rightMargin = Md3.dp(ctx, 7) })
         }
 
-        val titleView = Md3.ellipsize(Md3.text(ctx, title, Md3.FS_MD, Md3.onSurface))
+        val titleView = Md3.ellipsize(Md3.text(ctx, title, Md3.FS_MD, titleColor))
         val trailingView = trailing?.let { t ->
             val icon = Icons.name(t.toString())
             if (icon != null) {
-                Icons.view(ctx, icon, trailingColor, 18).apply {
+                Icons.view(ctx, icon, Md3.onSurfaceVariant, 18).apply {
                     contentDescription = when (t.toString()) {
                         "more", "⋮" -> "更多操作"; else -> t
                     }
@@ -412,7 +431,9 @@ object Widgets {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
             if (subtitle != null) {
                 item.addView(
-                    Md3.ellipsize(Md3.text(ctx, subtitle, Md3.FS_SM, Md3.onSurfaceVariant)),
+                    // legado 副标题压 30% 透明，否则两行权重一样，主次不分。
+                    Md3.ellipsize(Md3.text(ctx, subtitle, Md3.FS_SM, Md3.onSurfaceVariant))
+                        .apply { alpha = 0.7f },
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
                 )
@@ -423,7 +444,7 @@ object Widgets {
             val fullTitle = if (subtitle.isNullOrBlank()) title.toString()
                             else "$title —— $subtitle"
             item.addView(
-                Md3.ellipsize(Md3.text(ctx, fullTitle, Md3.FS_MD, Md3.onSurface)),
+                Md3.ellipsize(Md3.text(ctx, fullTitle, Md3.FS_MD, titleColor)),
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
             )
             trailingView?.let { item.addView(it) }
@@ -467,6 +488,7 @@ object Widgets {
             subtitle = null,
             twoLine = false,
             highlight = highlight,
+            titleColor = if (highlight) Md3.primary else Md3.onSurface,
             leading = Md3.text(ctx, "$index", Md3.FS_SM, Md3.onSurfaceVariant).apply {
                 minWidth = Md3.dp(ctx, 22)
             },

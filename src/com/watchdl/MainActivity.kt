@@ -585,7 +585,9 @@ class MainActivity : Activity() {
             trailing = listOf(
                 "search" to { askTocQuery(info, useSrc) },
                 "more" to { showTocMenu(info) },
-            )))
+            ),
+            // legado 目录顶栏副标题就是「当前章 / 总章数」，一眼知道读到哪。
+            subtitle = "${readProgress(info.bookId) + 1} / ${info.chapters.size}"))
 
         val body = Widgets.scrollBody(this, crownStep, crownGlide)
         val col = Widgets.contentColumn(body)

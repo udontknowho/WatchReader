@@ -53,6 +53,12 @@ object Md3 {
     /** 成功/正常态的绿。语义色不跟主题走：换主题后「已下载」还是得是绿的。 */
     val ok = 0xFF7BD88F.toInt()
 
+    /** 占位封面色：按书名哈希固定选一个容器色。同一本书颜色稳定。 */
+    fun nameColor(name: String): Int {
+        val palette = intArrayOf(primaryContainer, secondaryContainer, surface4, outlineVariant)
+        return palette[Math.floorMod(name.hashCode(), palette.size)]
+    }
+
     /** 当前主题，供设置页标选中态。 */
     var palette: Palette = Palette.all[0]; private set
 

@@ -34,8 +34,17 @@ internal fun MainActivity.showReader(info: BookInfo, index: Int, text: String, s
     val hairline = if (light) 0x24000000 else 0x24FFFFFF
     root.removeAllViews()
 
-    val bar = Widgets.topBar(this, info.chapters[index].title, onBack = { showToc(info) },
-        trailing = listOf("settings" to { showReaderSettings(info, index, text, src) }))
+    // legado 阅读页顶栏：书名在上，副行是「章名 · 书源名」。
+    // 原来只有章名，看完一章不知道读的是哪本书、正文从哪个源来的。
+    // BookSource 接口不带名字（规则源才有 displayName），没名字就只显章名。
+    val srcName = (src as? LegadoSource)?.displayName
+    val subLine = listOfNotNull(
+        info.chapters.getOrNull(index)?.title?.takeIf { it.isNotBlank() },
+        srcName?.takeIf { it.isNotBlank() },
+    ).joinToString(" · ")
+    val bar = Widgets.topBar(this, info.name, onBack = { showToc(info) },
+        trailing = listOf("settings" to { showReaderSettings(info, index, text, src) }),
+        subtitle = subLine)
     bar.setBackgroundColor(readerBackground)
     if (light) Widgets.tintSubtree(bar, readerInk)
     root.addView(bar)

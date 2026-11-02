@@ -90,8 +90,13 @@ internal fun MainActivity.showShelf() {
         for (job in books) {
             val displayName = job.name.ifBlank { "未命名 · ${job.total} 章" }
             val done = job.count(ChapterStatus.DONE)
-            val sub = if (job.author.isBlank()) progressTail(done, job.total, 0)
-                      else "${job.author} · " + progressTail(done, job.total, 0)
+            // legado 列表项副标题给读到哪一章。有阅读记录时优先它 ——
+            // 下载进度在网格档和详情页都看得到，列表档更该回答「上次读到哪」。
+            val readIdx = readProgress(job.bookId)
+            val readTitle = job.chapters.getOrNull(readIdx)?.title?.takeIf { it.isNotBlank() }
+            val tail = if (readTitle != null) "在读 · $readTitle"
+                       else progressTail(done, job.total, 0)
+            val sub = if (job.author.isBlank()) tail else "${job.author} · $tail"
             col.addView(Widgets.listItem(this, displayName, sub, twoLine = true,
                 trailing = "more", onTrailingClick = { showJobMenu(job) }) {
                 openBook(job.bookId, displayName, job.author)

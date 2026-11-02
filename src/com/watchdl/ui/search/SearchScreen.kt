@@ -122,7 +122,17 @@ internal fun MainActivity.showHits(keyword: String, allHits: List<BookHit>, stat
             // 同一本书有多个源时标出来，否则用户以为是两本不同的书。
             val n = sourceCount[hitKey(h)] ?: 1
             val title = if (n > 1) "${h.name}（$n 源）" else h.name
-            col.addView(Widgets.listItem(this, title, sub, twoLine = true, highlight = true) {
+            // legado 搜索结果带封面（72 dp）。189 dp 屏上取 40 × 56 dp 占位块，
+            // 颜色按书名哈希，同一本书与书架、详情页同色。
+            val first = h.name.trim().let { if (it.isEmpty()) "书" else it.substring(0, 1) }
+            val cover = Md3.text(this, first, Md3.FS_MD, Md3.onPrimaryContainer, bold = true).apply {
+                gravity = android.view.Gravity.CENTER
+                background = Md3.bg(Md3.nameColor(h.name), Md3.R_GRID.toFloat())
+                minWidth = Md3.dp(this@showHits, 40)
+                minimumHeight = Md3.dp(this@showHits, 56)
+            }
+            col.addView(Widgets.listItem(this, title, sub, twoLine = true, highlight = true,
+                leading = cover) {
                 openHit(h)
             })
         }
