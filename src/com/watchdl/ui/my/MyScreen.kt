@@ -62,7 +62,8 @@ internal fun MainActivity.showMy() {
         e("缓存管理", "download")
         e("文件管理", "grid")
         e("关于", "more") { showAbout() }
-        e("退出", "close")
+        // 不再放「退出」：手表上直接划掉就结束进程，单独一个按钮反而含义含糊
+        // （点了退，后台下载线程还在跑）。要真停下载去作业菜单逐本停。
     })
 
     root.addView(body, Md3.lpWeight(1f))
