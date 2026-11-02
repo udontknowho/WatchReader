@@ -153,7 +153,19 @@ internal fun MainActivity.showCache() {
 
     col.addView(Widgets.sectionLabel(this,
         "${CacheUi.filterName()} ${shown.size}/${rows.size} 本 · 正文 ${humanBytes(shown.sumOf { it.bytes })}"))
-    for (u in shown) col.addView(cacheCard(u))
+    // 两段分区。legado 分「书架 / 未加入书架」，靠的是书是否在书架里；
+    // 本地没有书架概念，但「有正文 / 正文已清空」是同一形状：一眼分出
+    // 能离线读的书和要去「重新下载」的书。空的一组不画标题。
+    val withBody = shown.filter { it.cached > 0 }
+    val noBody = shown.filter { it.cached == 0 }
+    if (withBody.isNotEmpty()) {
+        col.addView(Widgets.sectionLabel(this, "有正文 ${withBody.size} 本"))
+        for (u in withBody) col.addView(cacheCard(u))
+    }
+    if (noBody.isNotEmpty()) {
+        col.addView(Widgets.sectionLabel(this, "正文已清空 ${noBody.size} 本"))
+        for (u in noBody) col.addView(cacheCard(u))
+    }
     col.addView(Md3.text(this,
         "点一本书可以下载缺失章节，或者清理这本书的正文。\n" +
             "清正文只删本地副本，目录与阅读进度保留，但要联网重下才能离线读；" +
