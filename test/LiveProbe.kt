@@ -18,6 +18,8 @@ fun main(args: Array<String>) {
         .map { it.trim() }.filter { it.isNotEmpty() }.ifEmpty { listOf("玄鉴仙族") }
     val limit = args.getOrElse(2) { "999" }.toInt()
     val conc = args.getOrElse(3) { "10" }.toInt()
+    // 分批跑全量：drop(offset).take(limit)，多进程并行不互相等超时。
+    val offset = args.getOrElse(4) { "0" }.toInt()
 
     @Suppress("UNCHECKED_CAST")
     val items = (JsonParser.parse(src.readText()) as? List<*>)?.mapNotNull { it as? Map<*, *> } ?: return
@@ -25,7 +27,7 @@ fun main(args: Array<String>) {
     val srcs = items.mapNotNull { m ->
         val n = m["bookSourceName"]?.toString() ?: return@mapNotNull null
         LegadoImport.importOne(n, m as Map<String, Any?>).rule?.let { Src(n, it) }
-    }.take(limit)
+    }.drop(offset).take(limit)
     println("源 ${srcs.size} 条，关键词「${kws.joinToString(",")}」，并发 $conc")
 
     val pool = Executors.newFixedThreadPool(conc)

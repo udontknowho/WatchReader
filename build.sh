@@ -20,8 +20,8 @@ KOTLIN_LIB="${KOTLIN_LIB:-$PREFIX/opt/kotlin/lib}"
 OUT="$ROOT/build"
 MIN_SDK=30
 TARGET_SDK=34
-APP_VERSION="${APP_VERSION:-1.4.0-beta6}"
-APP_VERSION_CODE="${APP_VERSION_CODE:-28}"
+APP_VERSION="${APP_VERSION:-1.4.0-beta10}"
+APP_VERSION_CODE="${APP_VERSION_CODE:-32}"
 
 # kotlinc 读 JAVA_OPTS（$PREFIX/bin/kotlinc 只在未设置时用默认 -Xmx512M）。
 # 本机内存被系统压到只剩几百兆，编译峰值必须自己封顶：串行 GC 不占并发 GC 线程池，
@@ -122,7 +122,21 @@ if [ "${1:-}" = "live" ]; then
   run_kotlinc "$OUT/live.jar" \
     $(find "$ROOT/src/com/watchdl/core" -name '*.kt') \
     "$ROOT/test/LiveProbe.kt"
-  java -Xmx512m -cp "$OUT/live.jar:$STDLIB${DEPS:+:$DEPS}" LiveProbeKt "${2:-}" "${3:-}" "${4:-}" "${5:-}" || exit 1
+  java -Xmx512m -cp "$OUT/live.jar:$STDLIB${DEPS:+:$DEPS}" LiveProbeKt "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" || exit 1
+  exit 0
+fi
+
+# ---------------- audit ----------------
+# 全量书源体检：多文件 + 跨文件去重 + JSONL 断点续跑。
+# 用法：bash build.sh audit <结果.jsonl> <关键词> <源文件…>
+if [ "${1:-}" = "audit" ]; then
+  mkdir -p "$OUT"
+  echo "== 编译 audit =="
+  run_kotlinc "$OUT/audit.jar" \
+    $(find "$ROOT/src/com/watchdl/core" -name '*.kt') \
+    "$ROOT/test/SrcAudit.kt"
+  shift
+  java -Xmx768m -cp "$OUT/audit.jar:$STDLIB${DEPS:+:$DEPS}" SrcAuditKt "$@" || exit 1
   exit 0
 fi
 
@@ -171,7 +185,7 @@ if [ "${1:-}" = "test" ]; then
   run_kotlinc "$OUT/uicheck.jar" $(find "$ROOT/src" -name '*.kt')
   rm -f "$OUT/uicheck.jar"
   echo "== 运行 =="
-  for t in CoreTest ChapterOrderTest CloudSourceTest DownloadTest EngineTest HttpTest P0RegressionTest FinishTest SignTest RankConfigTest RotationTest AsyncGuardTest NavProgressTest JobLockTest com.watchdl.core.RuleBoundaryTest TocBudgetTest TextSelectorTest LegadoDefaultTest DevLogTest JsSyntaxProbeTest Es5CompatTest JsApiSurfaceTest UrlJsTest SearchPartialTest; do
+  for t in CoreTest ChapterOrderTest CloudSourceTest DownloadTest EngineTest HttpTest P0RegressionTest FinishTest SignTest RankConfigTest RotationTest AsyncGuardTest NavProgressTest JobLockTest com.watchdl.core.RuleBoundaryTest TocBudgetTest TextSelectorTest LegadoDefaultTest DevLogTest JsSyntaxProbeTest Es5CompatTest JsApiSurfaceTest UrlJsTest SearchPartialTest PaletteTest BackAffordanceTest IconDataTest; do
     echo "--- $t ---"
     CHARSET_JSON="${CHARSET_JSON:-$HOME/novel/sources/fanqie-booksource/charset.json}" \
       SONOVEL_RULES="${SONOVEL_RULES:-$HOME/novel/sonovel/rules/main.json}" \
