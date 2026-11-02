@@ -257,7 +257,7 @@ class MainActivity : Activity() {
             // 发现页返回时**清空旧数据**重新拉：推荐流是时效内容，
             // 隔几分钟回来还显示旧列表，用户看不出它已过期。
             is Screen.Discover -> showDiscover(s.site, s.gender, s.rankKey)
-            is Screen.Settings -> showSettings()
+            is Screen.Settings -> showSettings(s.page)
             is Screen.Marks -> showMarks(s.info)
             Screen.Shelf -> showShelf()
             is Screen.Detail -> showDetail(s.info, s.src)
@@ -1168,28 +1168,68 @@ class MainActivity : Activity() {
         dialog.show()
     }
 
+    /** 设置子页代号。字符串进 [Screen.Settings]，进程重建后能回到同一子页。 */
+    internal val PAGE_MAIN = "main"
+    internal val PAGE_THEME = "theme"
+    internal val PAGE_READ = "read"
+    internal val PAGE_CROWN = "crown"
+    internal val PAGE_OTHER = "other"
+
     /**
-     * 设置页。
+     * 设置页（从单页拆成首屏导航 + 子页，照 legado `ui/config/ConfigNavScreen`）。
      *
-     * 以前阅读设置只是阅读页里的一个对话框，主界面根本没有入口，
-     * 用户不点进一本书就不知道字号/行距能改。
-     * 这里提成独立一页：改完**立即落盘**（不用点「确定」），预览实时跟着变。
+     * 原来 7 组挤在一页，189 × 248 dp 上要滚三屏，找一项得靠记忆滑。
+     * legado 的首屏是一张导航列表，具体项进子页。
+     * 阅读设置**改完立即落盘**（不用点「确定」），预览实时跟着变。
      *
-     * 选段控件与阅读页共用同一个段式风格：浅紫填充 + 深字。
+     * [page] 取 [PAGE_MAIN] / [PAGE_THEME] / [PAGE_READ] / [PAGE_CROWN] / [PAGE_OTHER]。
      */
-    internal fun showSettings() {
-        setScreen(Screen.Settings)
+    internal fun showSettings(page: String = PAGE_MAIN) {
+        setScreen(Screen.Settings(page))
         root.removeAllViews()
-        root.addView(Widgets.topBar(this, "设置", onBack = { goBackToPrevious() }))
+        val title = when (page) {
+            PAGE_THEME -> "主题设置"
+            PAGE_READ -> "阅读设置"
+            PAGE_CROWN -> "表冠"
+            PAGE_OTHER -> "其他设置"
+            else -> "设置"
+        }
+        root.addView(Widgets.topBar(this, title, onBack = { goBackToPrevious() }))
 
         val body = Widgets.scrollBody(this, crownStep, crownGlide)
         val col = Widgets.contentColumn(body)
+        when (page) {
+            PAGE_THEME -> settingsTheme(col)
+            PAGE_READ -> settingsRead(col)
+            PAGE_CROWN -> settingsCrown(col)
+            PAGE_OTHER -> settingsOther(col)
+            else -> settingsMain(col)
+        }
+        root.addView(body)
+    }
 
-        col.addView(Widgets.sectionLabel(this, "外观"))
+    /** 设置首屏：四个入口，一项一行。子页里返回回到这里（[rememberReturn] 记着）。 */
+    private fun settingsMain(col: LinearLayout) {
+        col.addView(Widgets.groupCard(this, null) { g ->
+            fun e(title: String, sub: String, page: String) {
+                g.addView(Widgets.groupItem(ctx = this, title = title, subtitle = sub) {
+                    rememberReturn()
+                    showSettings(page)
+                })
+            }
+            e("主题设置", "六套配色", PAGE_THEME)
+            e("阅读设置", "字号 · 行距 · 背景", PAGE_READ)
+            e("表冠", "每格位移 · 跟手时长", PAGE_CROWN)
+            e("其他设置", "导出 · 书源 · 版本 · 开发者", PAGE_OTHER)
+        })
+    }
+
+    private fun settingsTheme(col: LinearLayout) {
         themeChips(col)
+    }
 
-        col.addView(Widgets.sectionLabel(this, "阅读显示"))
-
+    /** 阅读显示：预览 + 三行档位 + 两个滑杆。档位和滑杆改的是同一组值。 */
+    private fun settingsRead(col: LinearLayout) {
         // 预览块：字号、行距、背景一起看，比三个独立选项直观。
         val preview = Md3.text(this, "示例正文，看看效果。\n第二行。", Md3.FS_READ, Md3.onSurface).apply {
             setPadding(Md3.dp(this@MainActivity, 10), Md3.dp(this@MainActivity, 8),
@@ -1283,8 +1323,11 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = Md3.dp(this@MainActivity, Md3.GAP) })
 
-        // 表冠灵敏度：刚改完平滑滚动后这两个常数直接决定手感，不同人差异很大。
-        col.addView(Widgets.sectionLabel(this, "表冠"))
+        paintPreview()
+    }
+
+    /** 表冠灵敏度：刚改完平滑滚动后这两个常数直接决定手感，不同人差异很大。 */
+    private fun settingsCrown(col: LinearLayout) {
         col.addView(Widgets.sliderRow(this, "每格位移", 20f, 200f, crownStep, 0,
             { "%d px".format(it.toInt()) }) { v ->
             crownStep = v
@@ -1301,13 +1344,14 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = Md3.dp(this@MainActivity, Md3.GAP) })
 
-        // 设置页自身的 body 早就建好了，改参数后需要让下次进页面生效。
+        // body 早在进页时就建好了，改参数后要下次进页面才生效。
         col.addView(Md3.text(this, "表冠参数在下次进入页面时生效", Md3.FS_SM, Md3.onSurfaceVariant).apply {
             setPadding(0, Md3.dp(this@MainActivity, 4), 0, 0)
         })
+    }
 
-        paintPreview()
-
+    /** 其他设置：导出说明、书源管理、版本、开发者。 */
+    private fun settingsOther(col: LinearLayout) {
         col.addView(Widgets.sectionLabel(this, "导出"))
         val dirHint = Md3.text(this, "文件名：书名 - 作者.txt（重名自动加 (2)）\n编码：UTF-8 带 BOM",
             Md3.FS_SM, Md3.onSurfaceVariant).apply {
@@ -1334,8 +1378,6 @@ class MainActivity : Activity() {
                 DevLog.clear(); toast("日志已清空")
             })
         }
-
-        root.addView(body)
     }
 
     /**
@@ -1759,7 +1801,7 @@ class MainActivity : Activity() {
             is Screen.Market -> showMarket(s.page, s.hits)
             is Screen.Sources -> showSources()
             is Screen.Progress -> showProgress(s.info)
-            Screen.Settings -> showSettings()
+            is Screen.Settings -> showSettings(s.page)
             // 配置变更重建**不刷新**：这里只是重画，联网会让旋转/展开后卡一下。
             is Screen.Discover -> showDiscover(s.site, s.gender, s.rankKey)
             Screen.Shelf -> showShelf()
@@ -1782,7 +1824,7 @@ class MainActivity : Activity() {
             is Screen.Sources -> goBackToPrevious()
             is Screen.Market -> showSources()
             is Screen.Progress -> showToc(s.info)
-            Screen.Settings -> goBackToPrevious()
+            is Screen.Settings -> goBackToPrevious()
             is Screen.Marks -> showToc(s.info)
             is Screen.Detail -> goBackToPrevious()
         }

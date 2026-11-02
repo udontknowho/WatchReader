@@ -34,8 +34,12 @@ sealed interface Screen {
         val src: BookSource? = null,
     ) : Screen
     object Sources : Screen
-    /** 设置页。目前只有阅读显示与导出目录两块，都是本地项。 */
-    object Settings : Screen
+    /**
+     * 设置。一页拆成两页（照 legado `ui/config/ConfigNavScreen`）：首屏是入口列表，
+     * [page] 指明当前在哪一子页（`main` / `theme` / `read` / `crown` / `other`）。
+     * 进程被回收后靠它回到同一子页，而不是甩回首屏。
+     */
+    data class Settings(val page: String = "main") : Screen
     /**
      * 发现页（榜单）。
      *
@@ -86,7 +90,7 @@ sealed interface Screen {
 fun screenId(s: Screen?): String = when (s) {
     null -> "?"
     Screen.Sources -> "sources"
-    Screen.Settings -> "settings"
+    is Screen.Settings -> "settings:${s.page}"
     Screen.Shelf -> "shelf"
     Screen.My -> "my"
     is Screen.Hits -> "hits:${s.keyword}"
