@@ -4,6 +4,16 @@ import com.watchdl.core.JobStore
 import com.watchdl.core.QueueItem
 import com.watchdl.core.chapterCacheStatusText
 import com.watchdl.core.resolveChapterCacheStatus
+import com.watchdl.core.shelfBadgeText
+import com.watchdl.core.shelfDeleteMessage
+import com.watchdl.core.shelfPruneSelection
+import com.watchdl.core.shelfSelectAll
+import com.watchdl.core.shelfSelectSubtitle
+import com.watchdl.core.shelfSelectTitle
+import com.watchdl.core.shelfSourceTag
+import com.watchdl.core.shelfSubtitle
+import com.watchdl.core.shelfToggle
+import com.watchdl.core.shelfUnreadCount
 import java.io.File
 
 /**
@@ -115,6 +125,36 @@ fun main() {
     check("文案对齐 legado 中文包", chapterCacheStatusText(ChapterCacheStatus.Waiting) == "待下载" &&
         chapterCacheStatusText(ChapterCacheStatus.Cached) == "下载完成" &&
         chapterCacheStatusText(ChapterCacheStatus.NotCached) == "未缓存")
+
+    // 书架卡与选择模式（照 legado-novel `BookItem.kt` 的 badgeText / leftBottomText、
+    // `BookshelfTopBar` 的编辑态）。
+    println("[书架卡与选择]")
+    check("未读 = 总章 - 在读 - 1", shelfUnreadCount(10, 3) == 6)
+    check("没记录过（下标 0）→ 总章减 1", shelfUnreadCount(10, 0) == 9)
+    check("读到最后一章 → 0", shelfUnreadCount(10, 9) == 0)
+    check("下标超界不出现负数", shelfUnreadCount(10, 50) == 0)
+    check("没有章 → 0", shelfUnreadCount(0, 0) == 0)
+    check("角标 0 不画", shelfBadgeText(0) == null)
+    check("角标 7", shelfBadgeText(7) == "7")
+    check("角标超 99 折成 99+", shelfBadgeText(1200) == "99+")
+    check("副标题", shelfSubtitle(12, 3) == "12 本 · 在读 3")
+    check("在读数不超总数", shelfSubtitle(3, 9) == "3 本 · 在读 3")
+    check("选择标题照 legado 措辞", shelfSelectTitle(2) == "已选 2")
+    check("选择副标题照 legado 措辞", shelfSelectSubtitle(9) == "共 9 本")
+    check("单本删除文案点名书名",
+        shelfDeleteMessage(listOf("剑来")) == "删除《剑来》的缓存与目录，不可恢复")
+    check("多本删除文案给本数",
+        shelfDeleteMessage(listOf("a", "b", "c")) == "删除 3 本书的缓存与目录，不可恢复")
+    check("没有书源给「本地」", shelfSourceTag(null) == "本地" && shelfSourceTag("  ") == "本地")
+    check("书源名截到 4 字", shelfSourceTag("番茄小说app") == "番茄小说")
+    val sel = linkedSetOf<String>()
+    check("点一下选中", shelfToggle(sel, "a") && sel.contains("a"))
+    check("再点一下取消", !shelfToggle(sel, "a") && sel.isEmpty())
+    check("全选", shelfSelectAll(sel, listOf("a", "b")) && sel.size == 2)
+    check("再点全选变全不选", !shelfSelectAll(sel, listOf("a", "b")) && sel.isEmpty())
+    sel.addAll(listOf("a", "gone"))
+    check("剔除已不在架上的选中项", shelfPruneSelection(sel, listOf("a")) && sel == setOf("a"))
+    check("选中的都删了 → 该退出选择模式", !shelfPruneSelection(sel, emptyList()))
 
     root.deleteRecursively()
     println()

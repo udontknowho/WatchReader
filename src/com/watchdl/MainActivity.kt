@@ -1582,25 +1582,51 @@ class MainActivity : Activity() {
             body = "将删除“$label”的全部正文",
             confirm = "删除",
             onConfirm = {
-                // 报告 P0-2：先取消再删。以前直接删目录，后台线程还在跑，
-                // 它每章落盘一次就会把目录连同 job.json 一起建回来 —— 书「诈尸」。
-                if (DownloadService.runningBookId == job.bookId) DownloadService.cancel(this)
-                thread {
-                    var waited = 0
-                    while (DownloadService.runningBookId == job.bookId && waited < 3000) {
-                        Thread.sleep(50)
-                        waited += 50
-                    }
-                    // 等不到也不要紧：墓碑会让后面所有落盘都落空。
-                    val gone = jobsStore().markDeleted(job.bookId)
-                    runOnUiThread {
-                        if (gone) {
-                            toast("已删除")
-                            showShelf()
-                        } else toast("删除失败：目录仍被占用")
-                    }
+                purgeBookCache(listOf(job.bookId)) { gone ->
+                    if (gone > 0) {
+                        toast("已删除")
+                        showShelf()
+                    } else toast("删除失败：目录仍被占用")
                 }
             }).show()
+    }
+
+    /**
+     * 整本删除的公用实现：取消服务 → 踢出队列 → 等收工 → 落墓碑。
+     *
+     * 书架多选删除、书架行菜单删除、缓存页删除共用这一段。抽出来是因为
+     * 复制粘贴出来的第二份漏过一步就出事：报告 P0-2 记录的就是「直接删目录」
+     * 那一版 —— 后台线程还在跑，每章落盘一次就把目录连同 job.json 建回来，书「诈尸」。
+     *
+     * 三件事的顺序不能换：先 `cancel` 停住正在写的那章，再把队列里那条剔除
+     * （不剔会在轮它当队头时又下一遭），最后等 `runningBookId` 真的放手才落墓碑。
+     * 等满 3 秒也不放手也不要紧 —— 墓碑会让之后所有落盘都落空。
+     *
+     * @param bookIds 要删的 bookId，可多本
+     * @param onDone 回到主线程回调，参数是真正删掉了几本
+     */
+    internal fun purgeBookCache(bookIds: List<String>, onDone: (Int) -> Unit) {
+        val ids = bookIds.filter { it.isNotBlank() }.distinct()
+        if (ids.isEmpty()) {
+            onDone(0)
+            return
+        }
+        if (ids.contains(DownloadService.runningBookId)) DownloadService.cancel(this)
+        val queue = DownloadService.queueOf(filesDir)
+        for (id in ids) queue.remove(id)
+        thread {
+            var gone = 0
+            for (id in ids) {
+                var waited = 0
+                while (DownloadService.runningBookId == id && waited < 3000) {
+                    Thread.sleep(50)
+                    waited += 50
+                }
+                if (runCatching { jobsStore().markDeleted(id) }.getOrDefault(false)) gone++
+            }
+            val n = gone
+            runOnUiThread { onDone(n) }
+        }
     }
 
     /**
