@@ -19,6 +19,7 @@ import com.watchdl.ui.my.showMy
 import com.watchdl.ui.my.showCache
 import com.watchdl.ui.my.showExportList
 import com.watchdl.ui.my.showFiles
+import com.watchdl.ui.my.showLogs
 import com.watchdl.ui.my.showReplace
 import com.watchdl.ui.reader.*
 import com.watchdl.ui.search.*
@@ -270,6 +271,7 @@ class MainActivity : Activity() {
             Screen.Files -> showFiles()
             Screen.Replace -> showReplace()
             Screen.ExportList -> showExportList()
+            Screen.Logs -> showLogs()
             is Screen.Swap -> showSwap(s.info, s.src)
             is Screen.Find -> showFind(s.query, s.hits, s.scanned, s.done)
             Screen.Shelf -> showShelf()
@@ -1427,7 +1429,7 @@ class MainActivity : Activity() {
             Md3.lpDp(this, null, 2))
     }
 
-    private fun devLogOn() = getSharedPreferences("reader", MODE_PRIVATE).getBoolean("devlog", false)
+    internal fun devLogOn() = getSharedPreferences("reader", MODE_PRIVATE).getBoolean("devlog", false)
 
     private fun devLogHint(): String {
         val f = File(filesDir, "dev.log")
@@ -1435,13 +1437,15 @@ class MainActivity : Activity() {
         return if (devLogOn()) "已开启 · 落盘 ${kb} KB · 只记本 App" else "关闭：仅打 logcat，不存不写盘"
     }
 
-    private fun toggleDevLog() {
+    internal fun toggleDevLog() {
         val on = !devLogOn()
         getSharedPreferences("reader", MODE_PRIVATE).edit().putBoolean("devlog", on).apply()
         DevLog.file = File(filesDir, "dev.log")
         DevLog.setEnabled(on)
         if (on) watchFrames()     // 只在开着时挂：关着不能给每一帧加一个回调
-        showSettings()          // 重画，导出/清空按钮跟着开关出现或消失
+        // 开关在两处（设置页、日志页）都能点，只重画发起那一屏，
+        // 否则从日志页点一下会被抛到设置页。
+        if (curScreen is Screen.Logs) showLogs() else showSettings()
     }
 
     @Volatile private var frameWatcherOn = false
@@ -1478,7 +1482,7 @@ class MainActivity : Activity() {
      * 写一份快照到公共「文档」目录，再走系统分享递出去。
      * 不用 FileProvider：本工程没有 androidx，而 file:// 从 targetSdk 24 起已被封。
      */
-    private fun exportDevLog() {
+    internal fun exportDevLog() {
         if (!ensureLegacyStorage()) {
             toast("需要存储权限才能导出")
             return
@@ -1826,6 +1830,7 @@ class MainActivity : Activity() {
             Screen.Files -> showFiles()
             Screen.Replace -> showReplace()
             Screen.ExportList -> showExportList()
+            Screen.Logs -> showLogs()
             is Screen.Swap -> showSwap(s.info, s.src)
             is Screen.Find -> showFind(s.query, s.hits, s.scanned, s.done)
             Screen.My -> showMy()
@@ -1854,6 +1859,7 @@ class MainActivity : Activity() {
             Screen.Files -> showMy()
             Screen.Replace -> showMy()
             Screen.ExportList -> showMy()
+            Screen.Logs -> showMy()
             is Screen.Swap -> goBackToPrevious()
             is Screen.Find -> showMy()
             is Screen.Detail -> goBackToPrevious()

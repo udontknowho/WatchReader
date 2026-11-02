@@ -72,6 +72,8 @@ internal fun MainActivity.showMy() {
         e("文件管理", "grid") { showFiles() }
         // 导出书单（#29）：把书架列成纯文本清单，落到私有 export/ 目录。
         e("导出书单", "list") { showExportList() }
+        // 日志（#30）：开发者日志的开关、体积、尾巴，导出与清空都在这。
+        e("日志", "history") { showLogs() }
         e("关于", "more") { showAbout() }
         // 不再放「退出」：手表上直接划掉就结束进程，单独一个按钮反而含义含糊
         // （点了退，后台下载线程还在跑）。要真停下载去作业菜单逐本停。

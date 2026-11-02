@@ -124,6 +124,12 @@ sealed interface Screen {
      * 不另存状态：屏被重建（进程回收、配置变更）后照样能显示对。
      */
     object ExportList : Screen
+    /**
+     * 日志（#30）：开关状态、dev.log 体积与行数、最后 40 行。
+     *
+     * 不带数据 —— 日志每时每刻在长，缓存一次就会看到过期的尾巴。
+     */
+    object Logs : Screen
     /** 「我的」页：规则与其它两组入口，照 legado `ui/main/my`。不带数据，每次进屏现读。 */
     object My : Screen
     /**
@@ -161,6 +167,7 @@ fun screenId(s: Screen?): String = when (s) {
     Screen.Files -> "files"
     Screen.Replace -> "replace"
     Screen.ExportList -> "exportList"
+    Screen.Logs -> "logs"
     is Screen.Swap -> "swap:" + s.info.bookId.ifBlank { s.info.name + s.info.author }
     is Screen.Discover -> "discover:${s.site}:${s.gender}:${s.rankKey}"
     is Screen.Market -> "market:${s.page}"
