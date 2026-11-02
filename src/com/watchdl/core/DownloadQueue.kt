@@ -28,6 +28,17 @@ class DownloadQueue(private val file: File) {
     }
 
     /**
+     * 剔除一本。整本删除时调用：书都没了还留着队里那条，轮到它时又下一遂。
+     * 返回剔除后队列长度；书不在队里等于什么都没做。
+     */
+    fun remove(bookId: String): Int {
+        val list = items()
+        val left = list.filterNot { it.bookId == bookId }
+        if (left.size != list.size) save(left)
+        return left.size
+    }
+
+    /**
      * 排进队列，返回排完之后的长度。
      *
      * 已在队里的书不重复排：用户再点一次「全部开始」不该把同一本排两遍，

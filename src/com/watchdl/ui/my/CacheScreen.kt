@@ -22,13 +22,9 @@ import kotlin.concurrent.thread
 /**
  * 缓存管理：跟 legado 对齐，一行一本书，点开才动手。
  *
- * legado 那边这一页是「已缓存 X/总章节数」加每本的下载/删除按钮，
- * 删掉的是正文副本，目录、进度、书源都还在，能马上重新下。所以「删」和「下」
- * 必须成对出现 —— 上一版只有「清理全部正文」这一个大按钮，删完没有任何
- * 重新下载的入口，用户看到的就是「书废了」。
- *
- * 这里也因此不再提供整库一键清正文：整库动作在「文件管理」里，
- * 一屏一个按钮把几十本书的正文全删掉，误点的代价太大。
+ * 删除是**整本删**：正文、目录、下载进度一起没，书源还在，要读再下一次。
+ * 不再提供「只清正文」—— 用户判词「没有人需要只清正文」，那种中间态只会造出
+ * 「书还在、又读不了」的废书。整库清正文的口子也不开，误点的代价太大。
  */
 
 /**
@@ -277,9 +273,9 @@ private fun MainActivity.cacheCard(u: CacheUsage): LinearLayout {
     ) { downloadMissing(u) })
     foot.addView(cacheIcon(
         "delete",
-        if (u.bytes > 0) Md3.error else Md3.onSurfaceVariant,
-        "删除《${u.name}》的正文缓存",
-    ) { askClearBook(u) })
+        Md3.error,
+        "删除《${u.name}》的下载",
+    ) { deleteCacheBook(u) })
     card.addView(foot)
     card.isClickable = true
     card.setOnClickListener { toggleCacheBook(u) }
@@ -407,10 +403,11 @@ private fun MainActivity.cacheChapterWindow(col: LinearLayout, u: CacheUsage) {
         col.addView(Widgets.button(this, "下载缺失章节", "filled") { downloadMissing(u) },
             Md3.lpDp(this, null, Md3.BTN).apply { topMargin = gap / 2 })
     }
-    if (u.bytes > 0) {
-        col.addView(Widgets.button(this, "清理本书正文", "tonal") { askClearBook(u) },
-            Md3.lpDp(this, null, Md3.BTN).apply { topMargin = gap })
-    }
+    // 不再给「只清正文」：用户判词「没有人需要只清正文」。正文、目录、进度
+    // 分开处理只会造出「书还在、又读不了」的中间态。要腾空间就整本删，
+    // 要离线读就整本下，两个动作各自闭合。
+    col.addView(Widgets.button(this, "删除这本书", "tonal") { deleteCacheBook(u) },
+        Md3.lpDp(this, null, Md3.BTN).apply { topMargin = gap })
     col.addView(Widgets.button(this, "收起", "text") {
         CacheUi.open = null
         showCache()
@@ -496,33 +493,38 @@ private fun MainActivity.downloadMissing(u: CacheUsage) {
 }
 
 /**
- * 清理前的二次确认。文案必须说清三件事：删的是什么、目录与进度还在、之后要联网。
+ * 整本删除：正文、目录、下载进度，连同队列里的那条一起没。
  *
- * 上一版的错误就是「清完还能接着读」这句许诺 —— 实际上源不通就再也读不了，
- * 用户按那句话操作，得到的是废书。
+ * 缓存页的删除键因此必须是真删除，跟书架里那个 confirmDeleteJob 同一套做法：
+ * 先取消在跑的服务，再等它收工，最后落墓碑删目录 —— 不等就删，后台线程
+ * 下一章落盘会把目录连同 job.json 一起建回来，书就诈尸。
+ *
+ * 书源与书架条目不在这个目录里，删完不会把书从搜索里弄丢，重新下载即可。
  */
-private fun MainActivity.askClearBook(u: CacheUsage) {
-    if (u.bytes <= 0 || u.cached <= 0) {
-        toast("《${u.name}》没有缓存正文")
-        return
-    }
+private fun MainActivity.deleteCacheBook(u: CacheUsage) {
     Widgets.md3Dialog(this,
-        title = "清理《${u.name}》正文",
-        body = "删掉已下载的 ${u.cached} 章正文，约 ${humanBytes(u.bytes)}。\n" +
-            "目录与阅读进度保留，但清完要联网重新下载才能离线读；" +
-            "书源失效就取不回来。",
-        confirm = "清理",
-        onConfirm = { clearBook(u) },
+        title = "删除《${u.name}》",
+        body = "正文、目录、下载进度一起删，约 ${humanBytes(u.bytes)}。\n" +
+            "书源还在，想离线读再下一次。",
+        confirm = "删除",
+        onConfirm = {
+            if (DownloadService.runningBookId == u.bookId) DownloadService.cancel(this)
+            // 队列里那条也要剔除，否则轮它当队头时又下一遭，用户以为没删掉。
+            DownloadService.queueOf(filesDir).remove(u.bookId)
+            thread {
+                var waited = 0
+                while (DownloadService.runningBookId == u.bookId && waited < 3000) {
+                    Thread.sleep(50)
+                    waited += 50
+                }
+                // 等不到也不要紧：墓碑会让后面所有落盘都落空。
+                val gone = runCatching { jobsStore().markDeleted(u.bookId) }.getOrDefault(false)
+                postAlive(Screen.Cache) {
+                    toast(if (gone) "已删除《${u.name}》" else "删除失败：目录仍被占用")
+                    if (CacheUi.open == u.bookId) CacheUi.open = null
+                    showCache()
+                }
+            }
+        },
     ).show()
-}
-
-/** 逐本清理。放线程里：要重写一次 job.json，主线程会卡一下。 */
-private fun MainActivity.clearBook(u: CacheUsage) {
-    thread {
-        val ok = runCatching { jobsStore().clearChapters(u.bookId) }.isSuccess
-        postAlive(Screen.Cache) {
-            toast(if (ok) "已清理《${u.name}》" else "清理失败")
-            showCache()
-        }
-    }
 }
