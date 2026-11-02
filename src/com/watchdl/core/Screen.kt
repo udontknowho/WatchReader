@@ -93,6 +93,12 @@ sealed interface Screen {
         val scanned: Int = 0,
         val done: Boolean = false,
     ) : Screen
+    /**
+     * 阅读记录（#25）：不分书，把所有读过的书按最后阅读时间排一屏。
+     *
+     * 不带数据 —— 进度在 SharedPreferences 里，每次进屏现读，读一章回来就是新的。
+     */
+    object Records : Screen
     /** 「我的」页：规则与其它两组入口，照 legado `ui/main/my`。不带数据，每次进屏现读。 */
     object My : Screen
     /**
@@ -125,6 +131,7 @@ fun screenId(s: Screen?): String = when (s) {
     is Screen.Progress -> "progress:${s.info.bookId}"
     is Screen.Marks -> "marks:${s.info.bookId}"
     Screen.MarksAll -> "marksAll"
+    Screen.Records -> "records"
     is Screen.Swap -> "swap:" + s.info.bookId.ifBlank { s.info.name + s.info.author }
     is Screen.Discover -> "discover:${s.site}:${s.gender}:${s.rankKey}"
     is Screen.Market -> "market:${s.page}"

@@ -6,6 +6,7 @@ import com.watchdl.MainActivity
 import com.watchdl.core.Screen
 import com.watchdl.ui.attachTabs
 import com.watchdl.ui.reader.showAllMarks
+import com.watchdl.ui.reader.showRecords
 import com.watchdl.ui.search.askFind
 import com.watchdl.ui.source.showSources
 import com.watchdl.ui.theme.Md3
@@ -62,8 +63,8 @@ internal fun MainActivity.showMy() {
         // 全文搜索（#23）：搜已下载正文，离线可用，与「搜索」栏的联网找书是两回事。
         e("全文搜索", "search") { askFind() }
         e("书签", "bookmark") { showAllMarks() }
-        e("阅读记录", "history")
-        e("缓存管理", "download")
+        // 阅读记录（#25）：跨书按最后阅读时间列书，点一条接着读。
+        e("阅读记录", "history") { showRecords() }
         e("文件管理", "grid")
         e("关于", "more") { showAbout() }
         // 不再放「退出」：手表上直接划掉就结束进程，单独一个按钮反而含义含糊
