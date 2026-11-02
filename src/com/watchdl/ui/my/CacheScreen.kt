@@ -350,11 +350,13 @@ private fun MainActivity.cacheChapterWindow(col: LinearLayout, u: CacheUsage) {
     val last = job.chapters.lastIndex
     val start = CacheUi.win.coerceIn(0, last)
     val end = (start + CHAPTER_WINDOW - 1).coerceAtMost(last)
+    // 翻页是轻动作：text 变体、矮一档（32dp）、满宽，居中。
+    val gap = Md3.dp(this, Md3.GAP)
     if (start > 0) {
         col.addView(Widgets.button(this, "↑ 前面还有 $start 章", "text") {
             CacheUi.win = (start - CHAPTER_WINDOW).coerceAtLeast(0)
             showCache()
-        })
+        }, Md3.lpDp(this, null, 32).apply { topMargin = gap / 2 })
     }
     for (i in start..end) {
         val ch = job.chapters[i]
@@ -381,23 +383,38 @@ private fun MainActivity.cacheChapterWindow(col: LinearLayout, u: CacheUsage) {
         col.addView(Widgets.button(this, "↓ 后面还有 ${last - end} 章", "text") {
             CacheUi.win = end + 1
             showCache()
-        })
+        }, Md3.lpDp(this, null, 32).apply { topMargin = gap / 2 })
     }
+
+    // 整本动作区。数字从按钮标签里搬出来单占一行：标签带「（371 章）」这种
+    // 括号串，189 dp 上已经占满一行，再加上左右 16dp 内边距就会被截成省略号。
+    // 数字放说明行、按钮只留动词，三项就能都站稳。
     val missing = (u.total - u.cached).coerceAtLeast(0)
+    if (missing > 0 || u.bytes > 0) {
+        // 一条 1dp 分隔线把章列表和整本动作分开。没有它，第一个按钮会紧贴
+        // 最后一行章，看上去像章行的一部分。
+        col.addView(android.view.View(this).apply { background = Md3.bg(Md3.outlineVariant, 0f) },
+            Md3.lpDp(this, null, 1).apply { topMargin = gap })
+        val facts = buildList {
+            if (missing > 0) add("还缺 $missing 章")
+            if (u.bytes > 0) add("正文占 ${humanBytes(u.bytes)}")
+        }.joinToString(" · ")
+        col.addView(Md3.ellipsize(Md3.text(this, facts, Md3.FS_SM, Md3.onSurfaceVariant)).apply {
+            setPadding(Md3.dp(this@cacheChapterWindow, 4), 0, Md3.dp(this@cacheChapterWindow, 4), 0)
+        }, Md3.lpDp(this, null, 20).apply { topMargin = gap / 2 })
+    }
     if (missing > 0) {
-        col.addView(Widgets.button(this,
-            if (missing > 0) "下载缺失章节（$missing 章）" else "已全部缓存", "filled"
-        ) { downloadMissing(u) })
+        col.addView(Widgets.button(this, "下载缺失章节", "filled") { downloadMissing(u) },
+            Md3.lpDp(this, null, Md3.BTN).apply { topMargin = gap / 2 })
     }
     if (u.bytes > 0) {
-        col.addView(Widgets.button(this, "清理本书正文（${humanBytes(u.bytes)}）", "tonal") {
-            askClearBook(u)
-        })
+        col.addView(Widgets.button(this, "清理本书正文", "tonal") { askClearBook(u) },
+            Md3.lpDp(this, null, Md3.BTN).apply { topMargin = gap })
     }
     col.addView(Widgets.button(this, "收起", "text") {
         CacheUi.open = null
         showCache()
-    })
+    }, Md3.lpDp(this, null, Md3.BTN).apply { topMargin = gap / 2 })
 }
 
 /**
