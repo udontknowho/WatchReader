@@ -3,6 +3,17 @@ import com.watchdl.core.DownloadQueue
 import com.watchdl.core.JobStore
 import com.watchdl.core.QueueItem
 import com.watchdl.core.chapterCacheStatusText
+import com.watchdl.core.detailCurrentLine
+import com.watchdl.core.detailDownloadTag
+import com.watchdl.core.detailIntroText
+import com.watchdl.core.detailIntroToggleLabel
+import com.watchdl.core.detailIntroToggleVisible
+import com.watchdl.core.detailLatestLine
+import com.watchdl.core.detailReadState
+import com.watchdl.core.detailRemoveMessage
+import com.watchdl.core.detailShelfAction
+import com.watchdl.core.detailStatParts
+import com.watchdl.core.detailTotalText
 import com.watchdl.core.resolveChapterCacheStatus
 import com.watchdl.core.shelfBadgeText
 import com.watchdl.core.shelfDeleteMessage
@@ -155,6 +166,41 @@ fun main() {
     sel.addAll(listOf("a", "gone"))
     check("剔除已不在架上的选中项", shelfPruneSelection(sel, listOf("a")) && sel == setOf("a"))
     check("选中的都删了 → 该退出选择模式", !shelfPruneSelection(sel, emptyList()))
+
+    // 书详情屏（照 legado-novel `ui/book/info/BookInfoScreen.kt` 的
+    // `BookInfoSummary` / `BookInfoActions` / `BookInfoIntro`）。
+    println("[书详情]")
+    check("第一行照 toc_s 措辞", detailCurrentLine("第一章") == "在读 · 第一章")
+    check("没有章名时用「加载中…」", detailCurrentLine(null) == "在读 · 加载中…")
+    check("第二行照 lasted_show 措辞", detailLatestLine("末章") == "最新 · 末章")
+    check("没有最新章时整行不画", detailLatestLine("  ") == null && detailLatestLine(null) == null)
+    check("总章照 read_chapter_total 措辞", detailTotalText(320) == "共 320 章")
+    check("章数负数不出现负号", detailTotalText(-3) == "共 0 章")
+    check("没读过 → 未读", detailReadState(10, 0) == "未读")
+    check("读到末章 → 已读完", detailReadState(10, 9) == "已读完")
+    check("中间 → 已读 M 章（下标 0 基、显示 1 基）", detailReadState(10, 4) == "已读 5 章")
+    check("单章书没读过 → 未读（未读判定在前）", detailReadState(1, 0) == "未读")
+    check("章数超界 → 已读完不留负数", detailReadState(3, 50) == "已读完")
+    check("空目录 → 未读", detailReadState(0, 0) == "未读")
+    check("统计行三段顺序", detailStatParts(10, 4) == listOf("共 10 章", "|", "已读 5 章"))
+    check("未入架 → 放入书架 + plus",
+        detailShelfAction(false).let { it.label == "放入书架" && it.glyph == "plus" })
+    check("已入架 → 已在书架 + bookmark",
+        detailShelfAction(true).let { it.label == "已在书架" && it.glyph == "bookmark" })
+    check("移出确认写清不可恢复",
+        detailRemoveMessage("剑来") == "移出《剑来》：删掉已下载的缓存与目录，不可恢复")
+    check("没有书名时给「未命名」", detailRemoveMessage(" ").contains("未命名"))
+    check("下载小牌：没下过", detailDownloadTag(0, 300) == "未下载")
+    check("下载小牌：下了一部分", detailDownloadTag(40, 300) == "已下载 40/300")
+    check("下载小牌：下完", detailDownloadTag(300, 300) == "已下载 300/300")
+    check("下载小牌：done 超总数夹回", detailDownloadTag(999, 300) == "已下载 300/300")
+    check("下载小牌：没目录算未下载", detailDownloadTag(5, 0) == "未下载")
+    check("折叠按钮照 expand/collapse",
+        detailIntroToggleLabel(false) == "展开" && detailIntroToggleLabel(true) == "折叠")
+    check("短简介不给折叠按钮", !detailIntroToggleVisible("很短的一句简介。"))
+    check("长简介给折叠按钮", detailIntroToggleVisible("啊".repeat(80)))
+    check("占位摘要按没有简介处理", detailIntroText("...") == null && detailIntroText("") == null)
+    check("正常简介原样返回", detailIntroText("  一本讲剑与江湖的长篇故事。  ") == "一本讲剑与江湖的长篇故事。")
 
     root.deleteRecursively()
     println()
