@@ -20,6 +20,8 @@ import java.io.RandomAccessFile
 data class CacheUsage(
     val bookId: String,
     val name: String,
+    /** 作者。缓存页搜索要能按作者找（legado 搜索框也是书名或作者）。 */
+    val author: String = "",
     /** 已缓存正文的字节数，即 `chapters.jsonl` 的大小。 */
     val bytes: Long,
     /** 磁盘上真有的章数。 */
@@ -221,6 +223,7 @@ class JobStore(private val root: File) {
             CacheUsage(
                 bookId = bookId,
                 name = TinyJson.path(raw, "name")?.ifBlank { bookId } ?: bookId,
+                author = TinyJson.path(raw, "author") ?: "",
                 bytes = f.length(),
                 // 目录缩过水的旧作业里，jsonl 行数可能比目录还多。
                 cached = lines.coerceAtMost(total),

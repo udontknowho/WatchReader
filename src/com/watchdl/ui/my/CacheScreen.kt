@@ -10,6 +10,7 @@ import com.watchdl.core.CacheUsage
 import com.watchdl.core.Downloader
 import com.watchdl.core.JobState
 import com.watchdl.core.Screen
+import com.watchdl.ui.search.askText
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
 import java.util.Locale
@@ -50,10 +51,46 @@ private fun MainActivity.cacheSummary(rows: List<CacheUsage>): String? {
 }
 
 /** 人读字节数。只要 B/KB/MB 三档，为这点格式引第三方库不值得。 */
-internal fun humanBytes(n: Long): String = when {
-    n >= 1024L * 1024L -> String.format(Locale.US, "%.1f MB", n / 1024.0 / 1024.0)
+internal fun humanBytes(n: Long): String = when {    n >= 1024L * 1024L -> String.format(Locale.US, "%.1f MB", n / 1024.0 / 1024.0)
     n >= 1024L -> String.format(Locale.US, "%.0f KB", n / 1024.0)
     else -> "$n B"
+}
+
+/**
+ * 缓存页的屏内状态。
+ *
+ * 放文件级对象而不是 MainActivity 字段：加字段要改五处（replay、屏幕重建、返回），
+ * 而这三个值只是「这一屏眼下怎么画的」，与屏身份无关。
+ */
+private object CacheUi {
+    /** 搜索关键词，空串表示不过滤。 */
+    var query: String = ""
+    /** 状态筛选：all 全部 / missing 缺章 / full 已满。 */
+    var filter: String = "all"
+    /** 展开的那本书；null 表示都收起。 */
+    var open: String? = null
+    /** 章级窗口起点。 */
+    var win: Int = 0
+
+    /** 这本书是否过当前筛选（搜索 + 状态）。 */
+    fun matches(u: CacheUsage): Boolean {
+        val q = query.trim()
+        if (q.isNotEmpty() && !u.name.contains(q, true) && !u.author.contains(q, true)) return false
+        return when (filter) {
+            "missing" -> u.cached < u.total
+            "full" -> u.cached >= u.total
+            else -> true
+        }
+    }
+}
+
+/** 搜索书名或作者。空关键词等于清空过滤。 */
+private fun MainActivity.askCacheQuery() {
+    askText("搜索缓存", "书名或作者", null) { q ->
+        CacheUi.query = q
+        CacheUi.open = null
+        showCache()
+    }
 }
 
 internal fun MainActivity.showCache() {
@@ -77,9 +114,21 @@ internal fun MainActivity.showCache() {
         return
     }
 
+    // 搜索框：提示里带上当前关键词，不用另开一行告诉用户在过滤什么。
+    col.addView(Widgets.searchBar(this,
+        if (CacheUi.query.isBlank()) "搜索书名或作者" else "「${CacheUi.query}」· 点按修改"
+    ) { askCacheQuery() })
+
+    val shown = rows.filter { CacheUi.matches(it) }
+    if (shown.isEmpty()) {
+        col.addView(Widgets.emptyState(this, "search", "没有匹配「${CacheUi.query}」的书。"))
+        root.addView(body, Md3.lpWeight(1f))
+        return
+    }
+
     col.addView(Widgets.sectionLabel(this,
         "共 ${rows.size} 本 · 正文 ${humanBytes(rows.sumOf { it.bytes })}"))
-    for (u in rows) col.addView(cacheCard(u))
+    for (u in shown) col.addView(cacheCard(u))
     col.addView(Md3.text(this,
         "点一本书可以下载缺失章节，或者清理这本书的正文。\n" +
             "清正文只删本地副本，目录与阅读进度保留，但要联网重下才能离线读；" +
