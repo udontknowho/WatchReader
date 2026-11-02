@@ -8,10 +8,13 @@ import android.widget.*
 import com.watchdl.MainActivity
 import com.watchdl.core.*
 import com.watchdl.ui.attachTabs
+import com.watchdl.ui.search.askText
+import com.watchdl.ui.search.showHits
 import com.watchdl.ui.theme.Icons
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
 import java.io.File
+import kotlin.concurrent.thread
 
 /**
  * 发现榜单、书源管理、书源市场三屏（从 MainActivity 原样搬出，行为未改）。
@@ -22,151 +25,614 @@ import java.io.File
  * 因为扩展属性不能有初始化器。
  */
 
-/** ⑤ 书源管理。 */
-internal fun MainActivity.showSources() {
+/**
+ * 书源管理屏的界面状态。
+ *
+ * 放文件级 object 而不是往 MainActivity 加字段：筛选、排序、搜索词、多选只属于这一屏。
+ * 其中「启用 / 移除 / 手动顺序」是要落盘的偏好（见 core/SourcePrefsStore），
+ * 另几项是纯屏内状态，离开就重来。
+ */
+internal object SourceUi {
+
+    /** 上次读到的源快照。非空就不必再读盘 —— 开关一次源不该重新解析 175 条规则。 */
+    var data: SourceData? = null
+
+    /** 读盘失败过。为 true 时直接给错误态，否则「读不到 → 重画 → 再起线程」会死循环。 */
+    var loadFailed = false
+
+    /** 落盘状态：禁用 / 移除 / 手动顺序（名字集合，不含文件信息）。 */
+    val disabled = linkedSetOf<String>()
+    val removed = linkedSetOf<String>()
+    val order = mutableListOf<String>()
+    private var loaded = false
+
+    /** 屏内状态。筛选与排序留着 —— 用户下次进来还想看同一批。 */
+    var filter = SourceFilter.ALL
+    var sort = SourceSort.Order
+    var query = ""
+    var diagOpen = false
+    var selecting = false
+    val selected = linkedSetOf<String>()
+
+    fun prefs(): SourcePrefs =
+        SourcePrefs(LinkedHashSet(disabled), LinkedHashSet(removed), order.toList())
+
+    fun load(dir: File) {
+        if (loaded) return
+        val p = SourcePrefsStore.load(dir)
+        disabled.clear(); disabled += p.disabled
+        removed.clear(); removed += p.removed
+        order.clear(); order += p.order
+        loaded = true
+    }
+
+    fun save(dir: File) = SourcePrefsStore.save(dir, prefs())
+
+    /** 长按进多选，并把长按的那条先选上（legado 同样如此）。 */
+    fun enter(name: String) {
+        selecting = true
+        selected.clear()
+        if (name.isNotEmpty()) selected.add(name)
+    }
+
+    fun exit() {
+        selecting = false
+        selected.clear()
+    }
+}
+
+/** 屏幕上的滚动位置。切选择模式会重画整屏，要把位置带回去（与 ui/shelf 同一写法）。 */
+private fun MainActivity.sourceBodyScroll(): Int {
+    for (i in 0 until root.childCount) {
+        val c = root.getChildAt(i)
+        if (c is ScrollView) return c.scrollY
+    }
+    return 0
+}
+
+/**
+ * ⑤ 书源管理。
+ *
+ * 参考 legado-novel `ui/book/source/manage/BookSourceScreen.kt`（主体 155-740，
+ * 行菜单 841-898，分组筛选 sheet 913-1000）与 `BookSourceViewModel.kt`。
+ *
+ * 结构对照 legado：顶栏（返回 / 标题 / 副标题 / 搜索 / ⋮）→ 列表（每条带启用位与 ⋮）
+ * → 多选态换标题与动作。差异集中在两处，注释里逐条写明：
+ * 一是 189×248 dp 的物理约束（Switch 换成勾、图标槽压窄、诊断收进列表尾部），
+ * 二是本应用没有登录页 / 调试页 / 发现源 / 分组字段。
+ */
+internal fun MainActivity.showSources(keepScroll: Boolean = false) {
     setScreen(Screen.Sources)
+    SourceUi.load(sourcesDir())
+
+    val snap = SourceUi.data
+    if (snap == null) {
+        root.removeAllViews()
+        if (SourceUi.loadFailed) {
+            root.addView(Widgets.topBar(this, "书源", onBack = { goBackToPrevious() }))
+            root.addView(Widgets.emptyState(this, "warning", "读取本地书源失败\n请重装或重新导入"),
+                Md3.lpWeight(1f))
+            return
+        }
+        // 首屏骨架：顶栏先出来，列表位给一句「正在读取」。读完重建整屏。
+        // 读盘要解析上百条规则（几十毫秒到一秒），压在主线程会让点「书源管理」像卡死。
+        root.addView(Widgets.topBar(this, "书源", onBack = { goBackToPrevious() },
+            subtitle = "正在读取本地书源…"))
+        root.addView(Widgets.emptyState(this, "refresh", "正在读取本地书源…"), Md3.lpWeight(1f))
+        val owner: Screen = Screen.Sources
+        bg(owner, { loadSourceSnapshot() }) { res ->
+            val got = res.getOrNull()
+            if (got == null) SourceUi.loadFailed = true else SourceUi.data = got
+            showSources()
+        }
+        return
+    }
+    renderSources(snap, keepScroll)
+}
+
+/**
+ * 读盘一次：源行 + 诊断（正则自检 / 导入抛点）一起备好。
+ *
+ * 正则自检要编译几百条规则，原来每进一次屏就跑一遍；现在只在首次读盘跑，
+ * 结果挂在快照上，之后开关源、切筛选都不再付这笔钱。
+ */
+private fun MainActivity.loadSourceSnapshot(): SourceData? = runCatching {
+    extractAssets()
+    val data = buildLocalSourceRows()
+    val badRe = SafeRegex.probe(RegexProbe.ALL) + SafeRegex.probe(RegexProbe.FROM_SOURCES)
+    val lenientBad = SafeRegex.probeLenient(
+        badRe.map { it.substringBefore(" | ") to it.substringAfter("正则=") })
+        .filter { it.contains("仍失败") }
+    val trace = ImportTrace.last
+    DevLog.log("WatchDL",
+        "正则自检：字面 ${RegexProbe.ALL.size} / 书源 ${RegexProbe.FROM_SOURCES.size} / " +
+        "裸编译失败 ${badRe.size}（走后兜底仍失败 ${lenientBad.size}）/ 导入抛点 ${trace ?: "无"}")
+    badRe.take(6).forEach { DevLog.log("WatchDL", "裸编译失败 $it") }
+    lenientBad.take(6).forEach { DevLog.log("WatchDL", "兜底仍失败 $it") }
+    data.copy(badRegex = badRe.size, patched = lenientBad.size, importTrace = trace)
+}.getOrElse {
+    DevLog.log("WatchDL", "读取本地书源失败：${it.message}")
+    null
+}
+
+/**
+ * 整屏重建。所有交互（开关、筛选、排序、置顶置底、多选）都走这里，不各自改局部视图 ——
+ * 局部改看着更快，但「已选 N」「共 N · 启用 M」「分组标题里的条数」三处要同步，
+ * 漏一处就是假数据。
+ */
+private fun MainActivity.renderSources(d: SourceData, keepScroll: Boolean) {
+    val scrollY = if (keepScroll) sourceBodyScroll() else 0
     root.removeAllViews()
-    root.addView(Widgets.topBar(this, "书源", onBack = { goBackToPrevious() }))
+
+    // 移除的源不再进列表；启用计数只算留下的那些。
+    val all = d.rows.filter { it.name !in SourceUi.removed }
+    val enabled = all.count { sourceEnabled(SourceUi.disabled, it.name) }
+
+    // 选中的源可能被筛掉或被删掉：留着会停在「已选 0」的死界面。
+    if (SourceUi.selecting && !sourcePruneSelection(SourceUi.selected, all.map { it.name })) {
+        SourceUi.exit()
+    }
+
+    val q = SourceUi.query.trim()
+    val usableNames = all.filter { it.mark == "✓" }.map { it.name }.toSet()
+    val hits = all.filter {
+        sourceMatchFilter(sourceEnabled(SourceUi.disabled, it.name), SourceUi.filter) &&
+            (q.isEmpty() || it.name.contains(q, ignoreCase = true))
+    }
+    // 过滤与排序都在名字上做（core 的纯函数），再回填成行：
+    // 行里有 rule，排序键却只有名字，两者分开最容易断言。
+    val byName = hits.associateBy { it.name }
+    val shown = sourceSortNames(hits.map { it.name }, SourceUi.sort, SourceUi.order, usableNames)
+        .mapNotNull { byName[it] }
+
+    if (SourceUi.selecting) {
+        root.addView(sourceSelectBar())
+    } else {
+        // 顶栏副标题放统计。legado 那里放的是分组名（`groupFilterName ?: 全部`），
+        // 我们的源没有分组字段，把「共 N · 启用 M」放这里（原统计卡的位置），
+        // 列表就能第一眼看见 —— 248 dp 高的屏上，一张统计卡 + 一张诊断卡
+        // 会把首屏的列表挤到只剩两行。
+        root.addView(Widgets.topBar(this, "书源", onBack = { goBackToPrevious() },
+            subtitle = sourceSubtitle(all.size, enabled),
+            trailing = listOf(
+                "search" to { askSourceQuery() },
+                "more" to { showSourceMenu() },
+            )))
+    }
 
     val body = Widgets.scrollBody(this, crownStep, crownGlide)
     val col = Widgets.contentColumn(body)
+    col.addView(Widgets.sectionLabel(this, sourceListLabel(SourceUi.filter, q, shown.size)))
 
-    // 副标题原本是「从 yiove 在线拉取，点选即可导入」，单行省略号把它压到卡片边缘（P1-5）。
-    col.addView(Widgets.listItem(
-        this, "书源市场", "yiove 在线库，点选导入",
-        twoLine = true, highlight = false,
-        leading = Icons.view(this, "cloud", Md3.primary, 18),
-    ) { showMarket(1, emptyList()) })
-    // 云端整包更新：改一个 JSON 推上去就不必重新发包。
-    col.addView(Widgets.listItem(
-        this, "更新书源库", "从云端拉取最新书源包",
-        twoLine = true, highlight = false,
-        leading = Icons.view(this, "download", Md3.primary, 18),
-    ) { updateFromCloud() })
-    // 并发线程数：通用书源默认串行太慢（实测 0.17 章/秒），交给用户自己定。
-    col.addView(Widgets.listItem(
-        this, "下载线程", "当前 ${lanes()} 线程 · 越多越易被限流",
-        twoLine = true, highlight = false,
-        leading = Icons.view(this, "menu", Md3.primary, 18),
-    ) { pickLanes() })
-    col.addView(Widgets.sectionLabel(this, "本地书源"))
-
-    val owner: Screen = Screen.Sources
-    bg(owner, {
-        // 整段必须包 try：这里任何一步抛异常，线程会静默死掉，
-        // 界面停在空白状态 —— 看起来就是「书源 0 条」，却没有任何提示。
-        runCatching {
-            extractAssets()
-            buildLocalSourceRows()
-        }.getOrElse {
-            DevLog.log("WatchDL", "读取本地书源失败：${it.message}")
-            null
-        }
-    }) { res ->
-        val data = res.getOrNull()
-        if (data == null) {
-            col.addView(Widgets.emptyState(this, "warning", "读取本地书源失败\n请重装或重新导入"))
-            root.addView(body)
-            return@bg
-        }
-        val (files, rows, total, usable) = data
-        run {
-            val card = Widgets.card(this, outlined = true)
-            card.addView(Md3.text(this, "可用 $usable / 共 $total 条", Md3.FS_MD, Md3.onSurface))
-            // 路径是内部信息（P1-4），只在 debug 包显示 —— 用户拿它无用处。
-            if (rows.count { it.mark == "✗" } > 0 && isDebugBuild()) {
-                card.addView(Md3.text(this,
-                    "目录 ${files.size} 个文件 · ${srcDirPath}",
-                    Md3.FS_SM, Md3.onSurfaceVariant))
-            }
-            // ── 诊断区：只在真的出问题时才显示 ──
-            //
-            // 手表屏幕小，这三行（正则自检 / 失败明细 / 导入抛点）是排障用的，
-            // 源全可用时显示只会误导："失败 6 条" 看着像故障，实际是
-            // "这 6 条需修补且已自动修补"。所以全好就藏，有问题才冒出来。
-            // logcat 里始终写全量，需要时仍可读到。
-            val badRe = SafeRegex.probe(RegexProbe.ALL) + SafeRegex.probe(RegexProbe.FROM_SOURCES)
-            val lenientBad = SafeRegex.probeLenient(
-                badRe.map { it.substringBefore(" | ") to it.substringAfter("正则=") })
-                .filter { it.contains("仍失败") }
-            val trace = ImportTrace.last
-            val broken = rows.count { it.mark == "✗" }
-            DevLog.log("WatchDL",
-                "正则自检：字面 ${RegexProbe.ALL.size} / 书源 ${RegexProbe.FROM_SOURCES.size} / " +
-                "裸编译失败 ${badRe.size}（走后兜底仍失败 ${lenientBad.size}）/ 导入抛点 ${trace ?: "无"}")
-            badRe.take(6).forEach { DevLog.log("WatchDL", "裸编译失败 $it") }
-            lenientBad.take(6).forEach { DevLog.log("WatchDL", "兜底仍失败 $it") }
-
-            // 只有「有源不可用」或「修补后仍编不过 / 导入抛过异常」才展示
-            if (broken > 0 || lenientBad.isNotEmpty() || trace != null) {
-                // 只给结论，不贴正则原文：189dp 宽的屏上那几行只会溢出卡片。
-                if (lenientBad.isNotEmpty()) {
-                    card.addView(Md3.text(this,
-                        "${lenientBad.size} 条书源已自动修正",
-                        Md3.FS_SM, Md3.onSurfaceVariant))
-                }
-                if (trace != null) {
-                    card.addView(Md3.text(this, "有源在导入时出错，详情见日志",
-                        Md3.FS_SM, Md3.onSurfaceVariant))
-                }
-            } else {
-                // 全好：一句结论就够了，不再列数字与明细（那是排障才需要的）
-                card.addView(Md3.text(this, "全部可导入", Md3.FS_SM, Md3.onSurfaceVariant))
-            }
-            // 按原因归类，比逐条列 780 行有用得多。
-            // 全好时上面已经写过「全部可导入」，这里不再重复。
-            val byReason = rows.filter { it.mark == "✗" }
-                .groupBy { shortReason(it.note) }
-                .entries.sortedByDescending { it.value.size }
-            if (byReason.isNotEmpty()) {
-                card.addView(Md3.text(this,
-                    "${rows.count { it.mark == "✗" }} 条暂不可用",
-                    Md3.FS_SM, Md3.onSurfaceVariant))
-                byReason.take(3).forEach { (reason, list) ->
-                    card.addView(Md3.ellipsize(
-                        Md3.text(this, "· ${list.size} 条：$reason", Md3.FS_SM, Md3.onSurfaceVariant)))
-                }
-                if (byReason.size > 3) {
-                    card.addView(Md3.text(this, "· 另有 ${byReason.size - 3} 类原因", Md3.FS_SM, Md3.onSurfaceVariant))
-                }
-            }
-            // 「来源」原来是逐条列内部文件名（2972e4a8_kk笔趣阁_http_…），
-            // 对用户没有任何用处。文件数并进卡片一行，列表只留给真实书源。
-            card.addView(Md3.text(this, "源文件 ${files.size} 个", Md3.FS_SM, Md3.onSurfaceVariant))
-            col.addView(card)
-
-            // 全部列出，可用的排前面。以前只列"可用"的，用户会以为源丢了 ——
-            // 54 条里 11 条不可用是正常的，应当看得见、能知道原因。
-            val sorted = rows.sortedBy { if (it.mark == "✓") 0 else if (it.mark == "⚠") 1 else 2 }
-            col.addView(Widgets.sectionLabel(this, "全部书源（${rows.size}）"))
-            sorted.take(400).forEach { r ->
-                val color = when (r.mark) {
-                    "✓" -> Md3.ok
-                    "⚠" -> Md3.primary
-                    else -> Md3.error
-                }
-                // M7：声明明文、且实测 https 也升级不上去的源才标「明文」。
-                // 探测结论来自 [Http.cleartextHosts]：没发过请求的源还不知道，不预标。
-                val plain = r.declaredHttp && r.plainConfirmed
-                val sub = listOfNotNull(
-                    r.note?.let { shortReason(it) },
-                    if (plain) "明文传输" else null,
-                ).joinToString(" · ").ifEmpty { null }
-                col.addView(Widgets.listItem(
-                    this, r.name, sub, twoLine = sub != null,
-                    highlight = false,
-                    leading = Icons.view(this, when (r.mark) {
-                        "✓" -> "check"; "⚠" -> "warning"; else -> "close"
-                    }, color, 16),
-                ))
-            }
-            if (sorted.size > 400) {
-                col.addView(Md3.text(this, "（还有 ${sorted.size - 400} 条未显示）",
-                    Md3.FS_SM, Md3.onSurfaceVariant))
-            }
+    if (shown.isEmpty()) {
+        col.addView(Widgets.emptyState(this, "search", when {
+            q.isNotEmpty() -> "没有名字含「$q」的书源"
+            SourceUi.filter == SourceFilter.ENABLED -> "没有已启用的书源"
+            SourceUi.filter == SourceFilter.DISABLED -> "没有已禁用的书源"
+            else -> "本地书源目录是空的\n在 ⋮ 里更新书源库"
+        }))
+    } else {
+        // 400 条上限照旧：真实数据几十到一百多条够用，真到几千条时先保证不卡死。
+        for (r in shown.take(400)) col.addView(sourceRow(r))
+        if (shown.size > 400) {
+            col.addView(Md3.text(this, "（还有 ${shown.size - 400} 条未显示）",
+                Md3.FS_SM, Md3.onSurfaceVariant))
         }
     }
+    // 诊断收在列表尾部（原来在首屏顶部）：排障时才看，全好时它只是噪声。
+    col.addView(sourceDiagCard(d, all))
+
     root.addView(body)
+    // 选择态的批量动作放屏底固定一行 —— legado 的选择动作本来就在
+    // SelectionBottomBar（底部浮动工具条），不在顶栏。
+    if (SourceUi.selecting) root.addView(sourceBatchBar())
+    if (scrollY > 0) body.post { body.scrollTo(0, scrollY) }
+}
+
+/** 标记 → 颜色。✓ 可用 / ⚠ 需修补 / ✗ 不可用。 */
+private fun sourceMarkColor(mark: String): Int = when (mark) {
+    "✓" -> Md3.ok
+    "⚠" -> Md3.primary
+    else -> Md3.error
+}
+
+/** 标记 → 字形。 */
+private fun sourceMarkGlyph(mark: String): String = when (mark) {
+    "✓" -> "check"
+    "⚠" -> "warning"
+    else -> "close"
+}
+
+/**
+ * 一条书源。
+ *
+ * legado 的行是 `ReorderableSelectionItem`：标题 + 副标题（分组 / 校验消息 / 发现位）、
+ * 右侧 M3 Switch、再加一枚「编辑」与一枚 ⋮。
+ *
+ * 189 dp 装不下那四件：M3 Switch 本身约 52 dp，Switch + 编辑 + ⋮ 就要 148 dp，
+ * 书名只剩二十来 dp。所以这里压成：
+ * - 启用位用一枚 20 dp 的勾（`Md3.iconButton`），启用=主色实心、禁用=压到 0.3 透明；
+ *   这不是 legado 的 Switch 形态，是它在表盘上的等价物；
+ * - 勾 30 dp + ⋮ 28 dp（legado 各 48 dp 的触控槽），书名拿到约 88 dp；
+ * - 没做「编辑」：本应用没有书源编辑页，点整行就落到行菜单（legado 点行是进编辑）。
+ * 选择态下收起勾与 ⋮，整行点击=选中 —— 与 legado `inSelectionMode` 一致。
+ */
+private fun MainActivity.sourceRow(r: SourceRow): LinearLayout {
+    val enabled = sourceEnabled(SourceUi.disabled, r.name)
+    // M7：声明明文、且实测 https 也升级不上去的源才标「明文」。
+    val plain = r.declaredHttp && r.plainConfirmed
+    val sub = listOfNotNull(
+        r.note?.let { shortReason(it) },
+        if (plain) "明文传输" else null,
+    ).joinToString(" · ").ifEmpty { null }
+    val picked = r.name in SourceUi.selected
+
+    val row = Md3.row(this)
+    row.minimumHeight = Md3.dp(this, if (sub != null) Md3.ITEM_TALL else Md3.ITEM)
+    // 左右边距比 listItem 各收 4 dp：给两枚动作槽腾位置，文字仍与分组标题对齐。
+    row.setPadding(Md3.dp(this, Md3.PAD * 3 / 4), 0, Md3.dp(this, Md3.PAD / 2), 0)
+    row.background = Md3.ripple(this,
+        if (picked) Md3.surface3 else Color.TRANSPARENT, Md3.R_ITEM.toFloat())
+
+    row.addView(Icons.view(this, sourceMarkGlyph(r.mark), sourceMarkColor(r.mark), 16),
+        LinearLayout.LayoutParams(Md3.dp(this, 18), Md3.dp(this, 18)).apply {
+            rightMargin = Md3.dp(this@sourceRow, 7)
+        })
+
+    val text = Md3.column(this)
+    // 禁用的源压暗而不是加斜体或删除线：legado 也靠透明区分（`isEnabled` 传进列表项，
+    // 标题与正文一起降透明度）。
+    text.addView(Md3.ellipsize(Md3.text(this, r.name, Md3.FS_MD, Md3.onSurface))
+        .apply { alpha = if (enabled) 1f else 0.45f })
+    if (sub != null) {
+        text.addView(Md3.ellipsize(Md3.text(this, sub, Md3.FS_SM, Md3.onSurfaceVariant))
+            .apply { alpha = if (enabled) 0.7f else 0.3f })
+    }
+    row.addView(text, LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+    if (!SourceUi.selecting) {
+        val toggle = Md3.iconButton(this, "check", { toggleSource(r.name) },
+            desc = if (enabled) "已启用，点按禁用" else "已禁用，点按启用")
+        // iconButton 的最小热区是 48×64 dp（M3 顶栏规格），行里放不下两个，这里放开。
+        toggle.minimumWidth = 0
+        toggle.minimumHeight = 0
+        toggle.setPadding(Md3.dp(this, 2), 0, Md3.dp(this, 2), 0)
+        toggle.alpha = if (enabled) 1f else 0.3f
+        row.addView(toggle, LinearLayout.LayoutParams(
+            Md3.dp(this, 30), Md3.dp(this, Md3.ITEM)))
+
+        val menu = Md3.iconButton(this, "more", { showSourceRowMenu(r) }, desc = "更多操作")
+        menu.minimumWidth = 0
+        menu.minimumHeight = 0
+        menu.setPadding(Md3.dp(this, 1), 0, Md3.dp(this, 1), 0)
+        row.addView(menu, LinearLayout.LayoutParams(
+            Md3.dp(this, 28), Md3.dp(this, Md3.ITEM)))
+    }
+
+    row.isClickable = true
+    row.setOnClickListener {
+        if (SourceUi.selecting) toggleSourceSelection(r.name) else showSourceRowMenu(r)
+    }
+    row.setOnLongClickListener {
+        if (!SourceUi.selecting) {
+            SourceUi.enter(r.name)
+            showSources(keepScroll = true)
+        } else {
+            toggleSourceSelection(r.name)
+        }
+        true
+    }
+    return row
+}
+
+/**
+ * 选择态顶栏：✕ / 已选 N / 全选 / 删除。
+ *
+ * 写法照书架屏 `81edb94` 的 `shelfSelectBar`（34/36/36 dp 三槽 + FS_MD 标题），
+ * 理由也一样：M3 一个图标槽 48 dp，三个就吃掉 144 dp，189 dp 的屏上标题会被压成 0。
+ */
+private fun MainActivity.sourceSelectBar(): LinearLayout {
+    val bar = Md3.row(this)
+    bar.setPadding(Md3.dp(this, Md3.PAD / 2), 0, Md3.dp(this, Md3.PAD / 2),
+        Md3.dp(this, Md3.GAP))
+
+    fun slot(glyph: String, desc: String, widthDp: Int, act: () -> Unit): View {
+        val v = Md3.iconButton(this, glyph, act, desc)
+        v.minimumWidth = 0
+        v.setPadding(Md3.dp(this, 2), 0, Md3.dp(this, 2), 0)
+        v.layoutParams = LinearLayout.LayoutParams(Md3.dp(this, widthDp),
+            Md3.dp(this, Md3.TAB_H))
+        return v
+    }
+
+    bar.addView(slot("close", "退出选择", 34) {
+        SourceUi.exit()
+        showSources(keepScroll = true)
+    })
+    bar.addView(Md3.ellipsize(
+        Md3.text(this, sourceSelectTitle(SourceUi.selected.size), Md3.FS_MD, Md3.onSurface,
+            bold = true)).apply { gravity = Gravity.CENTER_VERTICAL },
+        LinearLayout.LayoutParams(0, Md3.dp(this, Md3.TAB_H), 1f))
+    bar.addView(slot("select_all", "全选", 36) {
+        sourceSelectAll(SourceUi.selected, SourceUi.data?.rows
+            ?.filter { it.name !in SourceUi.removed }?.map { it.name } ?: emptyList())
+        showSources(keepScroll = true)
+    })
+    bar.addView(slot("delete", "删除选中", 36) {
+        confirmRemoveSources(SourceUi.selected.toList())
+    })
+    return bar
+}
+
+/**
+ * 选择态的批量动作条（屏底固定一行）：启用所选 / 禁用所选。
+ *
+ * legado 把这些放在 `SelectionBottomBar` 的次要动作里（⋮ 弹出）。我们顶栏三个槽已经
+ * 占满（✕ / 全选 / 删除），189 dp 没有第四槽的位置，所以照 legado 的**位置**
+ * （底部工具条）把两枚并排摊开 —— 一屏内看得见、点得着，不用再进一层菜单。
+ */
+private fun MainActivity.sourceBatchBar(): LinearLayout {
+    val bar = Md3.row(this)
+    bar.setPadding(Md3.dp(this, Md3.PAD / 2), 0, Md3.dp(this, Md3.PAD / 2),
+        Md3.dp(this, Md3.GAP))
+    val names = SourceUi.selected.toList()
+    for ((i, it) in listOf("启用所选" to true, "禁用所选" to false).withIndex()) {
+        val b = Widgets.button(this, it.first, "tonal") {
+            if (names.isEmpty()) toast("先选书源") else setSourceEnabled(names, it.second)
+        }
+        b.contentDescription = it.first
+        bar.addView(b, LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f).apply {
+            if (i > 0) leftMargin = Md3.dp(this@sourceBatchBar, Md3.GAP / 2)
+        })
+    }
+    return bar
+}
+
+/**
+ * 诊断卡：折叠一行，点开才是明细。
+ *
+ * 原来这块（正则自检 / 失败原因归类 / 源文件数）在列表上方，首屏一进去先看到两张卡。
+ * legado 的首屏只有列表，所以这里整块下移到列表尾部并且默认折叠。
+ */
+private fun MainActivity.sourceDiagCard(d: SourceData, all: List<SourceRow>): LinearLayout {
+    val card = Widgets.card(this, outlined = true)
+    val broken = all.count { it.mark == "✗" }
+    card.isClickable = true
+    card.setOnClickListener {
+        SourceUi.diagOpen = !SourceUi.diagOpen
+        showSources(keepScroll = true)
+    }
+    card.addView(Md3.ellipsize(Md3.text(this,
+        if (SourceUi.diagOpen) "诊断信息"
+        else if (broken > 0) "诊断 · $broken 条不可用 · 点开看原因"
+        else "诊断 · 全部可导入 · 点开看详情",
+        Md3.FS_MD, Md3.onSurface)))
+    if (!SourceUi.diagOpen) return card
+
+    card.addView(Md3.text(this, "可用 ${d.usable} / 共 ${d.total} 条",
+        Md3.FS_SM, Md3.onSurfaceVariant))
+    if (d.patched > 0) {
+        card.addView(Md3.text(this, "${d.patched} 条书源已自动修正",
+            Md3.FS_SM, Md3.onSurfaceVariant))
+    }
+    if (d.importTrace != null) {
+        card.addView(Md3.text(this, "有源在导入时出错，详情见日志",
+            Md3.FS_SM, Md3.onSurfaceVariant))
+    }
+    // 按原因归类，比逐条列一百多行有用得多。
+    val byReason = all.filter { it.mark == "✗" }
+        .groupBy { shortReason(it.note) }
+        .entries.sortedByDescending { it.value.size }
+    if (byReason.isNotEmpty()) {
+        card.addView(Md3.text(this, "$broken 条暂不可用",
+            Md3.FS_SM, Md3.onSurfaceVariant))
+        byReason.take(3).forEach { (reason, list) ->
+            card.addView(Md3.ellipsize(
+                Md3.text(this, "· ${list.size} 条：$reason", Md3.FS_SM, Md3.onSurfaceVariant)))
+        }
+        if (byReason.size > 3) {
+            card.addView(Md3.text(this, "· 另有 ${byReason.size - 3} 类原因",
+                Md3.FS_SM, Md3.onSurfaceVariant))
+        }
+    }
+    // 路径是内部信息（P1-4），只在 debug 包显示。
+    card.addView(Md3.text(this,
+        "源文件 ${d.files.size} 个" + (if (isDebugBuild()) " · $srcDirPath" else ""),
+        Md3.FS_SM, Md3.onSurfaceVariant))
+    card.addView(Md3.text(this, "收起", Md3.FS_SM, Md3.primary))
+    return card
+}
+
+/** 搜索书源名。legado 是顶栏内联 SearchBar；手表上沿用本应用统一的输入对话框。 */
+private fun MainActivity.askSourceQuery() {
+    askText("搜索书源", "书源名关键词（留空清除）", null) { q ->
+        SourceUi.query = q.trim()
+        SourceUi.filter = SourceFilter.ALL
+        showSources()
+    }
+}
+
+/**
+ * 顶栏 ⋮。条目照 legado `dropDownMenuContent`：分组筛选、排序，之后是导入/导出/校验
+ * 一类的批量动作。
+ *
+ * 本应用没有导入/导出/校验（源库靠云端整包与书源市场同步），这一段的三个入口
+ * 是本项目独有的（书源市场 / 更新书源库 / 下载线程），功能不变，只是从列表上方
+ * 挪到这里，把首屏让给书源列表。
+ */
+private fun MainActivity.showSourceMenu() {
+    val items = mutableListOf<Pair<CharSequence, () -> Unit>>()
+    items += "分组：${sourceFilterLabel(SourceUi.filter)}" to { showSourceFilterMenu() }
+    items += "排序：${sourceSortLabel(SourceUi.sort)}" to { showSourceSortMenu() }
+    if (SourceUi.query.isNotEmpty()) {
+        items += "清除搜索「${SourceUi.query}」" to {
+            SourceUi.query = ""
+            showSources()
+        }
+    }
+    if (SourceUi.removed.isNotEmpty()) {
+        items += "恢复已移除的 ${SourceUi.removed.size} 条" to {
+            SourceUi.removed.clear()
+            SourceUi.save(sourcesDir())
+            toast("已恢复")
+            showSources()
+        }
+    }
+    items += "书源市场" to { showMarket(1, emptyList()) }
+    items += "更新书源库" to { updateFromCloud() }
+    // 并发线程数：通用书源默认串行太慢（实测 0.17 章/秒），交给用户自己定。
+    items += "下载线程（${lanes()}）" to { pickLanes() }
+    Widgets.longMenuDialog(this, "书源", items).show()
+}
+
+/**
+ * 分组筛选。照 legado `BookSourceGroupFilterSheet`：默认组（全部 / 启用 / 禁用 /
+ * 需登录 / 无分组 / 启用发现 / 禁用发现）+ 用户自建分组。
+ *
+ * 我们只有前三项：需登录要有 `loginUrl`、发现要有 `exploreUrl`、自建分组要有
+ * `bookSourceGroup` —— 这三个字段我们的导入器都不读，源库里也没有。
+ */
+private fun MainActivity.showSourceFilterMenu() {
+    val items: List<Pair<CharSequence, () -> Unit>> =
+        listOf(SourceFilter.ALL, SourceFilter.ENABLED, SourceFilter.DISABLED).map { f ->
+            val mark = if (SourceUi.filter == f) " ✓" else ""
+            (sourceFilterLabel(f) + mark) to {
+                SourceUi.filter = f
+                showSources()
+            }
+        }
+    Widgets.longMenuDialog(this, "分组", items).show()
+}
+
+/** 排序。legado `BookSourceSort` 七档，我们三档；选中项后面加「✓」。 */
+private fun MainActivity.showSourceSortMenu() {
+    val items: List<Pair<CharSequence, () -> Unit>> = SourceSort.values().map { s ->
+        val mark = if (SourceUi.sort == s) " ✓" else ""
+        (sourceSortLabel(s) + mark) to {
+            SourceUi.sort = s
+            showSources()
+        }
+    }
+    // legado 还有「反序」（sort_desc）。可用性排序已经把可用的排前，反序意义不大；
+    // 手动顺序靠置顶/置底调，名称排序反不反序都是同一批，所以不造这一项。
+    Widgets.longMenuDialog(this, "排序", items).show()
+}
+
+/**
+ * 行菜单。照 legado `BookSourceItemMenu`：置顶 / 置底 / 登录 / 搜索 / 调试 / 删除 /
+ * 启用·禁用发现。
+ *
+ * 只做本应用真有的五项：
+ * - 置顶 / 置底：legado 只在手动排序下给这两项（`canMoveToEdge`）。我们保留常显，
+ *   点下去自动切回手动排序 —— 手表上「菜单项忽隐忽现」比「操作后自动换档」更难懂。
+ * - 搜索：用这一条源搜一本书（legado `onSearchSource`，进搜索屏且只查这一源）。
+ * - 启用 / 禁用：legado 用行内 Switch 做，我们两种入口都给。
+ * - 删除：二次确认（legado 也有确认对话框 `sure_del`）。
+ * 没做的三项与原因：
+ * - **登录**：源没有 `loginUrl`，本应用也没有登录页。
+ * - **调试**：没有书源调试屏（legado 的 `onDebugSource` 进调试日志界面）。
+ * - **启用发现 / 禁用发现**：源没有 `exploreUrl`，本应用没有发现源概念。
+ */
+private fun MainActivity.showSourceRowMenu(r: SourceRow) {
+    val enabled = sourceEnabled(SourceUi.disabled, r.name)
+    val items = mutableListOf<Pair<CharSequence, () -> Unit>>()
+    items += "置顶" to { moveSourceToEdge(r.name, true) }
+    items += "置底" to { moveSourceToEdge(r.name, false) }
+    if (r.rule != null) {
+        items += "搜索" to { askSourceKeyword(r) }
+    }
+    items += (if (enabled) "禁用" else "启用") to { setSourceEnabled(listOf(r.name), !enabled) }
+    items += "删除" to { confirmRemoveSources(listOf(r.name)) }
+    Widgets.longMenuDialog(this, r.name, items).show()
+}
+
+/** 用这一条源搜一本书。搜不到/取不到都只 toast，不进空结果屏。 */
+private fun MainActivity.askSourceKeyword(r: SourceRow) {
+    val rule = r.rule ?: return toast("这条源不可用，没法搜索")
+    askText("用「${r.name}」搜索", "书名或作者", "请先输入书名") { kw ->
+        toast("正在用「${r.name}」搜索…")
+        val owner: Screen = Screen.Sources
+        bg(owner, { LegadoSource.of(rule).search(kw, 1) }) { res ->
+            res.onSuccess { hits ->
+                // 上一轮的「已见过」会把这批同名书全过滤掉，先清。
+                seenHits.clear()
+                showHits(kw, hits, MultiSource.Result(hits, 1,
+                    if (hits.isEmpty()) 0 else 1,
+                    if (hits.isEmpty()) listOf(r.name) else emptyList()))
+            }.onFailure { toast("搜索失败：${it.message?.take(40)}") }
+        }
+    }
+}
+
+/** 点行上的勾：切这一条的启用位，落盘并让多源搜索立刻跟着变。 */
+private fun MainActivity.toggleSource(name: String) {
+    val on = sourceToggle(SourceUi.disabled, name)
+    SourceUi.save(sourcesDir())
+    rebuildSourcesInBackground()
+    showSources(keepScroll = true)
+    if (!on) toast("已禁用「${name.take(8)}」")
+}
+
+/** 批量启用 / 禁用（legado `SetEnabledForSelection`）。 */
+private fun MainActivity.setSourceEnabled(names: Collection<String>, enabled: Boolean) {
+    if (names.isEmpty()) return
+    sourceSetEnabled(SourceUi.disabled, names, enabled)
+    SourceUi.save(sourcesDir())
+    rebuildSourcesInBackground()
+    toast(if (enabled) "已启用 ${names.size} 条" else "已禁用 ${names.size} 条")
+    showSources(keepScroll = true)
+}
+
+/** 置顶 / 置底（legado `MoveToEdge`）。落的是名字顺序，源 JSON 不动。 */
+private fun MainActivity.moveSourceToEdge(name: String, toTop: Boolean) {
+    val all = SourceUi.data?.rows?.filter { it.name !in SourceUi.removed }?.map { it.name }
+        ?: return
+    val next = sourceMoveToEdge(all, SourceUi.order, listOf(name), toTop)
+    SourceUi.order.clear()
+    SourceUi.order += next
+    // 置顶/置底只在手动排序下有视觉结果，顺手把档位切过去（legado 直接隐藏这两项）。
+    SourceUi.sort = SourceSort.Order
+    SourceUi.save(sourcesDir())
+    showSources()
+}
+
+/**
+ * 删除 = 从列表移除（记墓碑）。
+ *
+ * legado 删的是数据库里的条目，源文件由它自己管。我们的源是整包 JSON
+ * （`legado.json` 里就有一百多条），改文件的代价是把整包写坏，用户也明确要求
+ * 别动 JSON 本体，所以只记名字：从界面与多源搜索里拿掉，源库更新后也不会「复活」。
+ */
+private fun MainActivity.confirmRemoveSources(names: List<String>) {
+    if (names.isEmpty()) return
+    Widgets.md3Dialog(this, "删除", sourceDeleteMessage(names),
+        confirm = "删除", dismiss = "取消",
+        onConfirm = {
+            SourceUi.removed += names
+            SourceUi.selected -= names.toSet()
+            if (SourceUi.selected.isEmpty()) SourceUi.selecting = false
+            SourceUi.save(sourcesDir())
+            rebuildSourcesInBackground()
+            toast("已移除 ${names.size} 条")
+            showSources(keepScroll = true)
+        }).show()
+}
+
+/** 多选：点一条切选中。 */
+private fun MainActivity.toggleSourceSelection(name: String) {
+    sourceToggleSelect(SourceUi.selected, name)
+    showSources(keepScroll = true)
+}
+
+/**
+ * 启用/移除落盘后让 `multi` 立刻生效。
+ *
+ * `buildMulti()` 会重读全部源文件（约百毫秒），所以丢后台；重画由调用方负责。
+ * 不做这一步的话，刚禁用的源还留在内存里的搜索池中 —— 开关看着生效、搜索照旧用它。
+ */
+private fun MainActivity.rebuildSourcesInBackground() {
+    thread { rebuildSources() }
 }
 
 /**
@@ -488,7 +954,7 @@ private fun MainActivity.updateFromCloud() {
 }
 
 /** 本地书源一行。 */
-private data class SourceRow(
+internal data class SourceRow(
     val file: String,
     val name: String,
     val mark: String,
@@ -497,11 +963,30 @@ private data class SourceRow(
     val declaredHttp: Boolean = false,
     /** 书源根地址，用来把探测结论对到这条行上。null = 导入器没给出。 */
     val host: String? = null,
+    /** 已导入的规则。行菜单靠它判断「搜索」这一项给不给。 */
+    val rule: BookSourceRule? = null,
 ) {
     /** 声明明文、且探测结果明确说这个 host 升不上 https。 */
     val plainConfirmed: Boolean
         get() = declaredHttp && host != null && Http.isCleartextHost(host)
 }
+
+/** 一次读盘的结果：行 + 诊断计数。缓存在 [SourceUi.data]，重画时不再解析规则。 */
+internal data class SourceData(
+    val files: List<File>,
+    val rows: List<SourceRow>,
+    val total: Int,
+    val usable: Int,
+    /** 裸编译就失败的正则数（导入时会走兜底修一次）。 */
+    val badRegex: Int = 0,
+    /** 兜底也没修好的正则数（这些源大概率跑不起来）。 */
+    val patched: Int = 0,
+    /** 导入抛点的最后一条记录。null = 没有。 */
+    val importTrace: String? = null,
+)
+
+/** 诊断用：本地书源目录路径。 */
+private val MainActivity.srcDirPath: String get() = File(filesDir, "sources").absolutePath
 
 /**
  * 读 [filesDir]/sources 下所有 json，导入并统计。
@@ -509,10 +994,7 @@ private data class SourceRow(
  * 抽成独立函数是为了让调用方能用 try 包住 —— 以前这段直接写在 thread 里，
  * 一抛异常整屏就空白，表现成「书源 0 条」。
  */
-/** 诊断用：本地书源目录路径。 */
-private val MainActivity.srcDirPath: String get() = File(filesDir, "sources").absolutePath
-
-private fun MainActivity.buildLocalSourceRows(): Quad<List<File>, List<SourceRow>, Int, Int> {
+private fun MainActivity.buildLocalSourceRows(): SourceData {
     val dir = File(filesDir, "sources").apply { mkdirs() }
     val files = sourceFiles(dir)
     val rows = mutableListOf<SourceRow>()
@@ -537,15 +1019,11 @@ private fun MainActivity.buildLocalSourceRows(): Quad<List<File>, List<SourceRow
         imported.forEach { i ->
             rows += SourceRow(f.name, i.name,
                 if (i.rule == null) "✗" else if (i.issue != null) "⚠" else "✓", i.issue,
-                i.declaredHttp, i.rule?.host)
+                i.declaredHttp, i.rule?.host, i.rule)
         }
     }
-    // 探测是按 host 记的，回填到行上；没探过的 host 保留 null。
-    return Quad(files, rows, total, usable)
+    return SourceData(files, rows, total, usable)
 }
-
-/** 四元组。Kotlin 标准库只有 Pair/Triple。 */
-private data class Quad<A, B, C, D>(val a: A, val b: B, val c: C, val d: D)
 
 /**
  * 书源目录里**真正参与搜索**的 json。
