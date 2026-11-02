@@ -21,6 +21,28 @@ import com.watchdl.core.shelfPruneSelection
 import com.watchdl.core.shelfSelectAll
 import com.watchdl.core.shelfSelectSubtitle
 import com.watchdl.core.shelfSelectTitle
+import com.watchdl.core.SourceFilter
+import com.watchdl.core.SourcePrefs
+import com.watchdl.core.SourcePrefsStore
+import com.watchdl.core.SourceSort
+import com.watchdl.core.sourceApplyOrder
+import com.watchdl.core.sourceDeleteMessage
+import com.watchdl.core.sourceEnabled
+import com.watchdl.core.sourceFilterLabel
+import com.watchdl.core.sourceListLabel
+import com.watchdl.core.sourceMatchFilter
+import com.watchdl.core.sourceMoveToEdge
+import com.watchdl.core.sourcePruneSelection
+import com.watchdl.core.sourceSelectAll
+import com.watchdl.core.sourceSelectTitle
+import com.watchdl.core.sourceSetEnabled
+import com.watchdl.core.sourceSortLabel
+import com.watchdl.core.sourceSortNames
+import com.watchdl.core.sourceStateJson
+import com.watchdl.core.sourceStateParse
+import com.watchdl.core.sourceSubtitle
+import com.watchdl.core.sourceToggle
+import com.watchdl.core.sourceToggleSelect
 import com.watchdl.core.shelfSourceTag
 import com.watchdl.core.shelfSubtitle
 import com.watchdl.core.shelfToggle
@@ -201,6 +223,88 @@ fun main() {
     check("长简介给折叠按钮", detailIntroToggleVisible("啊".repeat(80)))
     check("占位摘要按没有简介处理", detailIntroText("...") == null && detailIntroText("") == null)
     check("正常简介原样返回", detailIntroText("  一本讲剑与江湖的长篇故事。  ") == "一本讲剑与江湖的长篇故事。")
+
+    // ══════ 书源管理（core/SourceState.kt，对照 legado BookSourceViewModel / BookSourceSort）══════
+    check("默认启用", sourceEnabled(emptySet(), "源甲"))
+    check("在禁用集里就禁用", !sourceEnabled(setOf("源甲"), "源甲"))
+    val dis = mutableSetOf<String>()
+    check("点一下变禁用", !sourceToggle(dis, "源甲") && dis == setOf("源甲"))
+    check("再点一下变回启用", sourceToggle(dis, "源甲") && dis.isEmpty())
+    sourceSetEnabled(dis, listOf("甲", "乙"), false)
+    check("批量禁用", dis == setOf("甲", "乙"))
+    sourceSetEnabled(dis, listOf("甲"), true)
+    check("批量启用只放开选中那条", dis == setOf("乙"))
+    check("筛选：全部放过两边", sourceMatchFilter(true, SourceFilter.ALL) &&
+        sourceMatchFilter(false, SourceFilter.ALL))
+    check("筛选：已启用只要启用", sourceMatchFilter(true, SourceFilter.ENABLED) &&
+        !sourceMatchFilter(false, SourceFilter.ENABLED))
+    check("筛选：已禁用只要禁用", !sourceMatchFilter(true, SourceFilter.DISABLED) &&
+        sourceMatchFilter(false, SourceFilter.DISABLED))
+    check("筛选文案照 legado", sourceFilterLabel(SourceFilter.ALL) == "全部" &&
+        sourceFilterLabel(SourceFilter.ENABLED) == "已启用" &&
+        sourceFilterLabel(SourceFilter.DISABLED) == "已禁用")
+    check("顶栏副标题共 N 启用 M", sourceSubtitle(175, 12) == "共 175 · 启用 12")
+    check("副标题启用数超界夹回", sourceSubtitle(3, 9) == "共 3 · 启用 3")
+    check("分组标题：全部", sourceListLabel(SourceFilter.ALL, "", 175) == "全部书源（175）")
+    check("分组标题：已启用", sourceListLabel(SourceFilter.ENABLED, "", 7) == "已启用（7）")
+    check("分组标题：搜索优先", sourceListLabel(SourceFilter.ENABLED, "笔趣阁", 3) == "「笔趣阁」3 条")
+    check("排序文案照 legado", sourceSortLabel(SourceSort.Order) == "手动排序" &&
+        sourceSortLabel(SourceSort.Name) == "名称排序" &&
+        sourceSortLabel(SourceSort.Usable) == "可用性排序")
+    val names = listOf("甲", "乙", "丙", "丁")
+    check("没手动顺序就原样", sourceApplyOrder(names, emptyList()) == names)
+    check("手动顺序排前、其余按原序补后",
+        sourceApplyOrder(names, listOf("丙", "甲")) == listOf("丙", "甲", "乙", "丁"))
+    check("顺序里的生名字被忽略",
+        sourceApplyOrder(names, listOf("野", "丁")) == listOf("丁", "甲", "乙", "丙"))
+    check("置顶", sourceMoveToEdge(names, emptyList(), listOf("丁"), true) ==
+        listOf("丁", "甲", "乙", "丙"))
+    check("置底", sourceMoveToEdge(names, emptyList(), listOf("甲"), false) ==
+        listOf("乙", "丙", "丁", "甲"))
+    check("多条一起置顶，内部顺序保持",
+        sourceMoveToEdge(names, emptyList(), listOf("丙", "乙"), true) ==
+            listOf("乙", "丙", "甲", "丁"))
+    check("置顶没命中时不动", sourceMoveToEdge(names, emptyList(), listOf("野"), true) == names)
+    // 名称排序按拼音（legado 用 Collator 比中文）：丙 bing < 甲 jia < 乙 yi。
+    check("名称排序按拼音", sourceSortNames(listOf("乙", "甲", "丙"), SourceSort.Name, emptyList(),
+        emptySet()) == listOf("丙", "甲", "乙"))
+    check("名称排序按字母", sourceSortNames(listOf("c", "a", "B"), SourceSort.Name, emptyList(),
+        emptySet()) == listOf("a", "B", "c"))
+    check("顺序排序", sourceSortNames(listOf("丙", "甲", "乙"), SourceSort.Order,
+        listOf("乙"), emptySet()) == listOf("乙", "丙", "甲"))
+    check("可用性排序：可用的排前",
+        sourceSortNames(names, SourceSort.Usable, emptyList(), setOf("丁", "乙")) ==
+            listOf("乙", "丁", "甲", "丙"))
+    check("多选标题照书架屏", sourceSelectTitle(3) == "已选 3")
+    val picked = mutableSetOf("甲")
+    check("再点取消选中", !sourceToggleSelect(picked, "甲") && picked.isEmpty())
+    check("点一下加入选中", sourceToggleSelect(picked, "乙") && picked == setOf("乙"))
+    check("全选", sourceSelectAll(picked, names) && picked.size == 4 && "丁" in picked)
+    check("再按一次全不选", !sourceSelectAll(picked, names) && picked.isEmpty())
+    check("剪完还有选中 → true", run {
+        val s2 = mutableSetOf("甲", "野")
+        sourcePruneSelection(s2, names) && s2 == setOf("甲")
+    })
+    check("删光 → false", !sourcePruneSelection(mutableSetOf("野"), names))
+    check("删除正文说清源文件不动", sourceDeleteMessage(listOf("源甲")) ==
+        "移除《源甲》\n源文件不动，只是不再显示")
+    check("批量删除正文带条数", sourceDeleteMessage(listOf("甲", "乙")).startsWith("移除 2 条书源"))
+    check("没选中时不提删除", sourceDeleteMessage(emptyList()) == "没有选中任何书源")
+    val prefs = SourcePrefs(setOf("甲"), setOf("乙"), listOf("丙", "甲"))
+    val round = sourceStateParse(sourceStateJson(prefs))
+    check("状态落盘再读回一致", round == prefs)
+    check("空状态也一致", sourceStateParse(sourceStateJson(SourcePrefs())) == SourcePrefs())
+    check("名字里有引号也读得回",
+        sourceStateParse(sourceStateJson(SourcePrefs(disabled = setOf("带\"引号\"的源"))))
+            .disabled == setOf("带\"引号\"的源"))
+    check("坏 JSON 当空状态", sourceStateParse("{坏").disabled.isEmpty())
+    check("缺字段当空状态", sourceStateParse("{}") == SourcePrefs())
+    val stateDir = File(root, "state").apply { mkdirs() }
+    SourcePrefsStore.save(stateDir, prefs)
+    check("落盘文件叫 .state.json", SourcePrefsStore.NAME == ".state.json" &&
+        SourcePrefsStore.file(stateDir).isFile)
+    check("从盘里读回同一份", SourcePrefsStore.load(stateDir) == prefs)
+    check("目录没文件时给空状态", SourcePrefsStore.load(File(root, "nope")) == SourcePrefs())
 
     root.deleteRecursively()
     println()

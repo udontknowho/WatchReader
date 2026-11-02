@@ -66,12 +66,16 @@ class MainActivity : Activity() {
         // 不排序的话每次安装跑的可能都不是同一批源。
         // 先收集规则，再统一分配显示名：重名要加 host 后缀，
         // 否则 pickFor 只按名字找第一条，选 B 站的书会交给 A 站引擎取目录（N7，源库 88 组重名）。
+        // 书源管理屏的启用/移除名单（core/SourcePrefsStore）。源 JSON 不动，
+        // 生效点就在这里：被禁用或移除的源不进搜索池。
+        val prefs = SourcePrefsStore.load(dir)
         val pending = mutableListOf<Triple<String, com.watchdl.core.BookSourceRule, String>>()
         sourceFiles(dir).forEach { f ->
             runCatching {
                 val text = f.readText()
                 if (text.contains("bookSourceName")) {
                     LegadoImport.importAll(text).forEach { im ->
+                        if (im.name in prefs.disabled || im.name in prefs.removed) return@forEach
                         im.rule?.let { pending += Triple(im.name, it, it.host) }
                     }
                 }
@@ -542,7 +546,7 @@ class MainActivity : Activity() {
     }
 
     /** 把 multi 缓存作废并重读源目录。必须先重建才能拿到新库。 */
-    private fun rebuildSources(then: () -> Unit = {}) {
+    internal fun rebuildSources(then: () -> Unit = {}) {
         multiCache = buildMulti()
         then()
     }
