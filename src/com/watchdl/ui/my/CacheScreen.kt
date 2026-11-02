@@ -72,8 +72,14 @@ private object CacheUi {
     /** 章级窗口起点。 */
     var win: Int = 0
 
-    /** 这本书是否过当前筛选（搜索 + 状态）。 */
-    fun matches(u: CacheUsage): Boolean {
+    /** 当前筛选的中文名，给分组标题用。 */
+    fun filterName(): String = when (filter) {
+        "missing" -> "缺章"
+        "full" -> "已满"
+        else -> "全部"
+    }
+
+    /** 这本书是否过当前筛选（搜索 + 状态）。 */    fun matches(u: CacheUsage): Boolean {
         val q = query.trim()
         if (q.isNotEmpty() && !u.name.contains(q, true) && !u.author.contains(q, true)) return false
         return when (filter) {
@@ -82,6 +88,24 @@ private object CacheUi {
             else -> true
         }
     }
+}
+
+/**
+ * 筛选菜单。legado 这里是「分组筛选」，靠书的分组字段；本项目没有分组字段，
+ * 改按缓存状态筛 —— 同一个位置解决的是同一件事：把想看的书缩到一屏内。
+ */
+private fun MainActivity.showCacheFilter() {
+    val opts = listOf("all" to "全部", "missing" to "缺章", "full" to "已满")
+    Widgets.menuDialog(
+        this, "筛选 · 当前「${CacheUi.filterName()}」",
+        opts.map { (key, label) ->
+            (if (key == CacheUi.filter) "✓ $label" else "   $label") to {
+                CacheUi.filter = key
+                CacheUi.open = null
+                showCache()
+            }
+        },
+    ).show()
 }
 
 /** 搜索书名或作者。空关键词等于清空过滤。 */
@@ -103,6 +127,7 @@ internal fun MainActivity.showCache() {
         this, "缓存管理",
         onBack = { showMy() },
         subtitle = cacheSummary(rows),
+        trailing = listOf("list" to { showCacheFilter() }),
     ))
 
     val body = Widgets.scrollBody(this, crownStep, crownGlide)
@@ -121,13 +146,13 @@ internal fun MainActivity.showCache() {
 
     val shown = rows.filter { CacheUi.matches(it) }
     if (shown.isEmpty()) {
-        col.addView(Widgets.emptyState(this, "search", "没有匹配「${CacheUi.query}」的书。"))
+        col.addView(Widgets.emptyState(this, "search", "没有匹配的书。换关键词或把筛选改回「全部」。"))
         root.addView(body, Md3.lpWeight(1f))
         return
     }
 
     col.addView(Widgets.sectionLabel(this,
-        "共 ${rows.size} 本 · 正文 ${humanBytes(rows.sumOf { it.bytes })}"))
+        "${CacheUi.filterName()} ${shown.size}/${rows.size} 本 · 正文 ${humanBytes(shown.sumOf { it.bytes })}"))
     for (u in shown) col.addView(cacheCard(u))
     col.addView(Md3.text(this,
         "点一本书可以下载缺失章节，或者清理这本书的正文。\n" +
