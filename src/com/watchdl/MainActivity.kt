@@ -261,6 +261,7 @@ class MainActivity : Activity() {
             is Screen.Settings -> showSettings(s.page)
             is Screen.Marks -> showMarks(s.info)
             is Screen.Swap -> showSwap(s.info, s.src)
+            is Screen.Find -> showFind(s.query, s.hits, s.scanned, s.done)
             Screen.Shelf -> showShelf()
             is Screen.Detail -> showDetail(s.info, s.src)
             else -> showShelf()
@@ -1809,6 +1810,7 @@ class MainActivity : Activity() {
             Screen.Shelf -> showShelf()
             is Screen.Marks -> showMarks(s.info)
             is Screen.Swap -> showSwap(s.info, s.src)
+            is Screen.Find -> showFind(s.query, s.hits, s.scanned, s.done)
             Screen.My -> showMy()
             is Screen.Detail -> showDetail(s.info, s.src)
         }
@@ -1830,6 +1832,7 @@ class MainActivity : Activity() {
             is Screen.Settings -> goBackToPrevious()
             is Screen.Marks -> showToc(s.info)
             is Screen.Swap -> goBackToPrevious()
+            is Screen.Find -> showMy()
             is Screen.Detail -> goBackToPrevious()
         }
     }

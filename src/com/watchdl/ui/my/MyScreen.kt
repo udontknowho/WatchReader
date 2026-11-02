@@ -5,6 +5,7 @@ import android.widget.LinearLayout
 import com.watchdl.MainActivity
 import com.watchdl.core.Screen
 import com.watchdl.ui.attachTabs
+import com.watchdl.ui.search.askFind
 import com.watchdl.ui.source.showSources
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
@@ -57,6 +58,8 @@ internal fun MainActivity.showMy() {
                 onClick = action ?: { toast("$title 还没做") }))
         }
         e("设置", "settings") { showSettings() }
+        // 全文搜索（#23）：搜已下载正文，离线可用，与「搜索」栏的联网找书是两回事。
+        e("全文搜索", "search") { askFind() }
         e("书签", "bookmark")
         e("阅读记录", "history")
         e("缓存管理", "download")

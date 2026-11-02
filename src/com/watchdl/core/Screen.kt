@@ -75,6 +75,18 @@ sealed interface Screen {
      * [src] 是当前源，用来标「正在用」；换成功后整屏会换成目录，不会停在原地。
      */
     data class Swap(val info: BookInfo, val src: BookSource? = null) : Screen
+    /**
+     * 全文搜索：搜已下载正文（#23）。
+     *
+     * [query] 空串表示还没输入，进屏先要关键词；[hits] 是扫到的命中，
+     * [scanned] 是已扫过的书数，[done] 区分「扫完了没命中」和「还没开始扫」。
+     */
+    data class Find(
+        val query: String = "",
+        val hits: List<FindText.Hit> = emptyList(),
+        val scanned: Int = 0,
+        val done: Boolean = false,
+    ) : Screen
     /** 「我的」页：规则与其它两组入口，照 legado `ui/main/my`。不带数据，每次进屏现读。 */
     object My : Screen
     /**
@@ -109,6 +121,8 @@ fun screenId(s: Screen?): String = when (s) {
     is Screen.Swap -> "swap:" + s.info.bookId.ifBlank { s.info.name + s.info.author }
     is Screen.Discover -> "discover:${s.site}:${s.gender}:${s.rankKey}"
     is Screen.Market -> "market:${s.page}"
+    // 只比关键词，不比结果：边扫边上屏时结果一直在变，带上结果回调永远认不出自己。
+    is Screen.Find -> "find:${s.query}"
     // 搜索命中时 bookId 可能为空（个别源不返回），退回书名+作者做身份。
     is Screen.Detail -> "detail:" + s.info.bookId.ifBlank { s.info.name + s.info.author }
 }
