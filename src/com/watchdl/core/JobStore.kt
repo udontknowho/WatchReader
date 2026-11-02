@@ -30,6 +30,12 @@ data class CacheUsage(
     val total: Int,
     /** job.json 里标为 FAILED 的章数。下载失败要能被一眼看见，所以单独给出。 */
     val failed: Int = 0,
+    /**
+     * job.json 里仍是 PENDING 的章数，即「还没下过」。
+     *
+     * legado 的「等待 / 暂停」都从这份余量推：跑着的书里这些章在排队，停了的就是暂停。
+     */
+    val pending: Int = 0,
     /** 作业状态。缓存页用它区分「下载中 / 暂停 / 下完」，不看这个就只能猜。 */
     val state: JobState = JobState.PENDING,
 )
@@ -309,6 +315,7 @@ class JobStore(private val root: File) {
                 cached = lines.coerceAtMost(total),
                 total = total,
                 failed = countStatus(raw, "FAILED"),
+                pending = countStatus(raw, "PENDING"),
                 state = runCatching { JobState.valueOf(TinyJson.path(raw, "state") ?: "PENDING") }
                     .getOrDefault(JobState.PENDING),
             )

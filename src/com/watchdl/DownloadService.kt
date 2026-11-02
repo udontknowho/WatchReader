@@ -52,6 +52,15 @@ class DownloadService : Service() {
         @Volatile
         var runningBookId: String? = null
 
+        /**
+         * 正在取的那一章在目录里的下标，-1 表示没在取。
+         *
+         * 缓存管理页要靠它把章行的「下载中」和「待下载」区分开：只有真的在飞的那一行
+         * 才画进度条与停止键。服务每次发请求前写一次，作业收尾与取消时清回 -1。
+         */
+        @Volatile
+        var currentChapterIndex: Int = -1
+
         const val CHANNEL_ID = "watchdl_download"
         const val NOTIFY_ID = 1001
         const val ACTION_START = "com.watchdl.START"
@@ -157,6 +166,7 @@ class DownloadService : Service() {
                 if (worker.get() == null) {
                     runningBookId = null
                     currentBookId.set(null)
+                    currentChapterIndex = -1
                     stopSelf()
                 }
                 return START_NOT_STICKY
@@ -325,6 +335,7 @@ class DownloadService : Service() {
         if (!worker.compareAndSet(owner, null)) return
         runningBookId = null
         currentBookId.set(null)
+        currentChapterIndex = -1
         val store = JobStore(File(filesDir, "books"))
         while (!cancelFlag.get()) {
             val next = queueOf(filesDir).pop() ?: break
@@ -413,6 +424,7 @@ class DownloadService : Service() {
             // 发请求之前就报一声：遇到慢源时界面才有东西可变，
             // 否则从上一章结束到下一章结束之间通知完全静止，看着就是卡死。
             dl.onChapterStart = { i, title ->
+                currentChapterIndex = i
                 if (!cancelFlag.get()) publish("正在下载：${title.take(24)}", current = i)
             }
             val targets = explicit

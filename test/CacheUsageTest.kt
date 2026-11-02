@@ -1,6 +1,9 @@
+import com.watchdl.core.ChapterCacheStatus
 import com.watchdl.core.DownloadQueue
 import com.watchdl.core.JobStore
 import com.watchdl.core.QueueItem
+import com.watchdl.core.chapterCacheStatusText
+import com.watchdl.core.resolveChapterCacheStatus
 import java.io.File
 
 /**
@@ -89,6 +92,29 @@ fun main() {
     q.clear()
     check("清队后为空", q.items().isEmpty())
     check("文件也删了", !qf.exists())
+
+    // 八态优先级：照 legado `resolveChapterCacheStatusKey` 的判定顺序。
+    println("[缓存章行八态]")
+    fun st(
+        downloading: Boolean = false, waiting: Boolean = false, paused: Boolean = false,
+        error: Boolean = false, cached: Boolean = false, label: Boolean = false,
+    ) = resolveChapterCacheStatus(downloading, waiting, paused, error, cached, label)
+    check("正在取且带进度标签 → ProgressLabel", st(downloading = true, label = true) ==
+        ChapterCacheStatus.ProgressLabel)
+    check("正在取 → Downloading", st(downloading = true, cached = true) ==
+        ChapterCacheStatus.Downloading)
+    check("排队且失败过 → 等重试", st(waiting = true, error = true) ==
+        ChapterCacheStatus.ErrorWaitingRetry)
+    check("排队 → Waiting", st(waiting = true) == ChapterCacheStatus.Waiting)
+    check("暂停 → Paused", st(paused = true) == ChapterCacheStatus.Paused)
+    check("失败 → Error", st(error = true) == ChapterCacheStatus.Error)
+    check("已缓存 → Cached", st(cached = true) == ChapterCacheStatus.Cached)
+    check("什么都没有 → NotCached", st() == ChapterCacheStatus.NotCached)
+    check("失败且磁盘有正文，仍报失败", st(error = true, cached = true) == ChapterCacheStatus.Error)
+    check("暂停优先于失败", st(paused = true, error = true) == ChapterCacheStatus.Paused)
+    check("文案对齐 legado 中文包", chapterCacheStatusText(ChapterCacheStatus.Waiting) == "待下载" &&
+        chapterCacheStatusText(ChapterCacheStatus.Cached) == "下载完成" &&
+        chapterCacheStatusText(ChapterCacheStatus.NotCached) == "未缓存")
 
     root.deleteRecursively()
     println()

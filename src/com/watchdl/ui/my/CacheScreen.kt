@@ -7,12 +7,15 @@ import com.watchdl.DownloadService
 import com.watchdl.MainActivity
 import com.watchdl.core.BookInfo
 import com.watchdl.core.CacheUsage
+import com.watchdl.core.ChapterCacheStatus
 import com.watchdl.core.ChapterRef
 import com.watchdl.core.ChapterStatus
 import com.watchdl.core.Downloader
 import com.watchdl.core.JobState
 import com.watchdl.core.QueueItem
 import com.watchdl.core.Screen
+import com.watchdl.core.chapterCacheStatusText
+import com.watchdl.core.resolveChapterCacheStatus
 import com.watchdl.ui.search.askText
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
@@ -28,25 +31,32 @@ import kotlin.concurrent.thread
  */
 
 /**
- * 顶栏副标题：能算准的几个数。
+ * 顶栏副标题，照 legado `buildDownloadSummary` 的五段式：
+ * `下载中:N | 等待:N | 暂停:N | 失败:N | 已缓存:N`。
  *
- * 「下载中」先看服务端的 [DownloadService.runningBookId]：那本是哪本磁盘读不出，
- * 但只要有作业在跑就该显一个 1。剩下的按 job.json 的 state 与 FAILED 章数统计。
+ * 数都在章一级上算，与 legado 同口径（那边也是把每本的章数加起来，不是数书）：
+ * - 下载中：只算正在跑的那一本，记 1。服务是 lanes 条线程并发取章，但具体几条在飞
+ *   没有对外的计数，所以不编大数；legado 自己的 `downloadingCount` 也只记到 1 章级。
+ * - 等待：跑着的书里还没下的章数减掉那 1 章 —— 队列就在磁盘的 status 里，算得准。
+ * - 暂停：停下（PAUSED / CANCELLED）的书剩多少章没下。
+ * - 失败 / 已缓存：直接数。已缓存按 `chapters.jsonl` 实际行数，不信 status。
  */
 private fun MainActivity.cacheSummary(rows: List<CacheUsage>): String? {
     if (rows.isEmpty()) return null
-    val running = if (DownloadService.runningBookId != null) 1 else 0
-    val paused = rows.count {
-        (it.state == JobState.PAUSED || it.state == JobState.CANCELLED) && it.cached < it.total
+    var downloading = 0
+    var waiting = 0
+    var paused = 0
+    for (u in rows) {
+        if (DownloadService.runningBookId == u.bookId) {
+            downloading += 1
+            waiting += (u.pending - 1).coerceAtLeast(0)
+        } else if ((u.state == JobState.PAUSED || u.state == JobState.CANCELLED) && u.pending > 0) {
+            paused += u.pending
+        }
     }
     val failed = rows.sumOf { it.failed }
     val cached = rows.sumOf { it.cached }
-    val parts = ArrayList<String>(4)
-    if (running > 0) parts.add("下 $running 本")
-    if (paused > 0) parts.add("停 $paused 本")
-    if (failed > 0) parts.add("败 $failed 章")
-    if (cached > 0) parts.add("存 $cached 章")
-    return parts.joinToString(" · ").ifBlank { null }
+    return "下载中:$downloading | 等待:$waiting | 暂停:$paused | 失败:$failed | 已缓存:$cached"
 }
 
 /** 人读字节数。只要 B/KB/MB 三档，为这点格式引第三方库不值得。 */
@@ -122,8 +132,7 @@ internal fun MainActivity.showCache() {
     setScreen(Screen.Cache)
     root.removeAllViews()
     val rows = jobsStore().cacheUsages()
-    // legado 顶栏副标题是「下载中|等待|暂停|失败|已缓存」。没有排队数（服务端不报），
-    // 所以只报能算准的三个数，全为零就不显副标题。
+    // legado 的副标题是五段固定格式，不算「有就显、没有就不显」。
     root.addView(Widgets.topBar(
         this, "缓存管理",
         onBack = { showMy() },
@@ -225,61 +234,115 @@ private fun MainActivity.startAllCache(list: List<CacheUsage>) {
 }
 
 /**
- * 书卡右边那一条状态词。
+ * 书卡末行的状态汇总，照 legado `cache_download_status_summary` 四项：
+ * 「下载中 N · 等待 N · 暂停 N · 失败 N」。
  *
- * 优先级按「用户此刻最需要知道什么」排：正在下的先说在跑；停下来的说停；
- * 有失败章的说失败数（比「缺 12 章」更准，缺章里有一部分就是失败）；
- * 都齐了才说已缓存。
+ * 口径与顶栏副标题同：跑着的书记 1 章在飞，其余未下的章算等待；停下的书整段算暂停。
  */
-private fun cacheStateWord(u: CacheUsage): String = when {
-    DownloadService.runningBookId == u.bookId -> "下载中"
-    (u.state == JobState.PAUSED || u.state == JobState.CANCELLED) && u.cached < u.total -> "暂停"
-    u.failed > 0 -> "失败 ${u.failed} 章"
-    u.cached >= u.total -> "已缓存"
-    else -> "未缓存 ${u.total - u.cached} 章"
+private fun cacheBookSummary(u: CacheUsage): String {
+    val running = DownloadService.runningBookId == u.bookId
+    val pausedBook = (u.state == JobState.PAUSED || u.state == JobState.CANCELLED) && u.pending > 0
+    val downloading = if (running) 1 else 0
+    val waiting = if (running) (u.pending - 1).coerceAtLeast(0) else 0
+    val paused = if (pausedBook) u.pending else 0
+    return "下载中 $downloading · 等待 $waiting · 暂停 $paused · 失败 ${u.failed}"
 }
 
 /**
- * 一本书的卡：书名、状态词、线性进度条、已缓存数。
+ * 一本书的卡，元素顺序照 legado `BookCacheBookCard`：
+ * 书名 / 作者、`已缓存/总章` 小牌、满宽进度条、状态汇总加两颗键。
  *
- * 照 legado `BookCacheCard` 的元素顺序排。手表屏放不下它那两行按钮，
- * 动作仍走点卡的菜单 —— 但元素一个不少，看见的数和 legado 一致。
+ * 与 legado 的差别只在排布：189 dp 宽的卡里放不下「汇总 + 两颗文字按钮」一行，
+ * 所以汇总占满一行的剩余宽度、两颗键只留图标。元素一个不少。
  */
 private fun MainActivity.cacheCard(u: CacheUsage): LinearLayout {
     val card = Widgets.card(this, outlined = true)
     val head = Md3.row(this)
-    head.addView(
-        Md3.ellipsize(Md3.text(this, u.name, Md3.FS_MD, Md3.onSurface, bold = true)),
-        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
-    )
-    head.addView(Md3.text(this, cacheStateWord(u), Md3.FS_SM, Md3.primary).apply {
-        setPadding(Md3.dp(this@cacheCard, 6), 0, 0, 0)
-    })
+    val titles = Md3.column(this)
+    titles.addView(Md3.ellipsize(Md3.text(this, u.name, Md3.FS_MD, Md3.onSurface, bold = true)))
+    titles.addView(Md3.ellipsize(Md3.text(this,
+        u.author.ifBlank { "佚名" }, Md3.FS_SM, Md3.onSurfaceVariant)))
+    head.addView(titles, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+    head.addView(cacheCountChip(u))
     card.addView(head)
     card.addView(Widgets.progressBar(this, if (u.total > 0) u.cached.toFloat() / u.total else 0f))
-    // 末行：已缓存数 + legado 书卡右下角那两个动作键（下载、删除）。
-    // 删除不能藏在菜单里：legado 这一页的删除一直是摆在卡上的图标，
-    // 藏起来用户就会问「删除键呢」。
     val foot = Md3.row(this)
-    foot.addView(
-        Md3.ellipsize(Md3.text(this,
-            "已缓存 ${u.cached}/${u.total} · ${humanBytes(u.bytes)}", Md3.FS_SM, Md3.onSurfaceVariant)),
-        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
-    )
-    foot.addView(cacheIcon(
-        "download",
-        if (u.cached < u.total) Md3.primary else Md3.onSurfaceVariant,
-        "下载《${u.name}》的缺失章节",
-    ) { downloadMissing(u) })
-    foot.addView(cacheIcon(
-        "delete",
-        Md3.error,
-        "删除《${u.name}》的下载",
-    ) { deleteCacheBook(u) })
+    val summary = Md3.text(this, cacheBookSummary(u), Md3.FS_SM, Md3.onSurfaceVariant)
+    foot.addView(summary, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+    // 播放 / 停止：legado 只在「有下载任务」或「还有缺章」时才画这颗键。
+    val running = DownloadService.runningBookId == u.bookId
+    val pausedBook = (u.state == JobState.PAUSED || u.state == JobState.CANCELLED) && u.pending > 0
+    if (running || pausedBook || u.cached < u.total) {
+        foot.addView(cacheIcon(
+            if (running) "stop" else "play",
+            if (running) Md3.error else Md3.primary,
+            when {
+                running -> "暂停《${u.name}》的下载"
+                pausedBook -> "继续《${u.name}》的下载"
+                else -> "开始下载《${u.name}》"
+            },
+        ) { if (running) pauseCacheBook(u) else resumeCacheBook(u) })
+    }
+    foot.addView(cacheIcon("delete", Md3.error, "删除《${u.name}》的下载") { deleteCacheBook(u) })
     card.addView(foot)
     card.isClickable = true
     card.setOnClickListener { toggleCacheBook(u) }
     return card
+}
+
+/** `已缓存/总章` 小牌，对 legado 头行右侧那个 `TextCard`。 */
+private fun MainActivity.cacheCountChip(u: CacheUsage): android.widget.TextView =
+    Md3.text(this, "${u.cached}/${u.total}", Md3.FS_SM, Md3.primary, bold = true).apply {
+        background = Md3.bg(Md3.surface4, Md3.R_GRID.toFloat())
+        setPadding(Md3.dp(this@cacheCountChip, 6), Md3.dp(this@cacheCountChip, 2),
+            Md3.dp(this@cacheCountChip, 6), Md3.dp(this@cacheCountChip, 2))
+    }
+
+/**
+ * 暂停一本书：停服务就停在这本，不在跑就把它从队列里拿掉并把状态落成 PAUSED。
+ *
+ * 服务一次只跑一本，所以「暂停这本」与「停服务」是同一件事；
+ * 不在跑的那本改 job.json 的 state 就够了，下次继续时从队列重新排。
+ */
+private fun MainActivity.pauseCacheBook(u: CacheUsage) {
+    if (DownloadService.runningBookId == u.bookId) {
+        // 服务的取消是整库级的：它会把 queue.json 一起作废。先取一份别的书，
+        // 停完再放回去 —— 否则用户只想停这一本，排好的队列却没了。
+        val rest = DownloadService.queueOf(filesDir).items().filter { it.bookId != u.bookId }
+        DownloadService.cancel(this)
+        toast("已暂停《${u.name}》，下次接着下")
+        thread {
+            // 等服务的 ACTION_CANCEL 落完（它清队列在同一个回调里），再写回剩下的。
+            Thread.sleep(800)
+            if (rest.isNotEmpty()) DownloadService.queueOf(filesDir).enqueue(rest)
+            postAlive(Screen.Cache) { showCache() }
+        }
+        return
+    }
+    DownloadService.queueOf(filesDir).remove(u.bookId)
+    thread {
+        runCatching { jobsStore().writeState(u.bookId, JobState.PAUSED) }
+        postAlive(Screen.Cache) { showCache() }
+    }
+    toast("已暂停《${u.name}》")
+}
+
+/**
+ * 继续一本书：排进队列再叫醒服务。
+ *
+ * 不走单本启动（ACTION_START）—— 那条路会先把队列整个清空，用户排过的书就没了。
+ * 排队则尊重 FIFO：前面那本跑完，服务收尾时自己取队头。
+ */
+private fun MainActivity.resumeCacheBook(u: CacheUsage) {
+    val job = Downloader.restoreLight(jobsStore(), u.bookId)
+    if (job == null || job.chapters.isEmpty()) {
+        toast("读不到这本书的目录，先去书页重新取一次")
+        return
+    }
+    DownloadService.queueOf(filesDir).enqueue(listOf(QueueItem(u.bookId, u.name, u.author)))
+    DownloadService.startQueue(this)
+    if (u.cached >= u.total) toast("《${u.name}》已经下全了") else toast("《${u.name}》已排进下载队列")
+    showCache()
 }
 
 /**
@@ -357,23 +420,7 @@ private fun MainActivity.cacheChapterWindow(col: LinearLayout, u: CacheUsage) {
     for (i in start..end) {
         val ch = job.chapters[i]
         val done = ch.itemId in cached
-        val failed = job.statuses[i] == ChapterStatus.FAILED
-        val mark = when {
-            done -> "✓"
-            failed -> "✗"
-            ch.locked -> "🔒"
-            else -> null
-        }
-        val color = when {
-            done -> Md3.primary
-            failed -> Md3.error
-            else -> Md3.onSurfaceVariant
-        }
-        col.addView(Widgets.chapterItem(
-            ctx = this, index = i + 1, title = ch.title,
-            status = mark, statusColor = color,
-            onClick = { cacheChapterTap(u, i, ch, done) },
-        ))
+        col.addView(cacheChapterRow(u, i, ch, job.statuses[i], done))
     }
     if (end < last) {
         col.addView(Widgets.button(this, "↓ 后面还有 ${last - end} 章", "text") {
@@ -415,18 +462,67 @@ private fun MainActivity.cacheChapterWindow(col: LinearLayout, u: CacheUsage) {
 }
 
 /**
- * 点一行章：直接做，不再过一层菜单。
+ * 一行章，照 legado `BookCacheChapterRow`：左边章名 + 状态（下载中再加一条进度条），
+ * 右边固定位置的三颗键 —— 停止 / 下载 / 删除。
  *
- * 上一版点行先弹单项菜单（「下载本章」/「删除本章正文」），菜单里只有一条，
- * 多一步不说，弹窗本身不现形时表现就是「章节点不动」。现在点未缓存章就下发下载，
- * 点已缓存章才弹删除确认 —— 两个动作都有 toast 或确认框回报。
+ * 与 legado 一致的两点：停止键与下载键按状态互斥，删除键恒有；
+ * 已缓存的章不再出现下载键，只留删除。
+ *
+ * 章内进度条照 legado 的做法：`downloadProgress` 为空时就画一条空轨道。
+ * 我们的引擎一章一次请求，没有分页进度可报，所以永远是空轨道 —— 它表达的是
+ * 「这一章正在取」，不是一个百分比。
  */
-private fun MainActivity.cacheChapterTap(u: CacheUsage, index: Int, ch: ChapterRef, cached: Boolean) {
-    when {
-        cached -> askDeleteChapter(u, index, ch)
-        ch.locked -> toast("这是付费章，需要登录后才下得了")
-        else -> downloadChapter(u, index)
+private fun MainActivity.cacheChapterRow(
+    u: CacheUsage,
+    index: Int,
+    ch: ChapterRef,
+    status: ChapterStatus?,
+    cached: Boolean,
+): LinearLayout {
+    val running = DownloadService.runningBookId == u.bookId
+    val pausedBook = u.state == JobState.PAUSED || u.state == JobState.CANCELLED
+    val pending = status == null || status == ChapterStatus.PENDING
+    val state = resolveChapterCacheStatus(
+        isDownloading = running && DownloadService.currentChapterIndex == index,
+        isWaiting = running && pending,
+        isPaused = !running && pausedBook && pending,
+        isError = status == ChapterStatus.FAILED,
+        isCached = cached,
+        // 引擎不报章内页码，ProgressLabel 在我们的数据里永不成立；接口留着对齐 legado。
+        hasProgressLabel = false,
+    )
+    val row = Md3.row(this)
+    val h = Md3.dp(this, 4)
+    row.setPadding(Md3.dp(this, 12), h, h, h)
+    val col = Md3.column(this)
+    col.addView(Md3.ellipsize(Md3.text(this, ch.title, Md3.FS_SM, Md3.onSurface, bold = true)))
+    val color = when (state) {
+        ChapterCacheStatus.Error, ChapterCacheStatus.ErrorWaitingRetry -> Md3.error
+        ChapterCacheStatus.Cached -> Md3.primary
+        else -> Md3.onSurfaceVariant
     }
+    // 付费章在书源里取不回正文。legado 没有这个概念，但不说清楚用户会一直点。
+    val label = if (ch.locked && !cached) "需登录" else chapterCacheStatusText(state)
+    col.addView(Md3.ellipsize(Md3.text(this, label, Md3.FS_SM, color)))
+    if (state == ChapterCacheStatus.Downloading || state == ChapterCacheStatus.ProgressLabel) {
+        col.addView(Widgets.progressBar(this, 0f, 3))
+    }
+    row.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+    // 停：这一行在排队或在取。服务一次只跑一本，停这一书就是停这一行。
+    if (state == ChapterCacheStatus.Downloading || state == ChapterCacheStatus.Waiting ||
+        state == ChapterCacheStatus.ErrorWaitingRetry
+    ) {
+        row.addView(cacheIcon("stop", Md3.error, "暂停《${u.name}》的下载") { pauseCacheBook(u) })
+    } else if (!cached && !ch.locked) {
+        // 下载：已暂停或未缓存的章。已缓存的章不再出现这颗键，跟 legado 一致。
+        row.addView(cacheIcon("download", Md3.primary, "下载第 ${index + 1} 章") {
+            downloadChapter(u, index)
+        })
+    }
+    row.addView(cacheIcon("delete", Md3.error, "删除第 ${index + 1} 章正文") {
+        askDeleteChapter(u, index, ch)
+    })
+    return row
 }
 
 /**
