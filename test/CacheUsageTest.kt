@@ -1,4 +1,24 @@
 import com.watchdl.core.BookHit
+import com.watchdl.core.Bookmark
+import com.watchdl.core.markChapterLabel
+import com.watchdl.core.markDeleteMessage
+import com.watchdl.core.markExcerpt
+import com.watchdl.core.markGroupLabel
+import com.watchdl.core.markKey
+import com.watchdl.core.markMatch
+import com.watchdl.core.markMeta
+import com.watchdl.core.markSelectionPrune
+import com.watchdl.core.markSelectionSelectAll
+import com.watchdl.core.markSelectionToggle
+import com.watchdl.core.markShown
+import com.watchdl.core.markSorted
+import com.watchdl.core.markSubtitle
+import com.watchdl.core.markTimeLabel
+import com.watchdl.core.recordClearMessage
+import com.watchdl.core.recordDeleteMessage
+import com.watchdl.core.recordMatch
+import com.watchdl.core.recordSubtitle
+import com.watchdl.core.recordSubtitleText
 import com.watchdl.core.ChapterCacheStatus
 import com.watchdl.core.DownloadQueue
 import com.watchdl.core.JobStore
@@ -528,6 +548,70 @@ fun main() {
         check("状态文件是合法 JSON 片段", replaceStateJson(ReplacePrefs()).startsWith("{\"sort\":"))
         check("坏状态文件退回默认", replaceStateParse("{坏") == ReplacePrefs())
         check("删除文案写明找不回来", replaceDeleteMessage(2).contains("找不回来"))
+    }
+
+    // ── 书签与阅读记录（core/MarksState.kt）──────────────
+    // 书签页与记录页的搜索、排序、多选、文案：两页共用，所以一起断言。
+    run {
+        val now = 1_700_000_000_000L
+        val day = 86_400_000L
+        val bmA = Bookmark("b1", "A书", 3, "第三章 风起", 120, "他抬头看天", now)
+        val bmB = Bookmark("b1", "A书", 9, "", -1, "  第二段\n摘录  ", now - day)
+        val bmC = Bookmark("b2", "B书", 0, "第一章", 0, "无关内容", now - 3 * day)
+        val all = listOf(bmC, bmB, bmA)
+
+        check("章名空退回第 N 章", markChapterLabel(bmB) == "第 10 章")
+        check("章名有就原样", markChapterLabel(bmA) == "第三章 风起")
+        check("摘录压成一行", markExcerpt(bmB) == "第二段 摘录")
+        check("相对时间认到天", markTimeLabel(now, now) == "今天" &&
+            markTimeLabel(now - day, now) == "昨天" &&
+            markTimeLabel(now - 3 * day, now) == "3 天前")
+        check("老于一周给年月日", markTimeLabel(now - 40 * day, now).length == 10)
+        check("没时刻不说今天", markTimeLabel(0L, now) == "时间未知")
+        check("第三行是书名加时间", markMeta(bmA, now) == "《A书》· 今天")
+        check("书名空只给时间",
+            markMeta(Bookmark("x", "", 0, "", 0, "", now), now) == "今天")
+        check("书名章名摘录都算命中", markMatch(bmA, "A书") && markMatch(bmA, "风起") &&
+            markMatch(bmA, "抬头") && !markMatch(bmA, "月票"))
+        check("空搜索全放行", markMatch(bmA, "   "))
+        check("排序按书名再章号",
+            markSorted(all).map { markChapterLabel(it) } == listOf("第三章 风起", "第 10 章", "第一章"))
+        check("筛完仍有顺序", markShown(all, "A书").size == 2 &&
+            markShown(all, "A书")[0].index == 3)
+        check("分组标题搜索态优先", markGroupLabel("", 3) == "全部书签（3）" &&
+            markGroupLabel("月票", 2) == "「月票」2 条")
+        check("顶栏副标题给条数与本数", markSubtitle(all, all, "") == "共 3 条 · 2 本")
+        check("副标题搜索态给命中数", markSubtitle(all, listOf(bmA), "月票") == "「月票」命中 1 条")
+        check("书签键含书与章号", markKey(bmA) != markKey(bmB) && markKey(bmA).endsWith("\u00003"))
+        check("多选选中再点取消", run {
+            val s = linkedSetOf<String>()
+            markSelectionToggle(s, markKey(bmA)) && s.size == 1 &&
+                !markSelectionToggle(s, markKey(bmA))
+        })
+        check("全选再点变全不选", run {
+            val s = linkedSetOf<String>()
+            val keys = all.map { markKey(it) }
+            markSelectionSelectAll(s, keys) && s.size == 3 &&
+                !markSelectionSelectAll(s, keys) && s.isEmpty()
+        })
+        check("消失的选中被清掉", run {
+            val s = linkedSetOf(markKey(bmA), markKey(bmC))
+            markSelectionPrune(s, listOf(markKey(bmC))) && s == setOf(markKey(bmC))
+        })
+        check("一条不剩就没有选中", run {
+            val s = linkedSetOf(markKey(bmA))
+            !markSelectionPrune(s, emptyList())
+        })
+        check("删书签写明找不回来", markDeleteMessage(2).contains("找不回来") &&
+            markDeleteMessage(0).contains("1"))
+        check("记录按书名作者命中", recordMatch("甲书", "老王", "老王") &&
+            recordMatch("甲书", "老王", "甲") && !recordMatch("甲书", "老王", "乙"))
+        check("空搜索放行全部记录", recordMatch("甲书", "", "  "))
+        check("记录副标题带百分比", recordSubtitle(11, 344) == "读至 12/344 章 · 3%")
+        check("总量为零不报百分比", recordSubtitle(0, 0) == "读至 1 章")
+        check("记录副标题写明按最近阅读", recordSubtitleText(3) == "共 3 本 · 按最近阅读排列")
+        check("删记录写明书还在", recordDeleteMessage(2).contains("书和正文都还在"))
+        check("清空记录写明书还在", recordClearMessage().contains("书和正文都还在"))
     }
 
     root.deleteRecursively()
