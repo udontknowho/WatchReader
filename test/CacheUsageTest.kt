@@ -1,3 +1,4 @@
+import com.watchdl.core.BookHit
 import com.watchdl.core.ChapterCacheStatus
 import com.watchdl.core.DownloadQueue
 import com.watchdl.core.JobStore
@@ -15,6 +16,19 @@ import com.watchdl.core.detailShelfAction
 import com.watchdl.core.detailStatParts
 import com.watchdl.core.detailTotalText
 import com.watchdl.core.resolveChapterCacheStatus
+import com.watchdl.core.SEARCH_HISTORY_MAX
+import com.watchdl.core.SEARCH_HISTORY_SHOWN
+import com.watchdl.core.SearchHistoryStore
+import com.watchdl.core.searchHitLine
+import com.watchdl.core.searchHistoryAdd
+import com.watchdl.core.searchHistoryFormat
+import com.watchdl.core.searchHistoryKey
+import com.watchdl.core.searchHistoryParse
+import com.watchdl.core.searchPartialHint
+import com.watchdl.core.searchPreciseHits
+import com.watchdl.core.searchPreciseKeep
+import com.watchdl.core.searchSourceBadge
+import com.watchdl.core.searchSummaryText
 import com.watchdl.core.shelfBadgeText
 import com.watchdl.core.shelfDeleteMessage
 import com.watchdl.core.shelfPruneSelection
@@ -305,6 +319,56 @@ fun main() {
         SourcePrefsStore.file(stateDir).isFile)
     check("从盘里读回同一份", SourcePrefsStore.load(stateDir) == prefs)
     check("目录没文件时给空状态", SourcePrefsStore.load(File(root, "nope")) == SourcePrefs())
+
+    // ── 搜索历史与精准过滤（对齐 legado 搜索屏）──────────────
+    check("历史最新在前", searchHistoryAdd(listOf("旧"), "新") == listOf("新", "旧"))
+    check("重复词顶到最前不重复", searchHistoryAdd(listOf("甲", "乙"), "乙") == listOf("乙", "甲"))
+    check("同一词忽略大小写只留一条", searchHistoryAdd(listOf("abc"), "ABC") == listOf("ABC"))
+    check("空词不入库", searchHistoryAdd(listOf("甲"), "   ") == listOf("甲"))
+    check("两侧空白被切掉", searchHistoryAdd(emptyList(), "  斗破  ") == listOf("斗破"))
+    check("上限 10 条，最旧的被挤掉", run {
+        var h = emptyList<String>()
+        for (i in 1..12) h = searchHistoryAdd(h, "词$i")
+        h.size == SEARCH_HISTORY_MAX && h.first() == "词12" && "词1" !in h
+    })
+    check("菜单一屏 8 条，少于总上限", SEARCH_HISTORY_SHOWN == 8 && SEARCH_HISTORY_SHOWN < SEARCH_HISTORY_MAX)
+    check("读盘跳过空行", searchHistoryParse("甲\n\n  \n乙\n") == listOf("甲", "乙"))
+    check("读盘按上限裁剪", searchHistoryParse((1..15).joinToString("\n") { "w$it" }).size == SEARCH_HISTORY_MAX)
+    check("落盘一行一词", searchHistoryFormat(listOf("甲", "乙")) == "甲\n乙")
+    check("去重键忽略大小写与空白", searchHistoryKey("  AbC ") == "abc")
+    val hitA = BookHit("1", "斗破苍穹", "天蚕土豆", "简介")
+    val hitB = BookHit("2", "武动乾坤", "天蚕土豆", "简介")
+    val hitC = BookHit("3", "Douluo Dalu", "Tang Jia San Shao", "简介")
+    check("精准：书名命中只留一本",
+        searchPreciseHits(listOf(hitA, hitB), "斗破").map { it.name } == listOf("斗破苍穹"))
+    check("精准：作者命中两本", searchPreciseHits(listOf(hitA, hitB), "土豆").size == 2)
+    check("精准：忽略大小写", searchPreciseKeep(hitC, "douluo") &&
+        searchPreciseHits(listOf(hitC), "DOULUO").size == 1)
+    check("精准：空关键词全留", searchPreciseHits(listOf(hitA, hitB, hitC), "").size == 3)
+    check("精准：都不沾就空", searchPreciseHits(listOf(hitA, hitB), "诡秘").isEmpty())
+    check("统计牌带进度", searchSummaryText(12, 9, 15) == "结果 12 · 进度 9/15")
+    check("没进度数据只写条数", searchSummaryText(0, 0, 0) == "结果 0")
+    check("有源没回话才提醒", searchPartialHint(9, 15) == "部分书源未返回，结果可能不完整")
+    check("都回话就不提醒", searchPartialHint(15, 15) == null && searchPartialHint(0, 0) == null)
+    check("第二行作者加最新章",
+        searchHitLine("天蚕土豆", "第 12 章 出发", "源甲") == "天蚕土豆 · 最新: 第 12 章 出发")
+    check("没最新章退回源名", searchHitLine("天蚕土豆", "", "源甲") == "天蚕土豆 · 源甲")
+    check("没作者没源名只剩最新章", searchHitLine("", "第 3 章", "") == "最新: 第 3 章")
+    check("三者都空得空串", searchHitLine("", "", "") == "")
+    check("模板没展开的源名不上屏", searchHitLine("甲", "", "@{site}") == "甲")
+    check("源数只有一本不出牌", searchSourceBadge(1) == null && searchSourceBadge(3) == "3")
+    val hisDir = File(root, "search")
+    check("历史没文件时为空", SearchHistoryStore.load(hisDir).isEmpty())
+    check("落盘再读回一致", run {
+        SearchHistoryStore.save(hisDir, listOf("甲", "乙"))
+        SearchHistoryStore.load(hisDir) == listOf("甲", "乙") &&
+            SearchHistoryStore.file(hisDir)?.name == "history.txt"
+    })
+    check("加一条自动落盘", SearchHistoryStore.add(hisDir, "丙").first() == "丙" &&
+        SearchHistoryStore.load(hisDir).first() == "丙")
+    check("重复搜同一词不涨条数", SearchHistoryStore.add(hisDir, "丙").size == 3)
+    check("清空后读回为空",
+        SearchHistoryStore.clear(hisDir).isEmpty() && SearchHistoryStore.load(hisDir).isEmpty())
 
     root.deleteRecursively()
     println()

@@ -13,11 +13,31 @@ import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
 
 /**
- * 搜索：关键词输入、多源聚合结果、换源翻页（从 MainActivity 原样搬出，行为未改）。
+ * 搜索：关键词输入、多源聚合结果、换源翻页。
  *
- * 窗口状态（HITS_WINDOW / hitsWinStart / seenHits）留在 Activity：
- * 扩展属性不能带初始化器。
+ * 照本地参考仓 `~/ref/legado-novel` 的 `ui/book/search/SearchScreen.kt` 对齐：
+ * 顶栏 ⋮ 菜单（精准搜索 / 搜索历史 / 重搜）、结果统计牌、三层列表项、
+ * 长按看详情、搜索中的停止出口。窗口状态（HITS_WINDOW / hitsWinStart / seenHits）留在 Activity。
  */
+
+/** 搜索屏的界面状态。放文件级是因为它要跨屏活：重放结果屏时统计数字不能丢。 */
+object SearchUi {
+    /** 精准搜索，对应 legado 的 `MatchMode.EXACT`：只留书名或作者含关键词的命中。 */
+    var exact = false
+
+    /** 最近一轮的源进度。重放这一屏时 stat 为 null，靠它把统计牌画对。 */
+    var responded = 0
+    var total = 0
+
+    /** 用户点了「停止搜索」。置上之后已发出的源一律不再上屏。 */
+    var stopped = false
+
+    /** 最近 10 条关键词，最新在前。进屏现读一次，改完立刻回写。 */
+    var history: List<String> = emptyList()
+}
+
+/** 搜索历史目录：`filesDir/search`。真写文件时才建，没搜过就不留空目录。 */
+internal fun MainActivity.searchHistoryDir(): java.io.File = java.io.File(filesDir, "search")
 
 /** ② 搜索结果。 */
 /**
@@ -49,6 +69,13 @@ internal fun MainActivity.showHits(keyword: String, allHits: List<BookHit>, stat
     // 新的一次搜索要把窗口拍回开头：不重置就会停在上次翻到的位置，
     // 用户看到的是「新搜索结果从第 61 条开始」。
     if (!replay) hitsWinStart = 0
+    if (stat != null) {
+        SearchUi.responded = stat.responded
+        SearchUi.total = stat.total
+    }
+    // 历史只记首发那一批：边跑边上屏时每个源回来都会重放这一屏，
+    // 每来一次就写一遍盘，既白写也会把同一词反复顶到最前。
+    if (!replay) SearchUi.history = SearchHistoryStore.add(searchHistoryDir(), keyword)
     //
     // 两层排序：先按匹配度分档，档内**同名书必须相邻** —— 列表里同一本书
     // 现在按源各占一行，分散在各处就失去了「挑个能用的源」的意义。
@@ -57,6 +84,9 @@ internal fun MainActivity.showHits(keyword: String, allHits: List<BookHit>, stat
     val all = allHits.asSequence()
         .filter { it.name.isNotBlank() }
         .filter { replay || hitKey(it) !in seenHits }
+        // 精准搜索：关掉时这一句是恒等变换。开启后命中里都含关键词，
+        // 分档自然落到 0–2 档，所以排序规则不必另写一套。
+        .filter { !SearchUi.exact || searchPreciseKeep(it, keyword) }
         .sortedWith(compareBy<BookHit> { MatchScore.of(it.name, keyword) }.thenBy { it.name.trim() })
         .toList()
     // 记下来，换一批时不再重复显示。
@@ -68,22 +98,35 @@ internal fun MainActivity.showHits(keyword: String, allHits: List<BookHit>, stat
     val sourceCount = all.groupingBy { "${it.name.trim()}\u0001${it.author.trim()}" }.eachCount()
     setScreen(Screen.Hits(keyword, hits, offset, stat?.total ?: 0, all))
     root.removeAllViews()
-    root.addView(Widgets.topBar(this, "搜索结果", onBack = { goBackToPrevious() }))
+    // legado 顶栏三个动作（设置 / 精准搜索 / 筛选范围）。手表只挂一个 ⋮，
+    // 三个动作都进整屏菜单 —— 189dp 宽的栏放第三个图标，标题就只剩四个字。
+    root.addView(Widgets.topBar(this, "搜索结果", subtitle = keyword,
+        onBack = { goBackToPrevious() },
+        trailing = listOf("more" to {
+            searchMenu(keyword) { showHits(keyword, allHits, stat, offset, batch, replay = true) }
+        })))
 
     val body = Widgets.scrollBody(this, crownStep, crownGlide)
     val col = Widgets.contentColumn(body)
 
-    // 多源统计卡：告诉用户跑了几条源、几条没响应。
-    // 不加这行的话，用户不知道「搜索结果少」是源少还是源挂了。
-    if (stat != null) {
-        // 文案长短会决定它是 1 行还是 2 行，下面列表就上下跳 24px（P1-3）。
-        // 手表屏 378px 宽，失败源那段很容易溢出—— 限定单行 + 末尾省略，
-        // 完整数字本来在下方书源页里看得到。
-        val line = Md3.ellipsize(Md3.text(this,
-            "找到 ${hits.size} 本",
-            Md3.FS_SM, Md3.onSurfaceVariant))
-        col.addView(line)
+    // 统计牌（legado 的 `SearchResultCountCard` + `SourceProgressCard`）：
+    // 第一行「结果 N · 进度 done/total」，有源没回话时补第二行。
+    // 原来的「找到 N 本」只有条数，用户看不出「结果少」是源少还是源挂了。
+    val summary = Md3.column(this).apply {
+        background = Md3.bg(Md3.surface3, Md3.R_ITEM.toFloat())
+        setPadding(Md3.dp(this@showHits, Md3.PAD * 0.6), Md3.dp(this@showHits, 6),
+                   Md3.dp(this@showHits, Md3.PAD * 0.6), Md3.dp(this@showHits, 6))
     }
+    summary.addView(Md3.ellipsize(Md3.text(this,
+        searchSummaryText(hits.size, SearchUi.responded, SearchUi.total),
+        Md3.FS_SM, Md3.onSurface)))
+    searchPartialHint(SearchUi.responded, SearchUi.total)?.let { hint ->
+        summary.addView(Md3.ellipsize(Md3.text(this, hint, Md3.FS_SM, Md3.onSurfaceVariant))
+            .apply { alpha = 0.8f })
+    }
+    col.addView(summary, LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+    ).apply { bottomMargin = Md3.dp(this@showHits, Md3.GAP / 2) })
 
     // 换一批源：**固定在滚动区外**，不跟着列表一起滑走。
     // 放列表顶部的话，一往下滑就看不见了 —— 而那正是想换一批的时候。
@@ -101,10 +144,10 @@ internal fun MainActivity.showHits(keyword: String, allHits: List<BookHit>, stat
         // N6：15 个源全挂（断网、DNS 挂了）时，说「换个关键词」是错的建议 ——
         // 用户会去改关键词，而问题在网络。responded 为 0 说明一条源都没回话。
         val msg = when {
-            stat != null && stat.responded == 0 && stat.total > 0 ->
+            SearchUi.responded == 0 && SearchUi.total > 0 ->
                 "所有源都没有响应\n检查网络后再试"
-            stat != null && stat.responded < stat.total ->
-                "没有找到「$keyword」\n${stat.total - stat.responded} 个源没响应，可换一批"
+            SearchUi.responded < SearchUi.total ->
+                "没有找到「$keyword」\n${SearchUi.total - SearchUi.responded} 个源没响应，可换一批"
             else -> "没有找到「$keyword」\n换个关键词试试"
         }
         col.addView(Widgets.emptyState(this, "∅", msg), Md3.lpWeight(1f))
@@ -115,26 +158,8 @@ internal fun MainActivity.showHits(keyword: String, allHits: List<BookHit>, stat
         hitsWinStart = winStart
         val winEnd = (winStart + HITS_WINDOW).coerceAtMost(hits.size)
         for (h in hits.subList(winStart, winEnd)) {
-            // 第二行显示作者 + 来源站名。源名放最后，因为它是用户挑源要看的。
-            val cleanSource = h.sourceName.takeIf { it.isNotBlank() && !it.contains("{{") && !it.contains("@{") }
-            val sub = listOf(h.author.takeIf { it.isNotBlank() }, cleanSource)
-                .filterNotNull().joinToString(" · ")
-            // 同一本书有多个源时标出来，否则用户以为是两本不同的书。
-            val n = sourceCount[hitKey(h)] ?: 1
-            val title = if (n > 1) "${h.name}（$n 源）" else h.name
-            // legado 搜索结果带封面（72 dp）。189 dp 屏上取 40 × 56 dp 占位块，
-            // 颜色按书名哈希，同一本书与书架、详情页同色。
-            val first = h.name.trim().let { if (it.isEmpty()) "书" else it.substring(0, 1) }
-            val cover = Md3.text(this, first, Md3.FS_MD, Md3.onPrimaryContainer, bold = true).apply {
-                gravity = android.view.Gravity.CENTER
-                background = Md3.bg(Md3.nameColor(h.name), Md3.R_GRID.toFloat())
-                minWidth = Md3.dp(this@showHits, 40)
-                minimumHeight = Md3.dp(this@showHits, 56)
-            }
-            col.addView(Widgets.listItem(this, title, sub, twoLine = true, highlight = true,
-                leading = cover) {
-                openHit(h)
-            })
+            // 同一本书多个源时在书名右侧挂一枚数字小牌，否则用户以为是两本不同的书。
+            col.addView(searchHitItem(h, sourceCount[hitKey(h)] ?: 1) { openHit(h) })
         }
         // 翻页条：只在结果超过一窗时才出，否则会让小屏多占两行。
         if (hits.size > HITS_WINDOW) {
@@ -142,7 +167,8 @@ internal fun MainActivity.showHits(keyword: String, allHits: List<BookHit>, stat
                 hitsWinStart = if (winEnd >= hits.size) 0 else winEnd
                 showHits(keyword, allHits, stat, offset, batch, replay = true)
             })
-            nav.contentDescription = "翻到下一百条"
+            // 一窗是 HITS_WINDOW（60）条，不是一百条：说「一百」会让用户以为丢了一半。
+            nav.contentDescription = "翻到下一批，一次 $HITS_WINDOW 条"
             col.addView(nav)
         }
     }
@@ -150,10 +176,10 @@ internal fun MainActivity.showHits(keyword: String, allHits: List<BookHit>, stat
 
     // 换一批源：放在**固定底栏**，列表怎么滑都在。
     if (canRotate) {
-        val next = Widgets.button(this, "换一批（还剩 $remaining 条）", "tonal", {
+        val next = Widgets.button(this, "换一批（还剩 $remaining 条源）", "tonal", {
             rotateSources(hitsScreen)
         })
-        next.contentDescription = "换一批源，还剩 $remaining 条"
+        next.contentDescription = "换一批源，还有 $remaining 条源没搜过"
         next.layoutParams = Md3.lpDp(this, null, Md3.BTN).apply {
             topMargin = Md3.dp(this@showHits, Md3.GAP / 2)
             bottomMargin = Md3.dp(this@showHits, Md3.GAP / 2)
@@ -161,6 +187,141 @@ internal fun MainActivity.showHits(keyword: String, allHits: List<BookHit>, stat
         root.addView(next)
     }
 }
+
+/**
+ * 一条搜索结果，照 legado `SearchBookListItem` 的三层结构。
+ *
+ * 不复用 [Widgets.listItem]：它给的是「标题 + 副标题」两层，
+ * 而这里要「标题行右侧挂源数小牌 + 两行副信息」，压不进那套参数。
+ */
+private fun MainActivity.searchHitItem(h: BookHit, sourceCount: Int, onClick: () -> Unit): LinearLayout {
+    val row = Md3.row(this)
+    // 结果屏沿用 highlight 底色（surface3）+ 水波纹，与其它列表项同一观感。
+    row.background = Md3.ripple(this, Md3.surface3, Md3.R_ITEM.toFloat())
+    row.setPadding(Md3.dp(this, Md3.PAD), Md3.dp(this, 4),
+                   Md3.dp(this, Md3.PAD), Md3.dp(this, 4))
+    row.minimumHeight = Md3.dp(this, Md3.ITEM)
+    row.isClickable = true
+    row.setOnClickListener { onClick() }
+    // legado 长按弹预览层（看详情 / 加入书架）。手表上换成一屏长菜单。
+    row.setOnLongClickListener { showHitMenu(h); true }
+    row.contentDescription = "${h.name}，${h.author}"
+
+    // 封面 40 × 56 dp。legado 给 72 dp（5:7），在这块屏上要占掉四成宽，
+    // 书名就只剩十来个字；比例仍按 5:7 压，与书架、详情页的占位封面同一算法。
+    val first = h.name.trim().let { if (it.isEmpty()) "书" else it.substring(0, 1) }
+    val cover = Md3.text(this, first, Md3.FS_MD, Md3.onPrimaryContainer, bold = true).apply {
+        gravity = Gravity.CENTER
+        background = Md3.bg(Md3.nameColor(h.name), Md3.R_GRID.toFloat())
+    }
+    row.addView(cover, LinearLayout.LayoutParams(Md3.dp(this, 40), Md3.dp(this, 56)).apply {
+        rightMargin = Md3.dp(this@searchHitItem, 7)
+    })
+
+    val col = Md3.column(this)
+    val titleRow = Md3.row(this)
+    titleRow.addView(Md3.ellipsize(Md3.text(this, h.name, Md3.FS_MD, Md3.onSurface)),
+        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+    // 源数小牌：legado 把它画成独立 TextCard，不塞进书名（塞进去书名会被括号吃掉一截）。
+    // 189 dp 上写「3 源」还嫌宽，只留数字，含义交给 contentDescription。
+    searchSourceBadge(sourceCount)?.let { text ->
+        titleRow.addView(Md3.text(this, text, Md3.FS_SM, Md3.onSecondaryContainer).apply {
+            gravity = Gravity.CENTER
+            // 4dp 圆角是 M3 小标签档，比列表卡的 12dp 轻一档，不抢书名。
+            background = Md3.bg(Md3.secondaryContainer, 4f)
+            setPadding(Md3.dp(this@searchHitItem, 4), 0, Md3.dp(this@searchHitItem, 4),
+                       Md3.dp(this@searchHitItem, 1))
+            contentDescription = "$sourceCount 个源"
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { leftMargin = Md3.dp(this@searchHitItem, 4) })
+    }
+    col.addView(titleRow, LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+    // 第二行「作者 · 最新: 章名」，没有最新章就退回源名（见 searchHitLine）。
+    col.addView(Md3.ellipsize(Md3.text(this,
+        searchHitLine(h.author, h.extra, h.sourceName), Md3.FS_SM, Md3.onSurfaceVariant))
+        .apply { alpha = 0.7f }, LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+    // 简介压 1 行。legado 给 2 行，189dp 高的一屏只放得下两张卡就翻不动了，
+    // 压成 1 行后一窗能看到三张半，摘要仍够判断「是不是这本」。
+    val intro = h.abstractText.trim().replace(Regex("\\s+"), " ")
+    if (intro.isNotEmpty()) {
+        col.addView(Md3.ellipsize(Md3.text(this, intro, Md3.FS_SM, Md3.onSurfaceVariant))
+            .apply { alpha = 0.55f }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+    }
+    row.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+    return row
+}
+
+/**
+ * 顶栏 ⋮ 菜单。搜索结果屏与搜索中屏共用。
+ *
+ * [redraw] 在改完状态后重画这一屏：结果屏是重放，搜索中屏什么都不做。
+ */
+private fun MainActivity.searchMenu(keyword: String, redraw: () -> Unit) {
+    val items = mutableListOf<Pair<CharSequence, () -> Unit>>()
+    items += "精准搜索：${if (SearchUi.exact) "开" else "关"}" to {
+        SearchUi.exact = !SearchUi.exact
+        toast(if (SearchUi.exact) "只留书名或作者命中" else "恢复按匹配度排序")
+        redraw()
+    }
+    items += "搜索历史" to { openHistory(keyword) }
+    items += "重新搜索当前词" to { doSearch(keyword) }
+    // 不做「来源分组布局」「内容质量检测」「类型筛选」：189dp 宽上三项都要
+    // 额外一层导航或一列筛选条，落地就是把结果列表挤成半屏。见提交说明。
+    Widgets.longMenuDialog(this, "搜索", items).show()
+}
+
+/** 最近 8 条关键词，点一条就重搜；末项清空历史要二次确认。 */
+private fun MainActivity.openHistory(currentKeyword: String) {
+    val words = SearchUi.history.take(SEARCH_HISTORY_SHOWN)
+    val items = mutableListOf<Pair<CharSequence, () -> Unit>>()
+    for (w in words) items += w to { doSearch(w) }
+    if (words.isEmpty()) {
+        // 空历史也给一行可点的东西：整屏菜单没有任何条目时，
+        // 屏上只剩标题和关闭键，看着像坏了。
+        items += "还没有搜索记录" to { toast("搜过的词会出现在这里") }
+    } else {
+        items += "清空历史" to { confirmClearHistory() }
+    }
+    Widgets.longMenuDialog(this, "搜索历史", items).show()
+}
+
+/** 清空历史：legado 也是二次确认，误点一次就没了太亏。 */
+private fun MainActivity.confirmClearHistory() {
+    Widgets.md3Dialog(this, "清空搜索历史",
+        body = "最近 ${SearchUi.history.size} 条关键词会被删掉，已经搜到的结果不受影响。",
+        confirm = "清空",
+        onConfirm = {
+            SearchUi.history = SearchHistoryStore.clear(searchHistoryDir())
+            toast("已清空搜索历史")
+        }).show()
+}
+
+/** 长按命中项：legado 弹预览层，能看详情也能上架。手表上只留「查看详情」。 */
+private fun MainActivity.showHitMenu(h: BookHit) {
+    val items = mutableListOf<Pair<CharSequence, () -> Unit>>()
+    items += "查看详情" to { openDetailOnly(h) }
+    items += "重新搜索《${h.name}》" to { doSearch(h.name) }
+    // 「加入书架」暂缺：本项目的书架由下载任务驱动（Downloader / JobStore），
+    // 没有「只上架不下载」的入口，造一个会和现有书架过滤打架。见提交说明。
+    Widgets.longMenuDialog(this, h.name, items).show()
+}
+
+/**
+ * 只进详情页，不碰目录。
+ *
+ * [openHit] 是点击入口，本地已有下载时会直接跳目录；长按要看的是书本身。
+ */
+private fun MainActivity.openDetailOnly(h: BookHit) {
+    val src = sourceFor(h)
+    rememberReturn()
+    detailCandidates = siblingsOf(h)
+    showDetail(BookInfo(h.bookId, h.name, h.author, emptyList(), intro = h.abstractText), src)
+}
+
 /** 用手表上的输入对话框要关键词。 */
 internal fun MainActivity.askKeyword() {
     askText("搜索小说", "书名或作者", "请先输入书名") { doSearch(it) }
@@ -240,17 +401,26 @@ internal fun MainActivity.doSearch(keyword: String, offset: Int = 0) {
     // screen 必须同步跟上：进度回调靠它认屏，不换的话还停在上一屏，
     // 回调全被屏守卫丢掉 —— 进度条不动、结果也回不来。
     // 新的一轮搜索要清掉上一轮的「已见过」，否则同名书会被自己的旧记录过滤掉。
-    if (offset == 0) seenHits.clear()
+    if (offset == 0) {
+        seenHits.clear()
+        // 统计牌要跟着这一轮走：不清掉就会显示上一轮的进度。
+        SearchUi.responded = 0
+        SearchUi.total = 0
+    }
+    // 每一轮都是新的：上一轮点过「停止」不能把这一轮的源也挡掉。
+    SearchUi.stopped = false
     setScreen(Screen.Hits(keyword, emptyList(), offset, 0))
     root.removeAllViews()
-    root.addView(Widgets.topBar(this, "搜索中…", onBack = { showShelf() }))
+    root.addView(Widgets.topBar(this, "搜索中…", subtitle = keyword,
+        onBack = { showShelf() },
+        trailing = listOf("more" to { searchMenu(keyword) {} })))
     val body = Widgets.scrollBody(this, crownStep, crownGlide)
     val col = Widgets.contentColumn(body)
     // 进度文本每多一个源就改一次（P1-2）。以前 15~20 秒里只有一个静态的
     // 「正在搜索」，用户分不清是在跑还是卡死了。
     // 不能用 Widgets.emptyState —— 它内部自建 TextView，外面拿不到引用改字。
     val box = Md3.column(this).apply {
-        gravity = android.view.Gravity.CENTER
+        gravity = Gravity.CENTER
         setPadding(Md3.dp(this@doSearch, 12), Md3.dp(this@doSearch, 24),
                    Md3.dp(this@doSearch, 12), Md3.dp(this@doSearch, 24))
     }
@@ -258,7 +428,7 @@ internal fun MainActivity.doSearch(keyword: String, offset: Int = 0) {
         Md3.lpDp(this, null, 32))
     val progress = Md3.text(this, "正在搜索「$keyword」\n已扫 0 个源", Md3.FS_MD, Md3.onSurfaceVariant)
         .apply {
-            gravity = android.view.Gravity.CENTER
+            gravity = Gravity.CENTER
             setPadding(0, Md3.dp(this@doSearch, 10), 0, 0)
         }
     box.addView(progress)
@@ -271,11 +441,33 @@ internal fun MainActivity.doSearch(keyword: String, offset: Int = 0) {
     }
     box.addView(bar)
     box.addView(Md3.text(this, "超过 15 秒可以返回重试", Md3.FS_SM, Md3.onSurfaceVariant).apply {
-        gravity = android.view.Gravity.CENTER
+        gravity = Gravity.CENTER
         setPadding(0, Md3.dp(this@doSearch, 8), 0, 0)
     })
     col.addView(box)
     root.addView(body)
+
+    // 搜索中的出口（legado 底部 FAB「停止」）。189 dp 上不放 FAB：
+    // 圆形按钮盖住列表右下角，这里用一条等宽按钮，位置与结果屏的「换一批」一致。
+    // 停止后同一个位置变成「返回书架」—— 回调已被挡掉，屏上不会再变，
+    // 不留出口的话用户只剩顶栏返回键这一条路。
+    val stop = Widgets.button(this, "停止搜索", "tonal")
+    stop.contentDescription = "停止搜索，已发出的源仍会返回但不再上屏"
+    stop.setOnClickListener {
+        if (SearchUi.stopped) { showShelf(); return@setOnClickListener }
+        SearchUi.stopped = true
+        stop.text = "返回书架"
+        stop.contentDescription = "返回书架"
+        // 进度条停在那里不动会看着像还在跑，换成明确的一句话。
+        bar.isIndeterminate = false
+        progress.text = "已停止，等已发出的源返回"
+        toast("已停止，等已发出的源返回")
+    }
+    stop.layoutParams = Md3.lpDp(this, null, Md3.BTN).apply {
+        topMargin = Md3.dp(this@doSearch, Md3.GAP / 2)
+        bottomMargin = Md3.dp(this@doSearch, Md3.GAP / 2)
+    }
+    root.addView(stop)
 
     val owner: Screen = Screen.Hits(keyword, emptyList(), offset, 0)
     // 边跑边上屏：第一个带回命中的源到达就先显示，不等最慢那个源（实测 15 秒）。
@@ -286,6 +478,8 @@ internal fun MainActivity.doSearch(keyword: String, offset: Int = 0) {
         // offset 让「换一批源」从下一批开始，而不是重跑同一批。
         multi.searchDetailed(keyword, onProgress = { done, total ->
             postAlive(owner) {
+                // 用户点过「停止」：已发出的源还在跑，但它们的结果一律不上屏。
+                if (SearchUi.stopped) return@postAlive
                 progress.text = "正在搜索「$keyword」\n已扫 $done / $total 个源"
                 bar.isIndeterminate = false
                 bar.max = total.coerceAtLeast(1)
@@ -294,6 +488,7 @@ internal fun MainActivity.doSearch(keyword: String, offset: Int = 0) {
         }, offset = offset, onPartial = { fresh, done, total ->
             shown.addAll(fresh)
             postAlive(owner) {
+                if (SearchUi.stopped) return@postAlive
                 // 只在「还停在同一关键词的结果屏」且「列表没被滚动」时重绘。
                 // 用户已经滚下去看别的书时刷屏，比慢更不能忍。
                 val cur = curScreen as? Screen.Hits
@@ -311,6 +506,7 @@ internal fun MainActivity.doSearch(keyword: String, offset: Int = 0) {
             DevLog.log("WatchDL",
                 "搜索「$keyword」：${r.hits.size} 条 / 响应 ${r.responded}/${r.total} 源" +
                 if (r.failed.isEmpty()) "" else "，失败 ${r.failed.size}: ${r.failed.take(5)}")
+            if (SearchUi.stopped) return@onSuccess
             showHits(keyword, r.hits, r, offset)
         }.onFailure { e ->
             toast("搜索失败：${e.message}")
