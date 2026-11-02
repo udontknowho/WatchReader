@@ -1,10 +1,12 @@
 package com.watchdl.ui.my
 
 import android.app.AlertDialog
+import com.watchdl.DownloadService
 import com.watchdl.MainActivity
 import com.watchdl.core.BookInfo
 import com.watchdl.core.CacheUsage
 import com.watchdl.core.Downloader
+import com.watchdl.core.JobState
 import com.watchdl.core.Screen
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
@@ -23,6 +25,28 @@ import kotlin.concurrent.thread
  * 一屏一个按钮把几十本书的正文全删掉，误点的代价太大。
  */
 
+/**
+ * 顶栏副标题：能算准的几个数。
+ *
+ * 「下载中」先看服务端的 [DownloadService.runningBookId]：那本是哪本磁盘读不出，
+ * 但只要有作业在跑就该显一个 1。剩下的按 job.json 的 state 与 FAILED 章数统计。
+ */
+private fun MainActivity.cacheSummary(rows: List<CacheUsage>): String? {
+    if (rows.isEmpty()) return null
+    val running = if (DownloadService.runningBookId != null) 1 else 0
+    val paused = rows.count {
+        (it.state == JobState.PAUSED || it.state == JobState.CANCELLED) && it.cached < it.total
+    }
+    val failed = rows.sumOf { it.failed }
+    val cached = rows.sumOf { it.cached }
+    val parts = ArrayList<String>(4)
+    if (running > 0) parts.add("下 $running 本")
+    if (paused > 0) parts.add("停 $paused 本")
+    if (failed > 0) parts.add("败 $failed 章")
+    if (cached > 0) parts.add("存 $cached 章")
+    return parts.joinToString(" · ").ifBlank { null }
+}
+
 /** 人读字节数。只要 B/KB/MB 三档，为这点格式引第三方库不值得。 */
 internal fun humanBytes(n: Long): String = when {
     n >= 1024L * 1024L -> String.format(Locale.US, "%.1f MB", n / 1024.0 / 1024.0)
@@ -33,12 +57,17 @@ internal fun humanBytes(n: Long): String = when {
 internal fun MainActivity.showCache() {
     setScreen(Screen.Cache)
     root.removeAllViews()
-    root.addView(Widgets.topBar(this, "缓存管理", onBack = { showMy() }))
+    val rows = jobsStore().cacheUsages()
+    // legado 顶栏副标题是「下载中|等待|暂停|失败|已缓存」。没有排队数（服务端不报），
+    // 所以只报能算准的三个数，全为零就不显副标题。
+    root.addView(Widgets.topBar(
+        this, "缓存管理",
+        onBack = { showMy() },
+        subtitle = cacheSummary(rows),
+    ))
 
     val body = Widgets.scrollBody(this, crownStep, crownGlide)
     val col = Widgets.contentColumn(body)
-    // 大占用在前：这一页常用来决定先清谁，排最上面的就是最该看的。
-    val rows = jobsStore().cacheUsages()
 
     if (rows.isEmpty()) {
         col.addView(Widgets.emptyState(this, "download", "还没有下载过书。"))

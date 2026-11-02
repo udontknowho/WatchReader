@@ -26,6 +26,10 @@ data class CacheUsage(
     val cached: Int,
     /** 目录章数。 */
     val total: Int,
+    /** job.json 里标为 FAILED 的章数。下载失败要能被一眼看见，所以单独给出。 */
+    val failed: Int = 0,
+    /** 作业状态。缓存页用它区分「下载中 / 暂停 / 下完」，不看这个就只能猜。 */
+    val state: JobState = JobState.PENDING,
 )
 
 class JobStore(private val root: File) {
@@ -221,8 +225,28 @@ class JobStore(private val root: File) {
                 // 目录缩过水的旧作业里，jsonl 行数可能比目录还多。
                 cached = lines.coerceAtMost(total),
                 total = total,
+                failed = countStatus(raw, "FAILED"),
+                state = runCatching { JobState.valueOf(TinyJson.path(raw, "state") ?: "PENDING") }
+                    .getOrDefault(JobState.PENDING),
             )
         }.sortedByDescending { it.bytes }
+    }
+
+    /**
+     * 数 job.json 里某种章节状态的条数。
+     *
+     * 不走 `TinyJson.objects` 切数组：3000 章会切出 3000 个字符串对象，
+     * 只为数个数太贵。这里是一次线性扫描，字段名格式是 [Downloader.persist] 定死的。
+     */
+    private fun countStatus(raw: String, status: String): Int {
+        val needle = "\"status\":\"$status\""
+        var n = 0
+        var i = raw.indexOf(needle)
+        while (i >= 0) {
+            n++
+            i = raw.indexOf(needle, i + needle.length)
+        }
+        return n
     }
 
     /** 只改 state 字段，其余原样保留。取消下载时用来把 RUNNING 改成 PAUSED。 */

@@ -16,10 +16,14 @@ private fun check(desc: String, cond: Boolean, detail: String = "") {
 }
 
 private fun job(bookId: String, name: String, chapters: Int, status: String) =
-    """{"bookId":"$bookId","name":"$name","author":"人","state":"PAUSED","total":$chapters,""" +
-        """"chapters":[${(0 until chapters).joinToString(",") {
-            """{"itemId":"c$it","title":"第$it 章","locked":false,"status":"$status"}"""
-        }}]}"""
+    jobMixed(bookId, name, List(chapters) { status })
+
+/** 逐章给状态的作业快照。 */
+private fun jobMixed(bookId: String, name: String, statuses: List<String>) =
+    """{"bookId":"$bookId","name":"$name","author":"人","state":"PAUSED","total":${statuses.size},""" +
+        """"chapters":[${statuses.mapIndexed { i, s ->
+            """{"itemId":"c$i","title":"第$i 章","locked":false,"status":"$s"}"""
+        }.joinToString(",")}]}"""
 
 fun main() {
     val root = File(System.getProperty("java.io.tmpdir"), "cacheusage-" + System.nanoTime())
@@ -54,6 +58,12 @@ fun main() {
     check("正文字节是 jsonl 的大小",
         byId["a"]?.bytes == store.chaptersFile("a").length(), byId["a"]?.bytes.toString())
     check("占用大的在前", all.first().bookId == "c", all.map { it.bookId }.toString())
+
+    // 缓存页顶栏要报「失败 N 章」，所以失败章数与作业状态得一并从 job.json 读出来。
+    store.writeJob("d", jobMixed("d", "两败一好", listOf("FAILED", "FAILED", "PENDING")))
+    val d = store.cacheUsages().first { it.bookId == "d" }
+    check("失败章数从 job.json 数出来", d.failed == 2, d.failed.toString())
+    check("作业状态读得到", d.state == com.watchdl.core.JobState.PAUSED, d.state.toString())
 
     root.deleteRecursively()
     println()
