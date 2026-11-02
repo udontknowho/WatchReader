@@ -1,6 +1,8 @@
 package com.watchdl.ui.my
 
 import android.app.AlertDialog
+import android.view.ViewGroup
+import android.widget.LinearLayout
 import com.watchdl.DownloadService
 import com.watchdl.MainActivity
 import com.watchdl.core.BookInfo
@@ -77,22 +79,53 @@ internal fun MainActivity.showCache() {
 
     col.addView(Widgets.sectionLabel(this,
         "共 ${rows.size} 本 · 正文 ${humanBytes(rows.sumOf { it.bytes })}"))
-    for (u in rows) {
-        col.addView(Widgets.listItem(
-            ctx = this,
-            title = u.name,
-            subtitle = "已缓存 ${u.cached}/${u.total} · ${humanBytes(u.bytes)}",
-            // 右角只标这一本能做什么：下完的没什么可点，缺章的给个数。
-            trailing = if (u.cached >= u.total) "已缓存" else "缺 ${u.total - u.cached} 章",
-            onClick = { showCacheBook(u) },
-        ))
-    }
+    for (u in rows) col.addView(cacheCard(u))
     col.addView(Md3.text(this,
         "点一本书可以下载缺失章节，或者清理这本书的正文。\n" +
             "清正文只删本地副本，目录与阅读进度保留，但要联网重下才能离线读；" +
             "书源失效就取不回来。要整库腾空间，去「文件管理」。",
         Md3.FS_SM, Md3.onSurfaceVariant))
     root.addView(body, Md3.lpWeight(1f))
+}
+
+/**
+ * 书卡右边那一条状态词。
+ *
+ * 优先级按「用户此刻最需要知道什么」排：正在下的先说在跑；停下来的说停；
+ * 有失败章的说失败数（比「缺 12 章」更准，缺章里有一部分就是失败）；
+ * 都齐了才说已缓存。
+ */
+private fun cacheStateWord(u: CacheUsage): String = when {
+    DownloadService.runningBookId == u.bookId -> "下载中"
+    (u.state == JobState.PAUSED || u.state == JobState.CANCELLED) && u.cached < u.total -> "暂停"
+    u.failed > 0 -> "失败 ${u.failed} 章"
+    u.cached >= u.total -> "已缓存"
+    else -> "未缓存 ${u.total - u.cached} 章"
+}
+
+/**
+ * 一本书的卡：书名、状态词、线性进度条、已缓存数。
+ *
+ * 照 legado `BookCacheCard` 的元素顺序排。手表屏放不下它那两行按钮，
+ * 动作仍走点卡的菜单 —— 但元素一个不少，看见的数和 legado 一致。
+ */
+private fun MainActivity.cacheCard(u: CacheUsage): LinearLayout {
+    val card = Widgets.card(this, outlined = true)
+    val head = Md3.row(this)
+    head.addView(
+        Md3.ellipsize(Md3.text(this, u.name, Md3.FS_MD, Md3.onSurface, bold = true)),
+        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+    )
+    head.addView(Md3.text(this, cacheStateWord(u), Md3.FS_SM, Md3.primary).apply {
+        setPadding(Md3.dp(this@cacheCard, 6), 0, 0, 0)
+    })
+    card.addView(head)
+    card.addView(Widgets.progressBar(this, if (u.total > 0) u.cached.toFloat() / u.total else 0f))
+    card.addView(Md3.text(this,
+        "已缓存 ${u.cached}/${u.total} · ${humanBytes(u.bytes)}", Md3.FS_SM, Md3.onSurfaceVariant))
+    card.isClickable = true
+    card.setOnClickListener { showCacheBook(u) }
+    return card
 }
 
 /** 单本菜单：下载与清理放在一起，跟 legado 一样成对给。 */
