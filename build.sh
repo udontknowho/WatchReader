@@ -185,7 +185,7 @@ if [ "${1:-}" = "test" ]; then
   run_kotlinc "$OUT/uicheck.jar" $(find "$ROOT/src" -name '*.kt')
   rm -f "$OUT/uicheck.jar"
   echo "== 运行 =="
-  for t in CoreTest ChapterOrderTest CloudSourceTest DownloadTest EngineTest HttpTest P0RegressionTest FinishTest SignTest RankConfigTest RotationTest AsyncGuardTest NavProgressTest JobLockTest com.watchdl.core.RuleBoundaryTest TocBudgetTest TextSelectorTest LegadoDefaultTest DevLogTest JsSyntaxProbeTest Es5CompatTest JsApiSurfaceTest UrlJsTest SearchPartialTest PaletteTest BackAffordanceTest IconDataTest; do
+  for t in CoreTest ChapterOrderTest CloudSourceTest DownloadTest EngineTest HttpTest P0RegressionTest FinishTest SignTest RankConfigTest RotationTest AsyncGuardTest NavProgressTest JobLockTest CacheUsageTest com.watchdl.core.RuleBoundaryTest TocBudgetTest TextSelectorTest LegadoDefaultTest DevLogTest JsSyntaxProbeTest Es5CompatTest JsApiSurfaceTest UrlJsTest SearchPartialTest PaletteTest BackAffordanceTest IconDataTest; do
     echo "--- $t ---"
     CHARSET_JSON="${CHARSET_JSON:-$HOME/novel/sources/fanqie-booksource/charset.json}" \
       SONOVEL_RULES="${SONOVEL_RULES:-$HOME/novel/sonovel/rules/main.json}" \
