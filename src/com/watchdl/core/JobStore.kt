@@ -11,6 +11,23 @@ import java.io.RandomAccessFile
  *
  * 正文以 XHTML 原文落盘，导出时才转纯文本，换格式不用重下。
  */
+/**
+ * 一本书的正文缓存统计，只给缓存管理页看。
+ *
+ * 字段对齐 legado 缓存管理的「已缓存/总章数」：那边按章节缓存文件数算，
+ * 这边按 `chapters.jsonl` 的实际章数算，含义相同。
+ */
+data class CacheUsage(
+    val bookId: String,
+    val name: String,
+    /** 已缓存正文的字节数，即 `chapters.jsonl` 的大小。 */
+    val bytes: Long,
+    /** 磁盘上真有的章数。 */
+    val cached: Int,
+    /** 目录章数。 */
+    val total: Int,
+)
+
 class JobStore(private val root: File) {
 
     /** 目录路径。**不建目录**：读一个不存在的作业不该凭空造出空壳（见 [markDeleted]）。 */
@@ -148,7 +165,11 @@ class JobStore(private val root: File) {
     }
 
     /**
-     * 清掉已下载正文，保留目录与阅读进度（#26）。
+     * 清掉已下载正文，目录与阅读进度留着（#26）。
+     *
+     * 删的是正文副本，**不是书**：目录、进度、书源都还在，重新下载能接上。
+     * 但清完这本书就离线读不了了 —— 点章只能回退联网取，书源失效就取不回。
+     * 所以调用方必须先把这句后果告诉用户，不能当一个无害的「清缓存」处理。
      *
      * 只删 chapters.jsonl、把章节与作业状态改回 PENDING：章节表还在 job.json 里，
      * 重下时能直接用回目录，不用重新取。
@@ -165,6 +186,43 @@ class JobStore(private val root: File) {
                 .replace(Regex("(\"state\"\\s*:\\s*)\"[A-Z]+\""), "$1\"PENDING\"")
             writeJob(bookId, json, isCancelled = { false }, resume = { true })
         }
+    }
+
+    /**
+     * 逐本统计正文缓存，占用大的在前。
+     *
+     * 「已缓存」数按 `chapters.jsonl` 的实际行数算，**不读 job.json 的 status**：
+     * 快照按批写，断电时最后一批 DONE 可能没落盘，状态说已下、磁盘上没有。
+     * 这一页是拿来决定删谁的，宁可少算也不能虚报。
+     *
+     * 只算 job.json 存在的目录：导出目录、空壳目录都不算一本书。
+     */
+    fun cacheUsages(): List<CacheUsage> {
+        val dirs = root.listFiles()
+            ?.filter { it.isDirectory && File(it, "job.json").isFile }
+            ?: return emptyList()
+        return dirs.mapNotNull { dir ->
+            val bookId = readJobId(dir) ?: return@mapNotNull null
+            // 走 readJob：它进同一把文件锁，且主文件不在时会回退读 tmp。
+            val raw = readJob(bookId) ?: return@mapNotNull null
+            val f = chaptersFile(bookId)
+            val lines = runCatching {
+                f.bufferedReader().use { br ->
+                    var n = 0
+                    br.forEachLine { if (it.isNotBlank()) n++ }
+                    n
+                }
+            }.getOrDefault(0)
+            val total = TinyJson.objects(raw, "chapters").size
+            CacheUsage(
+                bookId = bookId,
+                name = TinyJson.path(raw, "name")?.ifBlank { bookId } ?: bookId,
+                bytes = f.length(),
+                // 目录缩过水的旧作业里，jsonl 行数可能比目录还多。
+                cached = lines.coerceAtMost(total),
+                total = total,
+            )
+        }.sortedByDescending { it.bytes }
     }
 
     /** 只改 state 字段，其余原样保留。取消下载时用来把 RUNNING 改成 PAUSED。 */
