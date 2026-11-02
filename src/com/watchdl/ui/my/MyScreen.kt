@@ -50,9 +50,18 @@ internal fun MainActivity.showMy() {
         e("书源管理", "cloud", "新建 · 导入 · 编辑或管理书源") { showSources() }
         // 替换净化（#28）：正文的广告尾巴/求票行靠它对掉，可逐条关。
         e("替换净化", "refresh") { showReplace() }
-        e("TXT 目录规则", "list")
-        e("字典规则", "shelf")
-        e("标签规则", "bookmark")
+        // 剩下三项在 legado 里各自依附一套本应用没有的体系：TXT 目录规则需要本地 TXT 导入、
+        // 字典规则需要选中正文词语、标签规则需要书籍标签。留排位但写明原因 ——
+        // 点了只弹「还没做」会让用户以为在排队实现。
+        e("TXT 目录规则", "list", "需本地 TXT 导入") {
+            toast("本应用没有本地 TXT 导入，这一项用不上")
+        }
+        e("字典规则", "shelf", "需选中正文词语") {
+            toast("手表上没有文字选中，字典查不了词")
+        }
+        e("标签规则", "bookmark", "需书籍标签体系") {
+            toast("本应用没有书籍标签，规则无处可挂")
+        }
     })
 
     col.addView(Widgets.groupCard(this, "其它") { g ->
