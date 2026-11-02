@@ -186,59 +186,55 @@ internal fun MainActivity.askText(
     emptyHint: String?,
     onOk: (String) -> Unit,
 ) {
-    val box = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(Md3.dp(this@askText, 12), Md3.dp(this@askText, 4),
-                   Md3.dp(this@askText, 12), Md3.dp(this@askText, 2))
+    // 空关键词要留在窗里（P1-1）。md3Dialog 的确认键是「先关窗再回调」，
+    // 所以「空就不关」只能重开一次：整套视图放进 open()，每次新建控件。
+    // 复用同一个 EditText 会撞上 "already has a parent"，复用同一个对话框
+    // 又要和 dismiss 抢时序，两条都更容易出怪状态。
+    fun open() {
+        // 平台默认输入框是绿色下划线、绿色按钮、20sp 标题，与 MD3 紫系冲突。
+        // 这里换成自绘圆角输入框，按钮交给 md3Dialog（text 变体 + 主色确认）。
+        val field = EditText(this).apply {
+            hint = hintText
+            setSingleLine()
+            setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, Md3.FS_MD)
+            setHintTextColor(Md3.onSurfaceVariant)
+            setTextColor(Md3.onSurface)
+            background = Md3.bg(Md3.surface4, Md3.dp(this@askText, 8).toFloat())
+            setPadding(Md3.dp(this@askText, 10), 0, Md3.dp(this@askText, 10), 0)
+            // 不再外套一层带 padding 的容器：md3Dialog 已给 16dp，
+            // 高度只要给输入框自身的最小高度。
+            minimumHeight = Md3.dp(this@askText, Md3.BTN + 4)
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+        }
+        input = field
+        val dialog = Widgets.md3Dialog(this, title, content = field,
+            confirm = "确定", dismiss = "取消",
+            onConfirm = {
+                val kw = field.text.toString().trim()
+                // 确认键已经关过窗了，空的时候补一句重开，别让用户白输。
+                if (kw.isEmpty() && emptyHint != null) { toast(emptyHint); open() } else onOk(kw)
+            })
+        // 键盘上的「搜索」不经过对话框按钮，关窗要自己做。
+        field.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH) {
+                val kw = field.text.toString().trim()
+                if (kw.isEmpty() && emptyHint != null) toast(emptyHint)
+                else { dialog.dismiss(); onOk(kw) }
+                true
+            } else false
+        }
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.show()
+        // 手机上自动弹键盘，省一次点击。非主屏（手表/虚拟屏）不弹：
+        // 那里没有键盘，弹出来只会盖住界面 —— 实测在虚拟屏上会把整帧渲染卡住。
+        if ((display?.displayId ?: android.view.Display.DEFAULT_DISPLAY) ==
+            android.view.Display.DEFAULT_DISPLAY) {
+            field.requestFocus()
+            dialog.window?.setSoftInputMode(
+                android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
+        }
     }
-    // 平台默认的输入框是绿色下划线、绿色「取消」、20sp 标题，与 MD3 紫系冲突。
-    // 这里全部换成自绘：圆角底输入框 + 两个自绘按钮，对话框不再挂系统按钮。
-    val dialog = Widgets.styleDialog(android.app.AlertDialog.Builder(this)
-        .setTitle(title)
-        .setView(box)
-        .create())
-    input = EditText(this).apply {
-        hint = hintText
-        setSingleLine()
-        setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, Md3.FS_MD)
-        setHintTextColor(Md3.onSurfaceVariant)
-        setTextColor(Md3.onSurface)
-        background = Md3.bg(Md3.surface4, Md3.dp(this@askText, 8).toFloat())
-        setPadding(Md3.dp(this@askText, 10), 0, Md3.dp(this@askText, 10), 0)
-        imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
-    }
-    box.addView(input, Md3.lpDp(this, null, Md3.BTN + 4))
-
-    fun submit() {
-        val kw = input.text.toString().trim()
-        // 空关键词不关窗（P1-1）：以前直接 dismiss，用户以为自己按错了。
-        if (kw.isEmpty() && emptyHint != null) toast(emptyHint)
-        else { dialog.dismiss(); onOk(kw) }
-    }
-    input.setOnEditorActionListener { _, actionId, _ ->
-        if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH) { submit(); true } else false
-    }
-
-    val row = Md3.row(this)
-    row.setPadding(0, Md3.dp(this@askText, 8), 0, 0)
-    row.addView(Widgets.button(this, "取消", "outline") { dialog.dismiss() },
-        LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f))
-    row.addView(Widgets.button(this, "确定", "filled") { submit() },
-        LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f).apply {
-            leftMargin = Md3.dp(this@askText, Md3.GAP)
-        })
-    box.addView(row)
-
-    dialog.setCanceledOnTouchOutside(true)
-    dialog.show()
-    // 手机上自动弹键盘，省一次点击。非主屏（手表/虚拟屏）不弹：
-    // 那里没有键盘，弹出来只会盖住界面 —— 实测在虚拟屏上会把整帧渲染卡住。
-    if ((display?.displayId ?: android.view.Display.DEFAULT_DISPLAY) ==
-        android.view.Display.DEFAULT_DISPLAY) {
-        input.requestFocus()
-        dialog.window?.setSoftInputMode(
-            android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
-    }
+    open()
 }
 internal fun MainActivity.doSearch(keyword: String, offset: Int = 0) {
     // screen 必须同步跟上：进度回调靠它认屏，不换的话还停在上一屏，

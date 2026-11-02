@@ -1,6 +1,5 @@
 package com.watchdl.ui.my
 
-import android.app.AlertDialog
 import com.watchdl.MainActivity
 import com.watchdl.core.ChapterStatus
 import com.watchdl.core.Downloader
@@ -118,12 +117,12 @@ private fun uniqueExportFile(dir: File, base: String): File {
 
 /** 删的是自己导出的清单，但同目录里可能还躺着别的文件，所以仍要问一次、点明删哪个。 */
 private fun MainActivity.askDeleteExport(f: File) {
-    Widgets.styleDialog(AlertDialog.Builder(this)
-        .setTitle("删除 ${f.name}")
-        .setMessage("会删掉 ${f.name}（${humanBytes(f.length())}）。\n删掉就找不回来。")
-        .setNegativeButton("取消", null)
-        .setPositiveButton("删除") { _, _ -> deleteExportFile(f) }
-        .create()).show()
+    Widgets.md3Dialog(this,
+        title = "删除 ${f.name}",
+        body = "会删掉 ${f.name}（${humanBytes(f.length())}）。\n删掉就找不回来。",
+        confirm = "删除",
+        onConfirm = { deleteExportFile(f) },
+    ).show()
 }
 
 private fun MainActivity.deleteExportFile(f: File) {

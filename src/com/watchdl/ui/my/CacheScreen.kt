@@ -1,6 +1,5 @@
 package com.watchdl.ui.my
 
-import android.app.AlertDialog
 import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
@@ -387,11 +386,11 @@ private fun MainActivity.cacheChapterWindow(col: LinearLayout, u: CacheUsage) {
     val missing = (u.total - u.cached).coerceAtLeast(0)
     if (missing > 0) {
         col.addView(Widgets.button(this,
-            if (missing > 0) "下载缺失章节（$missing 章）" else "已全部缓存", "tonal"
+            if (missing > 0) "下载缺失章节（$missing 章）" else "已全部缓存", "filled"
         ) { downloadMissing(u) })
     }
     if (u.bytes > 0) {
-        col.addView(Widgets.button(this, "清理本书正文（${humanBytes(u.bytes)}）", "outline") {
+        col.addView(Widgets.button(this, "清理本书正文（${humanBytes(u.bytes)}）", "tonal") {
             askClearBook(u)
         })
     }
@@ -444,11 +443,11 @@ private fun MainActivity.downloadChapter(u: CacheUsage, index: Int) {
 
 /** 单章删除的确认。文案与整本清理一致：删的是正文副本，不是目录。 */
 private fun MainActivity.askDeleteChapter(u: CacheUsage, index: Int, ch: ChapterRef) {
-    Widgets.styleDialog(AlertDialog.Builder(this)
-        .setTitle("删除第 ${index + 1} 章正文")
-        .setMessage("只删这一章的本地正文，目录与阅读进度保留；要再读得联网重下。")
-        .setNegativeButton("取消", null)
-        .setPositiveButton("删除") { _, _ ->
+    Widgets.md3Dialog(this,
+        title = "删除第 ${index + 1} 章正文",
+        body = "只删这一章的本地正文，目录与阅读进度保留；要再读得联网重下。",
+        confirm = "删除",
+        onConfirm = {
             thread {
                 val ok = runCatching { jobsStore().deleteChapter(u.bookId, ch.itemId) }.getOrDefault(false)
                 postAlive(Screen.Cache) {
@@ -456,8 +455,8 @@ private fun MainActivity.askDeleteChapter(u: CacheUsage, index: Int, ch: Chapter
                     showCache()
                 }
             }
-        }
-        .create()).show()
+        },
+    ).show()
 }
 
 /**
@@ -490,16 +489,14 @@ private fun MainActivity.askClearBook(u: CacheUsage) {
         toast("《${u.name}》没有缓存正文")
         return
     }
-    Widgets.styleDialog(AlertDialog.Builder(this)
-        .setTitle("清理《${u.name}》正文")
-        .setMessage(
-            "删掉已下载的 ${u.cached} 章正文，约 ${humanBytes(u.bytes)}。\n" +
-                "目录与阅读进度保留，但清完要联网重新下载才能离线读；" +
-                "书源失效就取不回来。"
-        )
-        .setNegativeButton("取消", null)
-        .setPositiveButton("清理") { _, _ -> clearBook(u) }
-        .create()).show()
+    Widgets.md3Dialog(this,
+        title = "清理《${u.name}》正文",
+        body = "删掉已下载的 ${u.cached} 章正文，约 ${humanBytes(u.bytes)}。\n" +
+            "目录与阅读进度保留，但清完要联网重新下载才能离线读；" +
+            "书源失效就取不回来。",
+        confirm = "清理",
+        onConfirm = { clearBook(u) },
+    ).show()
 }
 
 /** 逐本清理。放线程里：要重写一次 job.json，主线程会卡一下。 */

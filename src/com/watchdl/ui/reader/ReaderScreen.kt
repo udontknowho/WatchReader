@@ -260,11 +260,8 @@ private fun MainActivity.showReaderSettings(info: BookInfo, index: Int, text: St
     var curBg = readerBackground
     var refresh: () -> Unit = {}
 
-    val box = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(Md3.dp(this@showReaderSettings, 12), Md3.dp(this@showReaderSettings, 2),
-                   Md3.dp(this@showReaderSettings, 12), 0)
-    }
+    // 内边距全交给 md3Dialog（16dp），这里不再自带 12dp。
+    val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
     val preview = Md3.text(this, "示例正文，看看效果。", Md3.FS_READ, Md3.onSurface).apply {
         setPadding(Md3.dp(this@showReaderSettings, 8), Md3.dp(this@showReaderSettings, 6),
@@ -351,11 +348,9 @@ private fun MainActivity.showReaderSettings(info: BookInfo, index: Int, text: St
         topMargin = Md3.dp(this@showReaderSettings, Md3.GAP / 2)
     })
 
-    val dialog = Widgets.styleDialog(android.app.AlertDialog.Builder(this)
-        .setTitle("阅读设置")
-        .setView(box)
-        .setNegativeButton("完成", null)
-        .create())
+    // 只有「完成」，没有确认动作：改值已经即时落盘（persist），关窗即生效。
+    val dialog = Widgets.md3Dialog(this, "阅读设置", content = box,
+        confirm = null, dismiss = "完成")
     dialog.setOnDismissListener { showReader(info, index, text, src) }
     dialog.show()
 }

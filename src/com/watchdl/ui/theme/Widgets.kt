@@ -224,34 +224,40 @@ object Widgets {
         title: CharSequence?,
         items: List<Pair<CharSequence, () -> Unit>>,
     ): android.app.AlertDialog {
-        val box = Md3.column(ctx).apply { setPadding(0, Md3.dp(ctx, 2), 0, Md3.dp(ctx, 4)) }
+        // 容器与对话框同一套：surface-container-high + 大圆角 + 一层内边距。
+        // 菜单在 M3 里是 4dp 圆角的 surface-container，但同一块屏上
+        // 4dp 和 28dp 两种弹层并存看着是两个应用，这里统一取 R_ITEM。
+        val box = Md3.column(ctx).apply {
+            background = Md3.bg(Md3.surface3, Md3.R_ITEM.toFloat())
+            setPadding(0, Md3.dp(ctx, 6), 0, Md3.dp(ctx, 6))
+        }
         if (!title.isNullOrBlank()) {
             box.addView(Md3.ellipsize(Md3.text(ctx, title, Md3.FS_SM, Md3.onSurfaceVariant)).apply {
-                setPadding(Md3.dp(ctx, 14), Md3.dp(ctx, 6), Md3.dp(ctx, 14), Md3.dp(ctx, 2))
+                setPadding(Md3.dp(ctx, 16), Md3.dp(ctx, 4), Md3.dp(ctx, 16), Md3.dp(ctx, 4))
             })
         }
         var dlg: android.app.AlertDialog? = null
         for ((label, act) in items) {
-            val row = Md3.text(ctx, label, Md3.FS_MD, Md3.onSurface).apply {
+            val row = Md3.ellipsize(Md3.text(ctx, label, Md3.FS_MD, Md3.onSurface)).apply {
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(Md3.dp(ctx, 14), 0, Md3.dp(ctx, 14), 0)
+                setPadding(Md3.dp(ctx, 16), 0, Md3.dp(ctx, 16), 0)
                 background = Md3.ripple(ctx, Color.TRANSPARENT, 0f)
                 isClickable = true
                 setOnClickListener { dlg?.dismiss(); act() }
             }
-            box.addView(row, Md3.lpDp(ctx, null, 40))
+            box.addView(row, Md3.lpDp(ctx, null, 46))
         }
         // 手表没有返回键，菜单必须自带关闭条目。以前只靠“点外部关闭”，
         // 可在 189 dp 宽的屏上菜单几乎占满，两侧剩余几像素，实测点不中，
         // 选完导出就卡在弹窗里。
         box.addView(Md3.text(ctx, "取消", Md3.FS_MD, Md3.onSurfaceVariant).apply {
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(Md3.dp(ctx, 14), 0, Md3.dp(ctx, 14), 0)
+            setPadding(Md3.dp(ctx, 16), 0, Md3.dp(ctx, 16), 0)
             background = Md3.ripple(ctx, Color.TRANSPARENT, 0f)
             isClickable = true
             setOnClickListener { dlg?.dismiss() }
-        }, Md3.lpDp(ctx, null, 36))
-        dlg = android.app.AlertDialog.Builder(ctx).setView(box).create()
+        }, Md3.lpDp(ctx, null, 46))
+        dlg = wrapDialog(ctx, box)
         dlg.setCanceledOnTouchOutside(true)
         return dlg
     }
@@ -317,30 +323,100 @@ object Widgets {
         return dlg
     }
 
+    /** 对话框内边距。M3 规范是 24dp，189dp 屏上取 16 才留得下正文。 */
+    private const val DIALOG_PAD = 16
+
     /**
-     * 把平台对话框的默认配色拉回主题：标题缩小、按钮改紫。
-     * 不改的话「取消」是系统绿，标题是 20sp，与 MD3 紫系冲突。
+     * 把自绘的盒子装进对话框：窗口底透明、宽度按屏宽自己定。
+     *
+     * 平台窗口有 280dp 最小宽（M3 的 mobile 值），这块屏只有 189dp：
+     * 系统会把窗口裁到屏宽，再套一层 24dp 面板内边距，正文只剩 140dp
+     * 还被二次挤压 —— 这就是上一版弹窗「特别丑」的根因。
      */
-    fun styleDialog(dlg: android.app.AlertDialog): android.app.AlertDialog = dlg.apply {
-        setOnShowListener {
-            // 面板底色与圆角：平台默认取主题色（这台 ROM 是偏绿的 #1D211B），
-            // 与应用的 #141218 不同源。这里直接换掉，不等主题。
-            window?.setBackgroundDrawable(Md3.bg(Md3.surface3, 28))
-            // 标题 id 是系统的隐藏资源，只能按名字查。
-            val titleId = context.resources.getIdentifier("alertTitle", "id", "android")
-            if (titleId != 0) findViewById<TextView>(titleId)?.apply {
-                setTextColor(Md3.onSurface)
-                setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, Md3.FS_LG)
-            }
-            for (b in intArrayOf(
-                android.content.DialogInterface.BUTTON_POSITIVE,
-                android.content.DialogInterface.BUTTON_NEGATIVE,
-                android.content.DialogInterface.BUTTON_NEUTRAL,
-            )) getButton(b)?.apply {
-                setTextColor(Md3.primary)
-                minimumHeight = Md3.HIT
+    private fun wrapDialog(ctx: Context, box: View): android.app.AlertDialog {
+        val dlg = android.app.AlertDialog.Builder(ctx).setView(box).create()
+        dlg.setOnShowListener {
+            dlg.window?.apply {
+                setBackgroundDrawable(Md3.bg(Color.TRANSPARENT, 0f))
+                val w = ctx.resources.configuration.screenWidthDp
+                setLayout(
+                    Md3.dp(ctx, (w - 12).coerceAtLeast(160)),
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                )
             }
         }
+        return dlg
+    }
+
+    /**
+     * MD3 基本对话框。
+     *
+     * 规范（m3.material.io/components/dialogs/specs）：容器 28dp 圆角、
+     * 容器色 surface-container-high、四边 24dp 内边距、标题与正文 16dp、
+     * 正文与按钮 24dp、按钮间距 8dp，按钮用 text 变体。这里逐条落地，
+     * 只有内边距按屏宽收到 [DIALOG_PAD] —— 189dp 上照抄 24dp 会把字挤成一条。
+     *
+     * @param content 自定义内容（输入框、滑杆等），插在正文与按钮之间
+     * @param confirm 主操作，null 表示只有关闭
+     */
+    fun md3Dialog(
+        ctx: Context,
+        title: CharSequence,
+        body: CharSequence? = null,
+        content: View? = null,
+        confirm: CharSequence? = null,
+        dismiss: CharSequence? = "取消",
+        onConfirm: (() -> Unit)? = null,
+        onCancel: (() -> Unit)? = null,
+    ): android.app.AlertDialog {
+        val pad = Md3.dp(ctx, DIALOG_PAD)
+        val box = Md3.column(ctx).apply {
+            background = Md3.bg(Md3.surface3, 28f)
+            setPadding(pad, pad, pad, pad)
+        }
+        box.addView(Md3.ellipsize(Md3.text(ctx, title, Md3.FS_LG, Md3.onSurface, bold = true)))
+        if (!body.isNullOrBlank()) {
+            box.addView(Md3.text(ctx, body, Md3.FS_MD, Md3.onSurfaceVariant).apply {
+                setLineSpacing(Md3.dp(ctx, 3).toFloat(), 1f)
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = Md3.dp(ctx, 8) })
+        }
+        if (content != null) {
+            box.addView(content, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = Md3.dp(ctx, 12) })
+        }
+
+        var dlg: android.app.AlertDialog? = null
+        val actions = Md3.row(ctx).apply { gravity = Gravity.END }
+        fun action(label: CharSequence, primary: Boolean, run: () -> Unit) {
+            val b = Md3.text(
+                ctx, label, Md3.FS_MD,
+                if (primary) Md3.primary else Md3.onSurfaceVariant, bold = true,
+            ).apply {
+                gravity = Gravity.CENTER
+                setPadding(Md3.dp(ctx, 12), 0, Md3.dp(ctx, 12), 0)
+                minWidth = Md3.dp(ctx, 56)
+                background = Md3.ripple(ctx, Color.TRANSPARENT, Md3.BTN / 2f)
+                isClickable = true
+                setOnClickListener { dlg?.dismiss(); run() }
+            }
+            actions.addView(b, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, Md3.dp(ctx, Md3.BTN),
+            ).apply { leftMargin = Md3.dp(ctx, 8) })
+        }
+        if (!dismiss.isNullOrBlank()) action(dismiss, false) { onCancel?.invoke() }
+        if (!confirm.isNullOrBlank()) action(confirm, true) { onConfirm?.invoke() }
+        if (actions.childCount > 0) {
+            box.addView(actions, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = Md3.dp(ctx, 12) })
+        }
+
+        dlg = wrapDialog(ctx, box)
+        dlg.setCanceledOnTouchOutside(true)
+        return dlg
     }
 
     /**

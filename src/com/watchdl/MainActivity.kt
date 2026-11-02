@@ -1088,13 +1088,8 @@ class MainActivity : Activity() {
         if (total <= 0) { toast("这本书还没有章节"); return }
         val start = (readProgress(info.bookId) + 1).coerceIn(1, total)
 
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(Md3.dp(this@MainActivity, 12), Md3.dp(this@MainActivity, 2),
-                       Md3.dp(this@MainActivity, 12), Md3.dp(this@MainActivity, 2))
-        }
-        val dialog = Widgets.styleDialog(android.app.AlertDialog.Builder(this)
-            .setTitle("跳到第几章").setView(box).create())
+        // 不再外套一层 12dp padding：md3Dialog 已给 16dp，这里只要一块干净的列。
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
         // 章名跟着选中的章号一起显示：只看数字选章等于闭眼跳。
         val title = Md3.ellipsize(Md3.text(this, "", Md3.FS_SM, Md3.onSurfaceVariant))
@@ -1160,25 +1155,21 @@ class MainActivity : Activity() {
 
         fun go() {
             val idx = (num.text.toString().toIntOrNull() ?: pick).coerceIn(1, total) - 1
-            dialog.dismiss()
             // 先把目录窗口挪到目标章附近：从阅读页返回时直接落在这一页。
             tocWinStart = (idx - TOC_WINDOW / 2).coerceAtLeast(0)
             val ch = info.chapters[idx]
             if (ch.locked) { toast("第 ${idx + 1} 章是付费章，取不到正文"); showToc(info, src) }
             else preview(info, idx)
         }
+        // md3Dialog 的确认键先关窗再回调，跳转不能自己再 dismiss 一次；
+        // 键盘上的「完成」不经过按钮，那里手动关。
+        val dialog = Widgets.md3Dialog(this, "跳到第几章", content = box,
+            confirm = "跳过去", dismiss = "取消", onConfirm = { go() })
         num.setOnEditorActionListener { _, actionId, _ ->
-            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) { go(); true } else false
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
+                dialog.dismiss(); go(); true
+            } else false
         }
-
-        val row = Md3.row(this).apply { setPadding(0, Md3.dp(this@MainActivity, 8), 0, 0) }
-        row.addView(Widgets.button(this, "取消", "outline") { dialog.dismiss() },
-            LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f))
-        row.addView(Widgets.button(this, "跳过去", "filled") { go() },
-            LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f).apply {
-                leftMargin = Md3.dp(this@MainActivity, Md3.GAP)
-            })
-        box.addView(row)
 
         dialog.setCanceledOnTouchOutside(true)
         dialog.show()
@@ -1541,42 +1532,56 @@ class MainActivity : Activity() {
     }
 
     private fun renameJob(job: BookJob) {
-        val box = EditText(this).apply {
-            setSingleLine()
-            hint = "输入书名"
-            setText(job.name)
-            selectAll()
-            setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, Md3.FS_MD)
-            setHintTextColor(Md3.onSurfaceVariant)
-            setTextColor(Md3.onSurface)
-            background = Md3.bg(Md3.surface4, Md3.dp(this@MainActivity, 8).toFloat())
-            setPadding(Md3.dp(this@MainActivity, 10), 0, Md3.dp(this@MainActivity, 10), 0)
+        // 空名校验必须「先校验后关窗」，md3Dialog 的确认键却是先关再回调。
+        // 两条路里选了重开：复用同一个 EditText 会撞 "already has a parent"，
+        // 复用同一个对话框又要和 dismiss 抢时序；重开一个新对话框最稳。
+        // 待改的名字存在 last 里，重开时带回去，用户不用重输。
+        var last = job.name
+        fun open() {
+            val box = EditText(this).apply {
+                setSingleLine()
+                hint = "输入书名"
+                setText(last)
+                selectAll()
+                setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, Md3.FS_MD)
+                setHintTextColor(Md3.onSurfaceVariant)
+                setTextColor(Md3.onSurface)
+                background = Md3.bg(Md3.surface4, Md3.dp(this@MainActivity, 8).toFloat())
+                setPadding(Md3.dp(this@MainActivity, 10), 0, Md3.dp(this@MainActivity, 10), 0)
+                // 不再套一层带 padding 的 LinearLayout：md3Dialog 已给 16dp。
+                minimumHeight = Md3.dp(this@MainActivity, Md3.BTN + 4)
+            }
+            Widgets.md3Dialog(this, "重命名", content = box,
+                confirm = "保存", dismiss = "取消",
+                onConfirm = {
+                    val name = box.text.toString().trim()
+                    if (name.isEmpty()) {
+                        toast("书名不能为空")
+                        last = ""
+                        open()
+                    } else {
+                        val raw = jobsStore().readJob(job.bookId)
+                        if (raw != null) {
+                            val json = raw.replace(
+                                Regex("(\\\"name\\\"\\s*:\\s*)\\\"[^\\\"]*\\\""),
+                                "$1${Downloader.quote(name)}")
+                            jobsStore().writeJob(job.bookId, json)
+                            showShelf()
+                        }
+                    }
+                }).show()
         }
-        val wrap = LinearLayout(this).apply {
-            setPadding(Md3.dp(this@MainActivity, 12), Md3.dp(this@MainActivity, 4),
-                       Md3.dp(this@MainActivity, 12), 0)
-        }
-        wrap.addView(box, Md3.lpDp(this, null, Md3.BTN + 4))
-        Widgets.styleDialog(android.app.AlertDialog.Builder(this).setTitle("重命名")
-            .setView(wrap).setNegativeButton("取消", null)
-            .setPositiveButton("保存") { _, _ ->
-                val name = box.text.toString().trim()
-                if (name.isEmpty()) { toast("书名不能为空"); return@setPositiveButton }
-                val raw = jobsStore().readJob(job.bookId) ?: return@setPositiveButton
-                val json = raw.replace(Regex("(\\\"name\\\"\\s*:\\s*)\\\"[^\\\"]*\\\""), "$1${Downloader.quote(name)}")
-                jobsStore().writeJob(job.bookId, json)
-                showShelf()
-            }.create()).show()
+        open()
     }
 
     private fun confirmDeleteJob(job: BookJob) {
         val label = job.name.ifBlank {
             "未命名 · ${job.total} 章"
         }
-        Widgets.styleDialog(android.app.AlertDialog.Builder(this).setTitle("删除下载")
-            .setMessage("将删除“$label”的全部正文")
-            .setNegativeButton("取消", null)
-            .setPositiveButton("删除") { _, _ ->
+        Widgets.md3Dialog(this, "删除下载",
+            body = "将删除“$label”的全部正文",
+            confirm = "删除",
+            onConfirm = {
                 // 报告 P0-2：先取消再删。以前直接删目录，后台线程还在跑，
                 // 它每章落盘一次就会把目录连同 job.json 一起建回来 —— 书「诈尸」。
                 if (DownloadService.runningBookId == job.bookId) DownloadService.cancel(this)
@@ -1595,7 +1600,7 @@ class MainActivity : Activity() {
                         } else toast("删除失败：目录仍被占用")
                     }
                 }
-            }.create()).show()
+            }).show()
     }
 
     /**

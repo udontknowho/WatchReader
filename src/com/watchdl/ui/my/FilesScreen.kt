@@ -1,6 +1,5 @@
 package com.watchdl.ui.my
 
-import android.app.AlertDialog
 import android.widget.LinearLayout
 import com.watchdl.MainActivity
 import com.watchdl.core.Screen
@@ -96,12 +95,12 @@ private fun MainActivity.askDeleteFile(row: FileRow) {
     val what = if (row.isDir) "${row.name}下的 ${row.count} 个文件" else "文件 ${row.name}"
     // books/ 要额外提醒：作业和进度都在里面，删了不是"腾地方"而是"丢书"。
     val extra = if (row.name == "books/") "\n书架与下载进度都在这，删了要重新搜书下载。" else ""
-    Widgets.styleDialog(AlertDialog.Builder(this)
-        .setTitle("删除 ${row.name}")
-        .setMessage("会删掉$what，共 ${row.bytes} 字节（${humanBytes(row.bytes)}）。${extra}\n删掉就找不回来。")
-        .setNegativeButton("取消", null)
-        .setPositiveButton("删除") { _, _ -> deleteFileRow(row) }
-        .create()).show()
+    Widgets.md3Dialog(this,
+        title = "删除 ${row.name}",
+        body = "会删掉$what，共 ${row.bytes} 字节（${humanBytes(row.bytes)}）。${extra}\n删掉就找不回来。",
+        confirm = "删除",
+        onConfirm = { deleteFileRow(row) },
+    ).show()
 }
 
 /** 落盘删除放后台：books/ 下几百个文件，主线程删会卡住界面。 */

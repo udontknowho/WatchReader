@@ -324,6 +324,11 @@ object Md3 {
         return text(ctx, label, FS_MD, fgColor, bold = true).apply {
             gravity = Gravity.CENTER
             background = ripple(ctx, bgColor, BTN / 2f, stroke)
+            // M3 按钮规范：左右 16dp（text 变体是 12dp，这里统一取大的），
+            // 最小宽 64dp。原来左右零内边距，长标签「下载缺失章节（3735 章）」
+            // 直接顶到圆角边缘 —— 用户判词「那个特别细」的一半来源就是它。
+            setPadding(dp(ctx, 16), 0, dp(ctx, 16), 0)
+            minWidth = dp(ctx, 64)
             // 视觉高度仍是 BTN，热区补到 HIT（原来 34 dp 直接越界）。
             minimumHeight = HIT
             isClickable = onClick != null

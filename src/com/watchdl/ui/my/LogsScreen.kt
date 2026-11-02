@@ -1,6 +1,5 @@
 package com.watchdl.ui.my
 
-import android.app.AlertDialog
 import android.widget.LinearLayout
 import com.watchdl.MainActivity
 import com.watchdl.core.DevLog
@@ -110,14 +109,14 @@ private fun MainActivity.renderLogs(col: LinearLayout, tail: LogTail?) {
 
 /** 清空不可撤销，且会连带清掉内存环（崩溃前那点上下文就没了），所以要问一次。 */
 private fun MainActivity.askClearLog() {
-    Widgets.styleDialog(AlertDialog.Builder(this)
-        .setTitle("清空日志")
-        .setMessage("会清掉 dev.log 与内存里的日志缓冲。\n要留证据先导出再清。")
-        .setNegativeButton("取消", null)
-        .setPositiveButton("清空") { _, _ ->
+    Widgets.md3Dialog(this,
+        title = "清空日志",
+        body = "会清掉 dev.log 与内存里的日志缓冲。\n要留证据先导出再清。",
+        confirm = "清空",
+        onConfirm = {
             DevLog.clear()
             toast("已清空日志")
             showLogs()
-        }
-        .create()).show()
+        },
+    ).show()
 }
