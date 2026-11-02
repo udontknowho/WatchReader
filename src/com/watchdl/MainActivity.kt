@@ -14,6 +14,7 @@ import android.view.ViewGroup
 import android.widget.*
 import com.watchdl.core.*
 import com.watchdl.ui.book.showDetail
+import com.watchdl.ui.book.showSwap
 import com.watchdl.ui.my.showMy
 import com.watchdl.ui.reader.*
 import com.watchdl.ui.search.*
@@ -259,6 +260,7 @@ class MainActivity : Activity() {
             is Screen.Discover -> showDiscover(s.site, s.gender, s.rankKey)
             is Screen.Settings -> showSettings(s.page)
             is Screen.Marks -> showMarks(s.info)
+            is Screen.Swap -> showSwap(s.info, s.src)
             Screen.Shelf -> showShelf()
             is Screen.Detail -> showDetail(s.info, s.src)
             else -> showShelf()
@@ -1806,6 +1808,7 @@ class MainActivity : Activity() {
             is Screen.Discover -> showDiscover(s.site, s.gender, s.rankKey)
             Screen.Shelf -> showShelf()
             is Screen.Marks -> showMarks(s.info)
+            is Screen.Swap -> showSwap(s.info, s.src)
             Screen.My -> showMy()
             is Screen.Detail -> showDetail(s.info, s.src)
         }
@@ -1826,6 +1829,7 @@ class MainActivity : Activity() {
             is Screen.Progress -> showToc(s.info)
             is Screen.Settings -> goBackToPrevious()
             is Screen.Marks -> showToc(s.info)
+            is Screen.Swap -> goBackToPrevious()
             is Screen.Detail -> goBackToPrevious()
         }
     }

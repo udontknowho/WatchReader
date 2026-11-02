@@ -8,6 +8,7 @@ import android.widget.*
 import kotlin.concurrent.thread
 import com.watchdl.MainActivity
 import com.watchdl.core.*
+import com.watchdl.ui.book.showSwap
 import com.watchdl.ui.theme.Icons
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
@@ -87,7 +88,7 @@ internal fun MainActivity.showReader(info: BookInfo, index: Int, text: String, s
     val tools = listOf(
         Triple("menu", "目录") { showToc(info, src) },
         Triple("bookmark", "书签") { showMarks(info) },
-        Triple("swap", "换源") { toast("换源还没做") },
+        Triple("swap", "换源") { rememberReturn(); showSwap(info, src) },
         Triple("settings", "设置") { showReaderSettings(info, index, text, src) },
         Triple("download", "缓存") { startDownload(info) },
         Triple("more", "更多") {

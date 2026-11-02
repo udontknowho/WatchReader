@@ -74,7 +74,7 @@ internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
     val acts = listOf(
         Triple("plus", "放入书架") { startDownload(info) },
         Triple("menu", "查看目录") { detailOpenToc(info, src) },
-        Triple("swap", "换源") { toast("换源还没做，先去「查看目录」换个源") },
+        Triple("swap", "换源") { rememberReturn(); showSwap(info, src) },
         Triple("history", "阅读记录") { showProgress(info) },
     )
     for (pair in acts.chunked(2)) {

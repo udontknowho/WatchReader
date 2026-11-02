@@ -50,6 +50,9 @@ class MultiSource(
     /** 可搜索的源总数（含尚未轮到的那批）。换一批源时用来自增起点。 */
     val searchable: Int get() = pool.size
 
+    /** 全部源（含不参与搜索的）。换源屏要靠它列出「还能从哪些源取这本书」。 */
+    fun allNamed(): List<NamedSource> = pool
+
     /** 兼容 [BookSource] 接口：只要命中列表。 */
     override fun search(keyword: String, page: Int): List<BookHit> = searchDetailed(keyword, page).hits
 

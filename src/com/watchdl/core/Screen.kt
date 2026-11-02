@@ -69,6 +69,12 @@ sealed interface Screen {
     data class Progress(val info: BookInfo) : Screen
     /** 书签列表。带 info 是为了点一条能直接取那一章正文；书签本身每次进屏现读。 */
     data class Marks(val info: BookInfo) : Screen
+    /**
+     * 换源屏。列出「正在用哪个源」与「还能从哪些源取这本书」，选一条就换过去。
+     *
+     * [src] 是当前源，用来标「正在用」；换成功后整屏会换成目录，不会停在原地。
+     */
+    data class Swap(val info: BookInfo, val src: BookSource? = null) : Screen
     /** 「我的」页：规则与其它两组入口，照 legado `ui/main/my`。不带数据，每次进屏现读。 */
     object My : Screen
     /**
@@ -100,6 +106,7 @@ fun screenId(s: Screen?): String = when (s) {
     is Screen.Reader -> "reader:${s.info.bookId}"
     is Screen.Progress -> "progress:${s.info.bookId}"
     is Screen.Marks -> "marks:${s.info.bookId}"
+    is Screen.Swap -> "swap:" + s.info.bookId.ifBlank { s.info.name + s.info.author }
     is Screen.Discover -> "discover:${s.site}:${s.gender}:${s.rankKey}"
     is Screen.Market -> "market:${s.page}"
     // 搜索命中时 bookId 可能为空（个别源不返回），退回书名+作者做身份。
