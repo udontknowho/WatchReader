@@ -17,6 +17,7 @@ import com.watchdl.ui.book.showDetail
 import com.watchdl.ui.book.showSwap
 import com.watchdl.ui.my.showMy
 import com.watchdl.ui.my.showCache
+import com.watchdl.ui.my.showExportList
 import com.watchdl.ui.my.showFiles
 import com.watchdl.ui.my.showReplace
 import com.watchdl.ui.reader.*
@@ -268,6 +269,7 @@ class MainActivity : Activity() {
             Screen.Cache -> showCache()
             Screen.Files -> showFiles()
             Screen.Replace -> showReplace()
+            Screen.ExportList -> showExportList()
             is Screen.Swap -> showSwap(s.info, s.src)
             is Screen.Find -> showFind(s.query, s.hits, s.scanned, s.done)
             Screen.Shelf -> showShelf()
@@ -1823,6 +1825,7 @@ class MainActivity : Activity() {
             Screen.Cache -> showCache()
             Screen.Files -> showFiles()
             Screen.Replace -> showReplace()
+            Screen.ExportList -> showExportList()
             is Screen.Swap -> showSwap(s.info, s.src)
             is Screen.Find -> showFind(s.query, s.hits, s.scanned, s.done)
             Screen.My -> showMy()
@@ -1850,6 +1853,7 @@ class MainActivity : Activity() {
             Screen.Cache -> showMy()
             Screen.Files -> showMy()
             Screen.Replace -> showMy()
+            Screen.ExportList -> showMy()
             is Screen.Swap -> goBackToPrevious()
             is Screen.Find -> showMy()
             is Screen.Detail -> goBackToPrevious()
@@ -1888,7 +1892,7 @@ class MainActivity : Activity() {
     internal fun jobsDir(): File = File(filesDir, "books").apply { mkdirs() }
 
     /** 导出目录。**不能放进 jobsDir** —— 它会被当成一个下载作业。 */
-    private fun exportDir(): File = File(filesDir, "export").apply { mkdirs() }
+    internal fun exportDir(): File = File(filesDir, "export").apply { mkdirs() }
     internal fun jobsStore(): JobStore = JobStore(jobsDir())
 
     /** 首次运行时把 assets 里的字符表与书源复制到私有目录。 */

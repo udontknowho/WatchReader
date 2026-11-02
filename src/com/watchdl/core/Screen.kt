@@ -117,6 +117,13 @@ sealed interface Screen {
      * 不带数据 —— 规则存在 replace.json，每次进屏现读，改完回来不会看到旧值。
      */
     object Replace : Screen
+    /**
+     * 导出书单（#29）：把书架上的书列成一份纯文本清单。
+     *
+     * 不带数据 —— 「最近生成的是哪份」按 export/ 里最新的 `书单-*` 文件现算，
+     * 不另存状态：屏被重建（进程回收、配置变更）后照样能显示对。
+     */
+    object ExportList : Screen
     /** 「我的」页：规则与其它两组入口，照 legado `ui/main/my`。不带数据，每次进屏现读。 */
     object My : Screen
     /**
@@ -153,6 +160,7 @@ fun screenId(s: Screen?): String = when (s) {
     Screen.Cache -> "cache"
     Screen.Files -> "files"
     Screen.Replace -> "replace"
+    Screen.ExportList -> "exportList"
     is Screen.Swap -> "swap:" + s.info.bookId.ifBlank { s.info.name + s.info.author }
     is Screen.Discover -> "discover:${s.site}:${s.gender}:${s.rankKey}"
     is Screen.Market -> "market:${s.page}"
