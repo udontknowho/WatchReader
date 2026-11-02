@@ -1,9 +1,13 @@
 package com.watchdl.ui.my
 
+import android.graphics.Color
+import android.view.Gravity
+import android.view.ViewGroup
 import android.widget.LinearLayout
 import com.watchdl.MainActivity
 import com.watchdl.core.DevLog
 import com.watchdl.core.Screen
+import com.watchdl.ui.theme.Icons
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
 import java.io.File
@@ -78,13 +82,7 @@ private fun MainActivity.renderLogs(col: LinearLayout, tail: LogTail?) {
     val on = devLogOn()
     // 开关状态必须常驻屏上：这一页最容易出现「怎么什么都没有」，
     // 而原因通常就是开关没开，不是没产生日志。
-    col.addView(Widgets.listItem(
-        ctx = this,
-        title = "日志开关：${if (on) "开" else "关"}",
-        subtitle = if (on) "只记本 App，不读系统日志" else "关闭时只打 logcat，不存盘",
-    ))
-    col.addView(Widgets.button(this, if (on) "关闭日志" else "打开日志",
-        if (on) "outline" else "filled") { toggleDevLog() })
+    col.addView(logToggleRow(on))
 
     if (tail == null) {
         col.addView(Widgets.emptyState(this, "history", "还没有日志文件。\n开关打开后产生的日志会显示在这里。"))
@@ -119,4 +117,39 @@ private fun MainActivity.askClearLog() {
             showLogs()
         },
     ).show()
+}
+
+/**
+ * 日志开关行：一行内的勾，点整行切开关。
+ *
+ * 原来是「一行 listItem 说状态」加「一个整宽按钮切开关」两件套，
+ * 首屏先被这 96 dp 吃掉，而这一页的全部价值是下面的日志尾巴。
+ * 写法照书源屏 `sourceRow` 的 30 dp 勾：开=主色，关=压到 0.3 透明。
+ * 勾只做显示，点击交给整行 —— 18 dp 的图形当唯一可点区太难戳中。
+ */
+private fun MainActivity.logToggleRow(on: Boolean): LinearLayout {
+    val row = Md3.row(this)
+    row.minimumHeight = Md3.dp(this, Md3.ITEM)
+    row.setPadding(Md3.dp(this, Md3.PAD * 3 / 4), 0, Md3.dp(this, Md3.PAD / 2), 0)
+    row.background = Md3.ripple(this, Color.TRANSPARENT, Md3.R_ITEM.toFloat())
+
+    val col = Md3.column(this)
+    col.addView(Md3.ellipsize(Md3.text(this, if (on) "日志：开" else "日志：关",
+        Md3.FS_MD, Md3.onSurface)).apply { alpha = if (on) 1f else 0.45f })
+    col.addView(Md3.ellipsize(Md3.text(this,
+        if (on) "只记本 App，不读系统日志" else "关闭时只打 logcat，不存盘",
+        Md3.FS_SM, Md3.onSurfaceVariant)).apply { alpha = if (on) 0.7f else 0.3f })
+    row.addView(col, LinearLayout.LayoutParams(
+        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+    val mark = Icons.view(this, "check", if (on) Md3.primary else Md3.onSurfaceVariant, 16)
+    mark.alpha = if (on) 1f else 0.3f
+    mark.contentDescription = if (on) "已开启" else "已关闭"
+    row.addView(mark, LinearLayout.LayoutParams(
+        Md3.dp(this, 30), Md3.dp(this, Md3.ITEM)).apply { gravity = Gravity.CENTER_VERTICAL })
+
+    row.isClickable = true
+    // toggleDevLog 自己会重画当前屏（日志页 / 设置页各画各的），这里不必再调 showLogs。
+    row.setOnClickListener { toggleDevLog() }
+    return row
 }
