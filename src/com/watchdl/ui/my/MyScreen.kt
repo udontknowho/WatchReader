@@ -67,7 +67,8 @@ internal fun MainActivity.showMy() {
         e("阅读记录", "history") { showRecords() }
         // 缓存管理（#26）：看正文占多少，可一键清正文（保留目录与进度）。
         e("缓存管理", "download") { showCache() }
-        e("文件管理", "grid")
+        // 文件管理（#27）：看私有目录占多少，逐项删。
+        e("文件管理", "grid") { showFiles() }
         e("关于", "more") { showAbout() }
         // 不再放「退出」：手表上直接划掉就结束进程，单独一个按钮反而含义含糊
         // （点了退，后台下载线程还在跑）。要真停下载去作业菜单逐本停。

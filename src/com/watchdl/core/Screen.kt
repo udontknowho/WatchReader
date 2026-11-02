@@ -105,6 +105,12 @@ sealed interface Screen {
      * 不带数据 —— 字节数每次进屏现算；清理完重画本页就是新值。
      */
     object Cache : Screen
+    /**
+     * 文件管理（#27）：私有目录的占用，逐项可删。
+     *
+     * 不带数据 —— 大小每次进屏现算（要递归整棵树，所以放后台），删完重画就是新值。
+     */
+    object Files : Screen
     /** 「我的」页：规则与其它两组入口，照 legado `ui/main/my`。不带数据，每次进屏现读。 */
     object My : Screen
     /**
@@ -139,6 +145,7 @@ fun screenId(s: Screen?): String = when (s) {
     Screen.MarksAll -> "marksAll"
     Screen.Records -> "records"
     Screen.Cache -> "cache"
+    Screen.Files -> "files"
     is Screen.Swap -> "swap:" + s.info.bookId.ifBlank { s.info.name + s.info.author }
     is Screen.Discover -> "discover:${s.site}:${s.gender}:${s.rankKey}"
     is Screen.Market -> "market:${s.page}"
