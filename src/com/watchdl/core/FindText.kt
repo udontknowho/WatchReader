@@ -20,6 +20,8 @@ object FindText {
         val title: String,
         val excerpt: String,
         val at: Int = 0,
+        /** 本书总章数。屏上那张百分比牌要用它，总量为 0 时不给牌。 */
+        val total: Int = 0,
     )
 
     /** 单本书最多出几条。一本书命中几百条会把别的书全挤出去。 */
@@ -59,13 +61,15 @@ object FindText {
     fun scan(
         store: JobStore,
         query: String,
+        useRegex: Boolean = false,
         limit: Int = LIMIT,
         perBook: Int = PER_BOOK,
-        onBook: (scanned: Int, name: String) -> Unit = { _, _ -> },
+        onBook: (scanned: Int, name: String, partial: List<Hit>) -> Unit = { _, _, _ -> },
         cancelled: () -> Boolean = { false },
     ): List<Hit> {
         val q = query.trim()
         if (q.isEmpty()) return emptyList()
+        val match = findMatcher(q, useRegex)
         val out = ArrayList<Hit>()
         var scanned = 0
         for (bookId in store.listBooks()) {
@@ -87,8 +91,10 @@ object FindText {
                         val index = idxOf[id] ?: continue
                         if (!seen.add(id)) continue
                         val content = TinyJson.path(line, "content") ?: continue
-                        for (h in ReaderFind.inText(plain(content), q, PER_CHAPTER)) {
-                            found.add(Hit(bookId, job.name, index, job.chapters[index].title, h.excerpt, h.start))
+                        val paras = paragraphHits(plain(content), match, PER_CHAPTER, EXCERPT_CONTEXT)
+                        for ((at, text) in paras) {
+                            found.add(Hit(bookId, job.name, index, job.chapters[index].title,
+                                text, at, job.chapters.size))
                         }
                     }
                 }
@@ -96,8 +102,57 @@ object FindText {
             // 章号排序：jsonl 按下载顺序写，续传或重下会让顺序乱掉。
             out.addAll(found.sortedBy { it.index }.take(perBook))
             scanned++
-            onBook(scanned, job.name)
+            // 交出去的是快照：用户点「停止扫描」时屏要立刻铺已扫到的部分，
+            // 而快照是不变列表，跨线程读不会撞上正在追写的 ArrayList。
+            onBook(scanned, job.name, out.toList())
         }
         return out
     }
+
+    /**
+     * 一段正文里按段落找。一段只出一条：同段命中五次，列表里五行一样是噪音。
+     *
+     * 不用 [ReaderFind.inText]：那个只认字面词，这里要能走正则。
+     * 返回值是「章内偏移 to 摘录」，偏移用来点进章节。
+     */
+    private fun paragraphHits(
+        text: String,
+        match: (String) -> List<IntRange>,
+        limit: Int,
+        context: Int,
+    ): List<Pair<Int, String>> {
+        if (text.isEmpty()) return emptyList()
+        val out = ArrayList<Pair<Int, String>>(limit)
+        var start = 0
+        while (start <= text.length) {
+            val nl = text.indexOf('\n', start)
+            val end = if (nl < 0) text.length else nl
+            val para = text.substring(start, end)
+            val ranges = match(para)
+            if (ranges.isNotEmpty()) {
+                out.add((start + ranges[0].first) to excerpt(para, ranges[0], context))
+                if (out.size >= limit) return out
+            }
+            if (nl < 0) break
+            start = nl + 1
+        }
+        return out
+    }
+
+    /**
+     * 摘录：命中处左右各留 [context] 字，两端补省略号。
+     *
+     * 12 字是 189 dp 卡上两行的宽度；留太多会被 `maxLines` 截掉，
+     * 命中词反而被挤到看不见的位置。
+     */
+    private fun excerpt(para: String, r: IntRange, context: Int): String {
+        val from = maxOf(0, r.first - context)
+        val to = minOf(para.length, r.last + 1 + context)
+        val head = if (from > 0) "…" else ""
+        val tail = if (to < para.length) "…" else ""
+        return head + para.substring(from, to).replace(Regex("\\s+"), " ").trim() + tail
+    }
+
+    /** 摘录在命中词两侧留几个字。 */
+    private const val EXCERPT_CONTEXT = 12
 }

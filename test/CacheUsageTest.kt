@@ -1,4 +1,8 @@
 import com.watchdl.core.BookHit
+import com.watchdl.core.FindSeg
+import com.watchdl.core.findHighlight
+import com.watchdl.core.findMatcher
+import com.watchdl.core.findRegexUsable
 import com.watchdl.core.Bookmark
 import com.watchdl.core.markChapterLabel
 import com.watchdl.core.markDeleteMessage
@@ -612,6 +616,27 @@ fun main() {
         check("记录副标题写明按最近阅读", recordSubtitleText(3) == "共 3 本 · 按最近阅读排列")
         check("删记录写明书还在", recordDeleteMessage(2).contains("书和正文都还在"))
         check("清空记录写明书还在", recordClearMessage().contains("书和正文都还在"))
+        check("字面匹配不分大小写", findMatcher("Abc", false)("xABCy") == listOf(1..3))
+        check("字面匹配找全每一处", findMatcher("a", false)("a|a|a").size == 3)
+        check("空关键词不命中", findMatcher("  ", false)("任何文字").isEmpty())
+        check("正则能命中多段", findMatcher("第\\d+章", true)("第1章与第22章") ==
+            listOf(0..2, 4..7))
+        check("正则不成立退回字面", findMatcher("([", true)("字面([") == listOf(2..3))
+        check("正则可用性判得准", findRegexUsable("第\\d+章") && !findRegexUsable("(["))
+        check("零宽正则不卡死", runCatching { findMatcher("^|\\b", true)("abc") }.isSuccess)
+        check("高亮切出命中段", run {
+            val segs = findHighlight("前言关键词后语", listOf(2..4))
+            segs.size == 3 && segs[1].text == "关键词" && segs[1].hit &&
+                !segs[0].hit && segs[0].text == "前言"
+        })
+        check("高亮合并重叠区间", run {
+            val segs = findHighlight("abcdef", listOf(1..3, 2..4))
+            segs.joinToString("") { it.text } == "abcdef" &&
+                segs.count { it.hit } == 1 && segs.first { it.hit }.text == "bcde"
+        })
+        check("高亮丢掉越界区间", findHighlight("abc", listOf(2..9)).none { it.hit })
+        check("没有命中就是整段", findHighlight("abc", emptyList()) == listOf(FindSeg("abc", false)))
+        check("空文字没有分段", findHighlight("", listOf(0..1)).isEmpty())
     }
 
     root.deleteRecursively()
