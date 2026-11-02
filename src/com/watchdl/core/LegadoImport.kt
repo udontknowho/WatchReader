@@ -243,6 +243,9 @@ object LegadoImport {
         if (siteHeader == null) return Imported(name, null, "请求头用脚本（HMac/random 等）")
         // URL 选项里的 headers 优先（更具体），站点 header 兜底
         val mergedHeaders = siteHeader + searchOpts.headers
+        // 手表端没有 WebView：legado 用后台 WebView 绕反爬的源这里必然跑不通，
+        // 导入时就标出来，不让用户在搜索页白等一个恒空的源。
+        if (searchOpts.webView) issues += "搜索页需WebView调用"
 
         val rule = BookSourceRule(
             name = name,
@@ -253,6 +256,7 @@ object LegadoImport {
                         else if (searchUrlJs) FieldRule.jsCodeOf(searchUrlRaw2) else null,
                 method = searchOpts.method,
                 body = searchOpts.body,
+                charset = searchOpts.charset,
                 headers = mergedHeaders,
                 list = if (FieldRule.jsCodeOf(listSel) != null) FieldRule(listSel)
                        else if (jsonSourced) FieldRule("@json:" + normaliseJsonPath(stripLegadoNoise(listSel)))
@@ -367,6 +371,18 @@ object LegadoImport {
         val method: String = "GET",
         val body: String? = null,
         val headers: Map<String, String> = emptyMap(),
+        /**
+         * 请求侧字符集（legado `UrlOption.charset`）。空串 = 未指定。
+         *
+         * 780 条源里 58 条写了它，基本都是 `gbk` / `gb2312`：
+         * 这类站的搜索词必须按 GBK 百分号编码，发 UTF-8 字节过去只会搜不到。
+         */
+        val charset: String = "",
+        /**
+         * legado 用后台 WebView 绕反爬（36 条源）。手表端没有 WebView，
+         * 这类源必然跑不通，导入时标出来，别静默失败。
+         */
+        val webView: Boolean = false,
     )
 
     /**
@@ -391,6 +407,8 @@ object LegadoImport {
             method = unquote(opts["method"]?.toString() ?: "GET").uppercase().ifBlank { "GET" },
             body = opts["body"]?.toString()?.let { unquote(it) },
             headers = headers,
+            charset = unquote(opts["charset"]?.toString() ?: "").trim(),
+            webView = opts["webView"]?.toString()?.lowercase() == "true",
         )
     }
 

@@ -30,9 +30,13 @@ class SourceEngine(
         // 关键词进 URL 必须编码：中文直接塞进去，Java 构造 URL 时看着能过，
         // 但 openConnection 会报 `Illegal character in URL`。实测 780 条源里
         // 有多条因此失败。
+        //
+        // 编码用的字符集跟书源走：58 条源声明了 `gbk`/`gb2312`，
+        // 按 UTF-8 发过去服务端解出来是乱码，搜索恒为空。
+        val cs = rule.search.charset
         val ctx = mapOf(
-            "key" to urlEncode(keyword),
-            "keyword" to urlEncode(keyword),
+            "key" to urlEncode(keyword, cs),
+            "keyword" to urlEncode(keyword, cs),
             "page" to page.toString(),
         )
         // searchUrl 是脚本时，在请求时算 URL。脚本里常用 key/keyword/page/baseUrl。
@@ -597,6 +601,31 @@ class SourceEngine(
          */
         fun urlEncode(s: String): String =
             java.net.URLEncoder.encode(s, "UTF-8").replace("+", "%20")
+
+        /**
+         * 按书源声明的字符集编码。空 / UTF-8 走原逻辑。
+         *
+         * legado `AnalyzeUrl` 的 `charset` 就是干这个的：58 条源写了 `gbk`/`gb2312`，
+         * 搜索词得按 GBK 出字节，否则服务端按 GBK 解 UTF-8 就是一堆乱码，直接搜不到。
+         */
+        fun urlEncode(s: String, charset: String): String {
+            if (charset.isBlank() || charset.equals("UTF-8", true) || charset.equals("UTF8", true))
+                return urlEncode(s)
+            val enc = runCatching { java.net.URLEncoder.encode(s, charsetOf(charset)) }
+                .getOrElse { urlEncode(s) }
+            return enc.replace("+", "%20")
+        }
+
+        /** 书源写的字符集名 → Java 字符集。认不出的回 UTF-8。 */
+        private fun charsetOf(name: String): String {
+            val n = name.trim().uppercase()
+            return when (n) {
+                "GBK", "GB2312", "GB18030", "GB-2312" -> "GBK"
+                "BIG5", "BIG-5" -> "Big5"
+                else -> runCatching { java.nio.charset.Charset.forName(n).name() }
+                    .getOrDefault("UTF-8")
+            }
+        }
 
         /**
          * 只编码 URL 里非 ASCII 的部分，保留已有的 `%XX`、`/`、`?`、`&`、`=` 等结构字符。

@@ -77,6 +77,27 @@ fun main() {
     check(LegadoSelector.toCss("{{$.id}}") == "{{$.id}}")
     check(LegadoSelector.toCss("https://x/y?bid={{$.id}}") == "https://x/y?bid={{$.id}}")
 
+    // `@@` 转义：宣告「后面是选择器，不是 JS」。源库里 149 处这么写。
+    val card = "<div class='search-card-category'><a href='/k'>玄幻</a></div>"
+    check(FieldRule.parse("{{@@class.search-card-category@tag.a@text}}").eval(card) == listOf("玄幻"))
+    check(FieldRule.parse("{{@css:div a@text}}").eval(card) == listOf("玄幻"))
+    // 内层是 JS 表达式时按 JS 求值（以前整串落进 CSS 解析，恒空）
+    check(FieldRule.parse("{{'玄幻'}}").eval(card) == listOf("玄幻"))
+    // 模板里的 `##` 属于内层规则，不是外层字段的替换
+    check(FieldRule.parse("{{$.a##x##y}}").selector == "{{$.a##x##y}}")
+    check(FieldRule.parse("{{$.a}}##x##y").replace == "##x##y")
+
+    // URL 选项的 charset：58 条源写 gbk/gb2312，搜索词必须按那个编码出字节。
+    val (optUrl, opt) = LegadoImport.parseUrlOptions(
+        "/search,{'method':'POST','body':'kw={{key}}','charset':'gbk'}")
+    check(optUrl == "/search")
+    check(opt.method == "POST")
+    check(opt.charset == "gbk")
+    check(SourceEngine.urlEncode("中", "gbk") == "%D6%D0")
+    check(SourceEngine.urlEncode("中", "GB2312") == "%D6%D0")
+    check(SourceEngine.urlEncode("中", "") == "%E4%B8%AD")
+    check(SourceEngine.urlEncode("中") == "%E4%B8%AD")
+
     // 渲染必须幂等：909 条真实书源规则实测的回归防线
     for (r in listOf("span.2:0@text", "tag.a@href", "-class.lst@tag.li@text",
                      ".field@span.1:2:5@text", "a.0@text&&td.6:4@text##\\[|\\]")) {

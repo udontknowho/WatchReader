@@ -52,8 +52,12 @@ sealed interface RuleNode {
 
             // `@css:` / `@xpath:` / `@json:` 只是标明语法类型，这里摘掉再判断。
             // 不摘会在按 `@` 切路径时把 `css:` 留进选择器，选不到任何东西。
+            // `@@` 是 legado 的转义标记：宣告「后面是选择器，不是 JS/表达式」，
+            // 源库里 149 处 `{{@@class.x@text}}` 靠它把规则和 JS 分开。剥掉即可。
+            if (s.startsWith("@@")) s = s.substring(2).trim()
             val prefix = listOf("@css:", "@xpath:", "@json:").firstOrNull { s.startsWith(it, true) }
             if (prefix != null) s = s.substring(prefix.length).trim()
+            if (s.isEmpty()) return null
 
             // `//meta[@name="description"]/@content` 整段是 XPath，里面的 `@`
             // 是谓词语法，不能参与 `@` 切层或取值后缀判定。

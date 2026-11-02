@@ -41,11 +41,19 @@ data class FieldRule(
         if (selector.startsWith(LegadoImport.TEMPLATE_MARK))
             return listOf(selector.removePrefix(LegadoImport.TEMPLATE_MARK))
 
-        // legado 的 `{{$.a.b}}` 模板字段（作者、分类、字数里很常见，源库里有 106 条）。
-        // 以前原样返回，搜索结果里就出现 `@{{$.author_nickname}}` 这种原文。
-        // 取不到值就给空串——宁可这一格空着，也不把规则语法露给用户。
-        if (selector.contains("{{$")) {
-            val out = expandJsonTemplate(selector, base)
+        // legado 的 `{{…}}` 模板字段。内层分三类：
+        // - `{{@@选择器}}` / `{{@css:…}}` / `{{//xpath}}`：规则，递归求值
+        // - `{{$.a.b}}`：JSONPath
+        // - 其余：JS 表达式（`{{'完结'}}`、`{{source.bookSourceUrl}}`）
+        // 以前只认 `{{$.…}}`，另外两类整串落进 CSS 解析 → 恒空：
+        // 搜索结果里于是出现 `@{{$.author_nickname}}` 这种原文，分类格也空着。
+        // 取不到值就给空串，不把规则语法露给用户。
+        if (BRACE.containsMatchIn(selector)) {
+            if (TPL_DEPTH.get() > 4) return emptyList()
+            TPL_DEPTH.set(TPL_DEPTH.get() + 1)
+            val out = try { expandTemplate(selector, base, jsLib) } finally {
+                TPL_DEPTH.set(TPL_DEPTH.get() - 1)
+            }
             return if (out.isBlank()) emptyList() else listOf(applyReplace(out))
         }
 
@@ -152,19 +160,47 @@ data class FieldRule(
         return if (list) result else result.take(1)
     }
 
-    /** 展开 `{{$.path}}`：按 JSON 路径从响应里取值，替换不掉的整段丢掉。 */
-    private fun expandJsonTemplate(tpl: String, base: String): String {
-        val trimmed = base.trimStart()
-        val isJson = trimmed.startsWith("{") || trimmed.startsWith("[")
+    /**
+     * 展开字段串里的 `{{…}}`。内层是规则就递归求值，是表达式就跑 JS。
+     *
+     * 对应 legado `SourceRule` 的 `evalPattern` + `isRule`：`@`（含 `@@` 转义）/`/`
+     * 开头当规则，`$.`、`$[` 当 JSONPath，其余当 JS。
+     */
+    private fun expandTemplate(tpl: String, base: String, jsLib: String?): String {
         var resolved = false
-        val out = Regex("\\{\\{\\s*\\$(\\.[A-Za-z0-9_.\\[\\]]*)?\\s*\\}\\}").replace(tpl) { m ->
-            val path = m.groupValues[1].removePrefix(".")
-            val v = if (isJson && path.isNotEmpty()) TinyJson.path(base, path) else null
+        val out = BRACE.replace(tpl) { m ->
+            val v = evalBraced(m.groupValues[1].trim(), base, jsLib)
             if (v != null) resolved = true
             v ?: ""
         }
         if (!resolved) return ""
-        return out.replace(Regex("\\{\\{[^}]*\\}\\}"), "").trim().removePrefix("@").trim()
+        return out.replace(BRACE, "").trim().removePrefix("@").trim()
+    }
+
+    /** 求值一个 `{{…}}` 的内层。null 表示没取到。 */
+    private fun evalBraced(inner: String, base: String, jsLib: String?): String? {
+        if (inner.isEmpty()) return null
+        // `@@` 是 legado 的转义：宣告「后面是规则，不是 JS」。剥掉再当规则求值。
+        if (inner.startsWith("@") || inner.startsWith("/")) {
+            val rule = if (inner.startsWith("@@")) inner.substring(2) else inner
+            return FieldRule.parse(rule).eval(base, jsLib = jsLib).joinToString("\n").ifEmpty { null }
+        }
+        if (inner.startsWith("$")) {
+            // `{{$.summary##正则##替换}}`：带 `##` 的先当规则走一遍，替换才落得下来。
+            if (inner.contains("##")) {
+                return FieldRule.parse(inner).eval(base, jsLib = jsLib)
+                    .joinToString("\n").ifEmpty { null }
+            }
+            val head = base.trimStart()
+            val path = inner.removePrefix("$").removePrefix(".").trim()
+            if (path.isEmpty() || !(head.startsWith("{") || head.startsWith("["))) return null
+            return TinyJson.path(base, path)
+        }
+        // 其余当 JS 表达式：`{{'完结'}}`、`{{source.bookSourceUrl}}`。
+        // 不包 `return`：Rhino 的 evaluateString 取的就是补全值，顶层 `return` 是语法错。
+        return runCatching {
+            JsEngine.eval((jsLib ?: "") + "\n" + inner, JsEngine.Env(result = base))
+        }.getOrNull()?.ifEmpty { null }
     }
 
     private fun evalOne(base: String, selectorText: String, jsLib: String? = null): List<String> {
@@ -250,6 +286,12 @@ data class FieldRule(
          */
         const val UNSUPPORTED = "\u0000unsupported"
 
+        /** 一个 `{{…}}`。不要贪婪：同一串里可能连着好几个。 */
+        private val BRACE = Regex("\\{\\{([\\w\\W]*?)\\}\\}")
+
+        /** 模板内嵌规则的递归层数。规则自引用（`{{@@{{…}}}}`）不封顶会栈溢出。 */
+        private val TPL_DEPTH = ThreadLocal.withInitial { 0 }
+
         /**
          * 若这段规则是 JS，取出脚本正文；否则返回 null。
          *
@@ -285,9 +327,27 @@ data class FieldRule(
 
         /** 解析 `选择器##正则##替换` 这种复合写法。`##` 的反斜杠转义要退回为 `\`。 */
         fun parse(raw: String): FieldRule {
-            val i = raw.indexOf("##")
+            val i = indexOfReplace(raw)
             if (i < 0) return FieldRule(raw.trim())
             return FieldRule(raw.substring(0, i).trim(), raw.substring(i))
+        }
+
+        /**
+         * 第一个不在 `{{…}}` 里的 `##`，-1 表示没有。
+         *
+         * `{{$.summary##(^|[。])##$1<br>}}` 的 `##` 属于内层规则，不是本字段的替换；
+         * 按 `indexOf` 切会把模板切成两半，头和尾都不再是合法规则。
+         */
+        private fun indexOfReplace(s: String): Int {
+            var depth = 0
+            var i = 0
+            while (i < s.length - 1) {
+                if (s.startsWith("{{", i)) { depth++; i += 2; continue }
+                if (s.startsWith("}}", i)) { if (depth > 0) depth--; i += 2; continue }
+                if (depth == 0 && s.startsWith("##", i)) return i
+                i++
+            }
+            return -1
         }
 
         /**
