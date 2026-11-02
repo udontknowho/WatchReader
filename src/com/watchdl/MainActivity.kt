@@ -277,7 +277,7 @@ class MainActivity : Activity() {
             Screen.ExportList -> showExportList()
             Screen.Logs -> showLogs()
             is Screen.Swap -> showSwap(s.info, s.src)
-            is Screen.Find -> showFind(s.query, s.hits, s.scanned, s.done)
+            is Screen.Find -> showFind(s.query, s.hits, s.scanned, s.done, s.useRegex)
             Screen.Shelf -> showShelf()
             is Screen.Detail -> showDetail(s.info, s.src)
             else -> showShelf()
@@ -1867,7 +1867,7 @@ class MainActivity : Activity() {
             Screen.ExportList -> showExportList()
             Screen.Logs -> showLogs()
             is Screen.Swap -> showSwap(s.info, s.src)
-            is Screen.Find -> showFind(s.query, s.hits, s.scanned, s.done)
+            is Screen.Find -> showFind(s.query, s.hits, s.scanned, s.done, s.useRegex)
             Screen.My -> showMy()
             is Screen.Detail -> showDetail(s.info, s.src)
         }

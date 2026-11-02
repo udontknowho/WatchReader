@@ -92,6 +92,8 @@ sealed interface Screen {
         val hits: List<FindText.Hit> = emptyList(),
         val scanned: Int = 0,
         val done: Boolean = false,
+        // 正则开关要跟着屏一起重放：返回这一屏时得按原来的匹配方式重新扫。
+        val useRegex: Boolean = false,
     ) : Screen
     /**
      * 阅读记录（#25）：不分书，把所有读过的书按最后阅读时间排一屏。
