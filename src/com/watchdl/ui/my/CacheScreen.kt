@@ -7,6 +7,8 @@ import com.watchdl.DownloadService
 import com.watchdl.MainActivity
 import com.watchdl.core.BookInfo
 import com.watchdl.core.CacheUsage
+import com.watchdl.core.ChapterRef
+import com.watchdl.core.ChapterStatus
 import com.watchdl.core.Downloader
 import com.watchdl.core.JobState
 import com.watchdl.core.Screen
@@ -160,15 +162,15 @@ internal fun MainActivity.showCache() {
     val noBody = shown.filter { it.cached == 0 }
     if (withBody.isNotEmpty()) {
         col.addView(Widgets.sectionLabel(this, "有正文 ${withBody.size} 本"))
-        for (u in withBody) col.addView(cacheCard(u))
+        for (u in withBody) addCacheBook(col, u)
     }
     if (noBody.isNotEmpty()) {
         col.addView(Widgets.sectionLabel(this, "正文已清空 ${noBody.size} 本"))
-        for (u in noBody) col.addView(cacheCard(u))
+        for (u in noBody) addCacheBook(col, u)
     }
     col.addView(Md3.text(this,
-        "点一本书可以下载缺失章节，或者清理这本书的正文。\n" +
-            "清正文只删本地副本，目录与阅读进度保留，但要联网重下才能离线读；" +
+        "点一本书展开章级列表，逐章看状态、删正文。\n" +
+            "删的只是本地正文副本，目录与阅读进度保留，但要联网重下才能离线读；" +
             "书源失效就取不回来。要整库腾空间，去「文件管理」。",
         Md3.FS_SM, Md3.onSurfaceVariant))
     root.addView(body, Md3.lpWeight(1f))
@@ -210,28 +212,137 @@ private fun MainActivity.cacheCard(u: CacheUsage): LinearLayout {
     card.addView(Md3.text(this,
         "已缓存 ${u.cached}/${u.total} · ${humanBytes(u.bytes)}", Md3.FS_SM, Md3.onSurfaceVariant))
     card.isClickable = true
-    card.setOnClickListener { showCacheBook(u) }
+    card.setOnClickListener { toggleCacheBook(u) }
     return card
 }
 
-/** 单本菜单：下载与清理放在一起，跟 legado 一样成对给。 */
-private fun MainActivity.showCacheBook(u: CacheUsage) {
-    val pct = if (u.total > 0) u.cached * 100 / u.total else 0
-    val missing = (u.total - u.cached).coerceAtLeast(0)
-    val items = ArrayList<Pair<CharSequence, () -> Unit>>(2)
-    items.add(
-        (if (missing > 0) "下载缺失章节（$missing 章）" else "已全部缓存") to {
-            downloadMissing(u)
-        }
-    )
-    if (u.bytes > 0) {
-        items.add("清理本书正文（${humanBytes(u.bytes)}）" to { askClearBook(u) })
+/** 一章窗口的行数。手表屏一次只能扫过这么多行，跟目录同做法只画一窗。 */
+private const val CHAPTER_WINDOW = 30
+
+/** 一本书的卡，展开时跟一片章级窗口。 */
+private fun MainActivity.addCacheBook(col: LinearLayout, u: CacheUsage) {
+    col.addView(cacheCard(u))
+    if (CacheUi.open == u.bookId) cacheChapterWindow(col, u)
+}
+
+/**
+ * 展开 / 收起一本书。
+ *
+ * 展开时把窗口直接落到第一个缺章上：一本 3000 章的书点开停在目录头，
+ * 想找缺的那几章得翻一百屏。已下完的书就从第一章开始看。
+ */
+private fun MainActivity.toggleCacheBook(u: CacheUsage) {
+    if (CacheUi.open == u.bookId) {
+        CacheUi.open = null
+        showCache()
+        return
     }
-    Widgets.menuDialog(
-        this,
-        "${u.name} · 已缓存 ${u.cached}/${u.total}（$pct%）",
-        items,
-    ).show()
+    CacheUi.open = u.bookId
+    CacheUi.win = 0
+    val job = Downloader.restoreLight(jobsStore(), u.bookId)
+    if (job != null && job.chapters.isNotEmpty()) {
+        val cached = jobsStore().cachedItemIds(u.bookId)
+        CacheUi.win = job.chapters.indices.firstOrNull {
+            job.chapters[it].itemId !in cached && !job.chapters[it].locked
+        } ?: 0
+    }
+    showCache()
+}
+
+/**
+ * 章级窗口：状态标记 + 单章操作，照 legado 的章行。
+ *
+ * 不新开一屏：加屏要改五处（sealed、screenId、replay、方向重画、返回），
+ * 而这里只需要“在卡片下面接一段”，同屏内联更短。
+ */
+private fun MainActivity.cacheChapterWindow(col: LinearLayout, u: CacheUsage) {
+    val job = Downloader.restoreLight(jobsStore(), u.bookId)
+    if (job == null || job.chapters.isEmpty()) {
+        col.addView(Md3.text(this, "读不到这本书的目录，先去书页重新取一次。", Md3.FS_SM, Md3.onSurfaceVariant))
+        return
+    }
+    val cached = jobsStore().cachedItemIds(u.bookId)
+    val last = job.chapters.lastIndex
+    val start = CacheUi.win.coerceIn(0, last)
+    val end = (start + CHAPTER_WINDOW - 1).coerceAtMost(last)
+    if (start > 0) {
+        col.addView(Widgets.button(this, "↑ 前面还有 $start 章", "text") {
+            CacheUi.win = (start - CHAPTER_WINDOW).coerceAtLeast(0)
+            showCache()
+        })
+    }
+    for (i in start..end) {
+        val ch = job.chapters[i]
+        val done = ch.itemId in cached
+        val failed = job.statuses[i] == ChapterStatus.FAILED
+        val mark = when {
+            done -> "✓"
+            failed -> "✗"
+            ch.locked -> "🔒"
+            else -> null
+        }
+        val color = when {
+            done -> Md3.primary
+            failed -> Md3.error
+            else -> Md3.onSurfaceVariant
+        }
+        col.addView(Widgets.chapterItem(
+            ctx = this, index = i + 1, title = ch.title,
+            status = mark, statusColor = color,
+            onClick = { showCacheChapter(u, i, ch, done) },
+        ))
+    }
+    if (end < last) {
+        col.addView(Widgets.button(this, "↓ 后面还有 ${last - end} 章", "text") {
+            CacheUi.win = end + 1
+            showCache()
+        })
+    }
+    val missing = (u.total - u.cached).coerceAtLeast(0)
+    if (missing > 0) {
+        col.addView(Widgets.button(this,
+            if (missing > 0) "下载缺失章节（$missing 章）" else "已全部缓存", "tonal"
+        ) { downloadMissing(u) })
+    }
+    if (u.bytes > 0) {
+        col.addView(Widgets.button(this, "清理本书正文（${humanBytes(u.bytes)}）", "outline") {
+            askClearBook(u)
+        })
+    }
+    col.addView(Widgets.button(this, "收起", "text") {
+        CacheUi.open = null
+        showCache()
+    })
+}
+
+/** 单章菜单：删除与（C7 的）重下成对给，跟全书一样。 */
+private fun MainActivity.showCacheChapter(u: CacheUsage, index: Int, ch: ChapterRef, cached: Boolean) {
+    val items = ArrayList<Pair<CharSequence, () -> Unit>>(2)
+    if (cached) {
+        items.add("删除本章正文" to { askDeleteChapter(u, index, ch) })
+    } else if (ch.locked) {
+        items.add("本章需登录，不能下载" to { toast("这本的付费章需要登录后才能下") })
+    }
+    if (items.isEmpty()) items.add("这章还没缓存" to { toast("这章还没缓存") })
+    Widgets.menuDialog(this, "第 ${index + 1} 章 · ${ch.title}", items).show()
+}
+
+/** 单章删除的确认。文案与整本清理一致：删的是正文副本，不是目录。 */
+private fun MainActivity.askDeleteChapter(u: CacheUsage, index: Int, ch: ChapterRef) {
+    Widgets.styleDialog(AlertDialog.Builder(this)
+        .setTitle("删除第 ${index + 1} 章正文")
+        .setMessage("只删这一章的本地正文，目录与阅读进度保留；要再读得联网重下。")
+        .setNegativeButton("取消", null)
+        .setPositiveButton("删除") { _, _ ->
+            thread {
+                val ok = runCatching { jobsStore().deleteChapter(u.bookId, ch.itemId) }.getOrDefault(false)
+                postAlive(Screen.Cache) {
+                    toast(if (ok) "已删除本章正文" else "删除失败，这章可能已不在缓存里")
+                    showCache()
+                }
+            }
+        }
+        .create()).show()
 }
 
 /**

@@ -65,6 +65,9 @@ class JobStore(private val root: File) {
     companion object {
         private val locks = java.util.concurrent.ConcurrentHashMap<String, Any>()
 
+        /** 从 chapters.jsonl 的一行里取 itemId。正文里可能有别的 JSON，只认这个键。 */
+        private val ITEM_ID = Regex("\"itemId\"\\s*:\\s*\"([^\"]*)\"")
+
         /** 已删除的作业（P0-2）。进程重启后墓碑自然清空：那时目录早没了，也没线程在写。 */
         private val deleted = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
         /**
@@ -152,6 +155,83 @@ class JobStore(private val root: File) {
                 raf.fd.sync()
             }
         }
+    }
+
+    /**
+     * 已缓存章的 itemId 集合。
+     *
+     * **只取 itemId，不留正文**：3000 章的书正文能到几十 MB，
+     * 缓存页只为画 ✓/✗，不能把整本读进内存（[readChapters] 是整本进内存，别在这用）。
+     */
+    fun cachedItemIds(bookId: String): Set<String> = synchronized(lockFor(bookId)) {
+        val f = chaptersFile(bookId)
+        if (!f.isFile) return@synchronized emptySet()
+        val out = HashSet<String>()
+        // 同样不能抛：并发落盘时文件可能正被改名。
+        runCatching {
+            f.bufferedReader().use { br ->
+                br.forEachLine { line ->
+                    ITEM_ID.find(line)?.groupValues?.get(1)?.let { out.add(it) }
+                }
+            }
+        }
+        out
+    }
+
+    /**
+     * 删一章正文，并把这一章的状态改回 PENDING（C6）。
+     *
+     * 重写 chapters.jsonl 时先写 tmp 再 rename，中途断电不会留下半截正文库。
+     * job.json 只把**这一章**的 status 改掉：先按 `"itemId":"<id>"` 定位，
+     * 再从那里往后找第一个 `"status":"`。不重写整份 json —— 快照里有
+     * 别处刚写的字段（updatedAt、别的章状态），拿旧快照改回去会盖掉它们。
+     * resume 传 true：否则「原状态是 CANCELLED 就保持」那条分支会把 PENDING 打回去。
+     *
+     * 返回是否真的删了一行。
+     */
+    fun deleteChapter(bookId: String, itemId: String): Boolean = synchronized(lockFor(bookId)) {
+        if (bookId in deleted) return@synchronized false
+        val f = chaptersFile(bookId)
+        var removed = false
+        if (f.isFile) {
+            val tmp = File(f.parentFile, "chapters.jsonl.tmp")
+            runCatching {
+                tmp.bufferedWriter().use { w ->
+                    f.bufferedReader().use { r ->
+                        r.forEachLine { line ->
+                            val id = ITEM_ID.find(line)?.groupValues?.get(1)
+                            if (id == itemId) removed = true
+                            else {
+                                w.write(line)
+                                w.write("\n")
+                            }
+                        }
+                    }
+                    w.flush()
+                }
+                if (!tmp.renameTo(f)) {
+                    f.writeText(tmp.readText())
+                    tmp.delete()
+                }
+            }.onFailure { tmp.delete() }
+        }
+        if (removed) pendingChapter(bookId, itemId)
+        removed
+    }
+
+    /** 把某一章的 status 改为 PENDING。找不到就不动。 */
+    private fun pendingChapter(bookId: String, itemId: String) {
+        val raw = readJob(bookId) ?: return
+        val at = raw.indexOf("\"itemId\":" + Downloader.quote(itemId))
+        if (at < 0) return
+        val key = "\"status\":\""
+        val s = raw.indexOf(key, at)
+        if (s < 0) return
+        val begin = s + key.length
+        val end = raw.indexOf('"', begin)
+        if (end <= begin) return
+        val json = raw.substring(0, begin) + "PENDING" + raw.substring(end)
+        writeJob(bookId, json, isCancelled = { false }, resume = { true })
     }
 
     /** 读回已下载的章节：itemId → 正文。坏行跳过，容忍崩溃留下的半截行。 */
