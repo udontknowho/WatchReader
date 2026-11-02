@@ -1,6 +1,7 @@
 package com.watchdl.ui.my
 
 import android.app.AlertDialog
+import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
 import com.watchdl.DownloadService
@@ -261,11 +262,50 @@ private fun MainActivity.cacheCard(u: CacheUsage): LinearLayout {
     })
     card.addView(head)
     card.addView(Widgets.progressBar(this, if (u.total > 0) u.cached.toFloat() / u.total else 0f))
-    card.addView(Md3.text(this,
-        "已缓存 ${u.cached}/${u.total} · ${humanBytes(u.bytes)}", Md3.FS_SM, Md3.onSurfaceVariant))
+    // 末行：已缓存数 + legado 书卡右下角那两个动作键（下载、删除）。
+    // 删除不能藏在菜单里：legado 这一页的删除一直是摆在卡上的图标，
+    // 藏起来用户就会问「删除键呢」。
+    val foot = Md3.row(this)
+    foot.addView(
+        Md3.ellipsize(Md3.text(this,
+            "已缓存 ${u.cached}/${u.total} · ${humanBytes(u.bytes)}", Md3.FS_SM, Md3.onSurfaceVariant)),
+        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+    )
+    foot.addView(cacheIcon(
+        "download",
+        if (u.cached < u.total) Md3.primary else Md3.onSurfaceVariant,
+        "下载《${u.name}》的缺失章节",
+    ) { downloadMissing(u) })
+    foot.addView(cacheIcon(
+        "delete",
+        if (u.bytes > 0) Md3.error else Md3.onSurfaceVariant,
+        "删除《${u.name}》的正文缓存",
+    ) { askClearBook(u) })
+    card.addView(foot)
     card.isClickable = true
     card.setOnClickListener { toggleCacheBook(u) }
     return card
+}
+
+/**
+ * 书卡上的动作图标。
+ *
+ * 热区 32dp 而不是 48dp：189dp 宽的卡里再放两个 48dp，书名就只剩一半。
+ * legado 手机上这两个图标也是紧凑排布的。
+ */
+private fun MainActivity.cacheIcon(
+    glyph: String,
+    tint: Int,
+    desc: String,
+    onClick: () -> Unit,
+): View {
+    val v = Md3.iconButton(this, glyph, onClick, desc)
+    Widgets.tintSubtree(v, tint)
+    v.minimumWidth = 0
+    v.minimumHeight = 0
+    v.setPadding(Md3.dp(this, 4), 0, Md3.dp(this, 4), 0)
+    v.layoutParams = LinearLayout.LayoutParams(Md3.dp(this, 32), Md3.dp(this, 26))
+    return v
 }
 
 /** 一章窗口的行数。手表屏一次只能扫过这么多行，跟目录同做法只画一窗。 */
@@ -450,6 +490,10 @@ private fun MainActivity.downloadMissing(u: CacheUsage) {
  * 用户按那句话操作，得到的是废书。
  */
 private fun MainActivity.askClearBook(u: CacheUsage) {
+    if (u.bytes <= 0 || u.cached <= 0) {
+        toast("《${u.name}》没有缓存正文")
+        return
+    }
     Widgets.styleDialog(AlertDialog.Builder(this)
         .setTitle("清理《${u.name}》正文")
         .setMessage(
