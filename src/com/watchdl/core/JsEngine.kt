@@ -44,8 +44,8 @@ object JsEngine {
 
     /** 一次执行注入的上下文变量（名字对齐 legado，脚本才不用改）。 */
     data class Env(
-        /** 上一步的结果（legado 的 `result`）。 */
-        val result: String = "",
+        /** 上一步的结果（legado 的 `result`）。`java.setContent()` 会改写它。 */
+        var result: String = "",
         /** 当前页 URL（`baseUrl`）。 */
         val baseUrl: String = "",
         /** 书籍信息（`book` 的字段）。 */
@@ -163,8 +163,7 @@ object JsEngine {
      * 不设的话脚本能直接 `java.lang.Runtime.getRuntime().exec(...)`。
      */
     private fun installApi(cx: Context, scope: Scriptable, env: Env) {
-        cx.setClassShutter(ClassShutter { className ->
-            // 只放行 Rhino 自己的运行期类，否则脚本连 String/Object 都用不了。
+        cx.setClassShutter(ClassShutter { className ->            // 只放行 Rhino 自己的运行期类，否则脚本连 String/Object 都用不了。
             // 书源脚本要用的 Java 能力一律走下面的白名单 API。
             className.startsWith("org.mozilla.javascript.")
         })
@@ -189,6 +188,18 @@ object JsEngine {
             })
         ScriptableObject.putProperty(cookieObj, "getCookie",
             JsFunction(scope) { a -> env.cookies[a.firstOrNull()?.toString() ?: ""] ?: "" })
+        // legado 的 `cookie.setCookie(url, cookieString)`。源用它把登录后的 Cookie 存回来。
+        // 与 `setCookie(url, key, value)` 三种参数都要认：legado 源码里都有。
+        ScriptableObject.putProperty(cookieObj, "setCookie",
+            JsFunction(scope) { a ->
+                val tag = a.getOrNull(0)?.toString() ?: ""
+                if (a.size >= 3) {
+                    cookieMerge(env, tag, "${a[1]}=", a[2]?.toString() ?: "")
+                } else {
+                    env.cookies[tag] = a.getOrNull(1)?.toString() ?: ""
+                }
+                ""
+            })
         ScriptableObject.putProperty(scope, "cookie", cookieObj)
 
         // 自定义变量当裸名注入（`{{java.encodeURI(key)}}` 里的 key 就是这样用的）
@@ -201,32 +212,43 @@ object JsEngine {
             // legado 的 java.ajax 返回的是响应对象（有 body()/header()/code()），不是裸字符串。
             // 返回裸字符串时，八叉书库这类源在 `new_url.header("location")` 上直接报
             // `Cannot find function header`。返回对象后仍能当字符串用（toString 给正文）。
-            "ajax" to { a -> if (env.offline) "" else httpGet(cx, scope, str(a, 0), timeoutOf(a)) },
-            // legado 的 `java.get` 是**读源变量**，但实测有源写成 `java.get(url, {}, 12000)`
-            // 打请求（八叉书库、AQ 系列）。两种都支持：参数像 URL 就打请求。
-            "get" to { a ->
-                val x = str(a, 0)
-                if (x.startsWith("http")) {
-                    if (env.offline) "" else httpGet(cx, scope, x, timeoutOf(a))
-                } else env.vars[x] ?: ""
-            },
-            "post" to { a -> if (env.offline) "" else httpPost(cx, scope, str(a, 0), str(a, 1)) },
-            // 批量 GET。串行跑：手表 4 核，并发反而拖慢，还会触发站点风控。
+            "ajax" to { a -> if (env.offline) "" else httpGet(cx, scope, ajaxUrl(str(a, 0)), timeoutOf(a)) },
             "ajaxAll" to { a ->
                 val arr = cx.newArray(scope, 0)
-                val list = (a.getOrNull(0) as? Scriptable)?.let { jsStrings(it) } ?: emptyList()
+                // legado 的 `ajaxAll(callTimeout, urls)` 与 `ajaxAll(urls)` 两种写法都有。
+                var list = (a.getOrNull(0) as? Scriptable)?.let { jsStrings(it) } ?: emptyList()
+                if (list.isEmpty()) list = (a.getOrNull(1) as? Scriptable)?.let { jsStrings(it) } ?: emptyList()
                 var n = 0
                 for (u in list) {
-                    val v = if (env.offline) "" else httpGet(cx, scope, u, timeoutOf(a))
+                    val v = if (env.offline) "" else httpGet(cx, scope, ajaxUrl(u), timeoutOf(a))
                     ScriptableObject.putProperty(arr, n++, v)
                 }
                 arr
             },
+            // legado 的 `connect(url)`：返回可链式调用的请求对象。
+            // 书趣阁写 `{{java.connect(source.getKey()).raw().request().url()}}` 拼搜索地址。
+            "connect" to { a -> connectObj(cx, scope, str(a, 0)) },
+            // legado 的 `java.get` 是**读源变量**，但实测有源写成 `java.get(url, {}, 12000)`
+            // 打请求（八叉书库、AQ 系列）。两种都支持：参数像 URL 就打请求。
+            "get" to { a ->
+                val x = ajaxUrl(str(a, 0))
+                if (x.startsWith("http")) {
+                    if (env.offline) "" else httpGet(cx, scope, x, timeoutOf(a))
+                } else env.vars[str(a, 0)] ?: ""
+            },
+            "post" to { a -> if (env.offline) "" else httpPost(cx, scope, str(a, 0), str(a, 1)) },
             // 书源常写的 `java.getCookie(tag, key)` / `setCookie(tag, cookie)`。
             // 我们的 cookie 表以 tag 为键存整串 cookie，读时按分号拆。
             "getCookie" to { a -> cookieGet(env, str(a, 0), str(a, 1)) },
             "setCookie" to { a -> env.cookies[str(a, 0)] = str(a, 1); "" },
             "removeCookie" to { a -> env.cookies.remove(str(a, 0)); "" },
+            "setCookie" to { a ->
+                // `java.setCookie(url, cookie)` 与 `java.setCookie(url, key, value)` 都要认。
+                val tag = str(a, 0)
+                if (a.size >= 3) cookieMerge(env, tag, "${a[1]}=", str(a, 2))
+                else env.cookies[tag] = str(a, 1)
+                ""
+            },
             "clearCookie" to { a ->
                 val k = str(a, 0)
                 env.cookies.keys.removeAll { it == k || it.contains(k) }
@@ -239,13 +261,49 @@ object JsEngine {
             "decodeURIComponent" to { a -> decodeUri(str(a, 0)) },
             "base64Encode" to { a -> b64Enc(str(a, 0)) },
             "base64Decode" to { a -> b64Dec(str(a, 0)) },
+            // legado 的 `base64DecodeToByteArray`：返回字节数组，给需要二进制的地方用。
+            "base64DecodeToByteArray" to { a ->
+                jsFromBytes(cx, scope, runCatching {
+                    java.util.Base64.getDecoder().decode(str(a, 0))
+                }.getOrDefault(ByteArray(0)))
+            },
             "md5Encode" to { a -> md5(str(a, 0)) },
+            // legado 的 `md5Encode16`：取 32 位中的 8-24，16 位小写。
+            "md5Encode16" to { a -> md5(str(a, 0)).substring(8, 24) },
+            // `md5Encode16` 的大写变体，部分源按站点要求写。
+            "hMac" to { a -> hmac(cx, scope, a) },
+            "HMac" to { a -> hmac(cx, scope, a) },
+            // ── DES / AES：legado 的四件套 ──
+            // legado 里 `desEncode(text, key, transformation, iv)`，不传 transformation 默认 DES/ECB/PKCS5Padding。
+            "desEncode" to { a -> desEncode(a) },
+            "desDecode" to { a -> desDecode(a) },
+            "aesEncode" to { a -> aesEncode(a, toBase64 = false) },
+            "aesDecode" to { a -> aesDecode(a, fromBase64 = false) },
+            "aesEncodeToStr" to { a -> aesEncode(a, toBase64 = true) },
+            "aesDecodeToStr" to { a -> aesDecode(a, fromBase64 = true) },
+            // legado 的 `htmlFormat`：把 HTML 洗成纯文本。源拿它做简介。
+            "htmlFormat" to { a -> HtmlText.plain(str(a, 0)) },
+            // `strToBytes` 带 charset 参数：legado 写 `strToBytes(str, 'GBK')`。
+            "strToBytes" to { a ->
+                str(a, 0).toByteArray(charsetOf(a.getOrNull(1)?.toString()))
+                    .joinToString(",") { (it.toInt() and 0xFF).toString() }
+            },
+            // `bytesToStr`：字节数组 → 字符串，同样认 charset。
+            "bytesToStr" to { a -> bytesToStr(a.getOrNull(0), a.getOrNull(1)?.toString()) },
+            // legado 的 `gzip` / `gzinflate`：站点压过包的响应就地解开。
+            "gzip" to { a ->
+                runCatching { gzipDecode(bytesOf(a.getOrNull(0))) }.getOrDefault("")
+            },
+            "gzinflate" to { a ->
+                runCatching { inflateDecode(bytesOf(a.getOrNull(0))) }.getOrDefault("")
+            },
+            // legado 的 `xml2Json`：XML 转 JSON 字符串。
+            "xml2Json" to { a -> xml2Json(str(a, 0)) },
             "timeFormat" to { a -> timeFormat(a) },
             "timeFormatUTC" to { a -> timeFormat(a) },
             // 十六进制/base64 互转。部分源用它们编解码正文地址。
             "hexDecodeToString" to { a -> hexDecode(str(a, 0)) },
             "hexEncodeToString" to { a -> hexEncode(str(a, 0)) },
-            "strToBytes" to { a -> str(a, 0).toByteArray(Charsets.UTF_8).joinToString(",") { it.toString() } },
             // 简繁转换。源里常写 `java.t2s(result)` 把繁体书名转简体。
             "t2s" to { a -> T2s.toSimplified(str(a, 0)) },
             "s2t" to { a -> str(a, 0) },
@@ -263,7 +321,17 @@ object JsEngine {
                 ""
             },
             // legado 的 `getString(k)`：拿 `java.put` 存过的东西，统一给字符串。
-            "getString" to { a -> env.vars[str(a, 0)] ?: "" },
+            // legado 的 `java.getString(rule)` 是对 **result** 跑选择器；
+            // 本引擎早先把它当变量读取。两种都要，否则真源会静默取到空串。
+            // 规则：变量表里有这个键就返回变量（`put` 存的），否则当选择器求值。
+            // 下划线开头的键（`_k`）在 legado 里专指变量，优先走变量。
+            "getString" to { a ->
+                val k = str(a, 0)
+                val saved = env.vars[k]
+                if (saved != null) saved
+                else if (k.isBlank()) ""
+                else HtmlSelect.select(env.result, k, Selector.Pick.TEXT, null).firstOrNull() ?: ""
+            },
 
             // ── 登录信息 ──
             // legado 里 `upLoginData` 是回填登录界面输入框。手表上没有登录界面，
@@ -289,6 +357,21 @@ object JsEngine {
                 o
             },
             "setVariable" to { a -> env.sourceVars[VAR_KEY] = str(a, 0); "" },
+
+            // ── legado 的阅读/书源配置族 ──
+            // 真机上存在 SQLite 里，手表版没这套表。用同一个 sourceVars 装，
+            // 读得到自己写的，跨源不串。键前缀区分，避免跟变量撞名。
+            "getConfig" to { a -> cfgGet(env, str(a, 0)) },
+            "putConfig" to { a -> cfgPut(env, str(a, 0), str(a, 1)); "" },
+            "setConfig" to { a -> cfgPut(env, str(a, 0), str(a, 1)); "" },
+            "getReadConfig" to { a -> readCfgGet(env, str(a, 0)) },
+            "putReadConfig" to { a -> cfgPut(env, "read." + str(a, 0), str(a, 1)); "" },
+            "getSource" to { a -> cfgGet(env, "source." + str(a, 0)) },
+            "getBookSource" to { _ -> ScriptableObject.getProperty(scope, "source") },
+
+            // `importScript(path)`：legado 从源里加载外部脚本。
+            // 手表版没脚本仓库，但源常把它放在 try 里探路，返回空串即可。
+            "importScript" to { a -> uiNoop("importScript", a); "" },
 
             // ── 中文数字章节号 ──
             // 源里写 `replace(/第([一-十]+)章/g, java.toNumChapter(result))`。
@@ -323,20 +406,16 @@ object JsEngine {
 
             // ── 选择器 ──
             // `java.getElements(rule)`：在当前 result 上跑一条 legado 选择器，返回字符串数组。
-            "getElements" to { a ->
-                val arr = cx.newArray(scope, 0)
-                var n = 0
-                for (seg in LegadoSelector.chain(str(a, 0).trim()).segments) {
-                    val vals = when (val p = Selector.parse(seg)) {
-                        is Selector.Css -> HtmlSelect.select(env.result, p, Selector.Pick.HTML, null)
-                        is Selector.Json -> JsonPathLite.select(env.result, p.path)
-                        is Selector.XPath -> XPathLite.select(env.result, p.expr, Selector.Pick.HTML, null)
-                        null -> emptyList()
-                    }
-                    for (v in vals) ScriptableObject.putProperty(arr, n++, v)
-                    if (vals.isNotEmpty()) break
-                }
-                arr
+            "getElements" to { a -> selectArray(cx, scope, env, str(a, 0)) },
+            // legado 的 `getStringList(rule)`：同样在当前 result 上跑选择器，返回字符串数组。
+            // 言情小说吧用它取最新章节列表（紧跟 `java.setContent()` 之后）。
+            "getStringList" to { a -> selectArray(cx, scope, env, str(a, 0)) },
+            // legado 的 `setContent(html, baseUrl)`：把 result 换成新内容，后续选择器都作用于它。
+            // 八一中文网🍅、言情小说吧用它把搜索页换掉再取元素。
+            "setContent" to { a ->
+                env.result = bytesToStr(a.getOrNull(0), null).ifEmpty { str(a, 0) }
+                ScriptableObject.putProperty(scope, "result", env.result)
+                ""
             },
         )
         for ((name, fn) in api) ScriptableObject.putProperty(javaObj, name, JsFunction(scope, fn = fn))
@@ -348,6 +427,10 @@ object JsEngine {
         // ClassShutter 仍然全禁 —— 这里给的全是本进程实现，没一个能碰到真 Java 反射。
         val javaPkg = javaPkgShell(cx, scope)
         ScriptableObject.putProperty(scope, "Packages", javaPkg)
+        // `org.jsoup.Jsoup` 最小壳。ClassShutter 把真 Jsoup 禁了，但书源直接调
+        // `org.jsoup.Jsoup.parse(html).select(...)`（书城网包🍅、速读谷）。
+        // 必须挂全局：脚本写的是裸 `org.`，不是 `Packages.org.`。
+        ScriptableObject.putProperty(scope, "org", jsoupShell(cx, scope))
         val javaLeaf = ScriptableObject.getProperty(javaPkg, "java") as Scriptable
         for (nm in listOf("lang", "util", "io", "security")) {
             ScriptableObject.putProperty(javaObj, nm, ScriptableObject.getProperty(javaLeaf, nm))
@@ -439,8 +522,7 @@ object JsEngine {
         ScriptableObject.putProperty(scope, "cache", cacheObj)
     }
 
-    /** 把白名单 lambda 包成 Rhino 可调用的函数。[ctor] 给了才支持 `new`。 */
-    private class JsFunction(
+    /** 把白名单 lambda 包成 Rhino 可调用的函数。[ctor] 给了才支持 `new`。 */    private class JsFunction(
         scope: Scriptable,
         private val ctor: ((Array<Any?>) -> Any?)? = null,
         private val fn: (Array<Any?>) -> Any?,
@@ -495,6 +577,57 @@ object JsEngine {
         DevLog.log("书源界面", "$name(" + a.joinToString(",") { (it?.toString() ?: "").take(60) } + ")")
     }
 
+    /**
+     * 拆掉 `ajax(url, options)` 的 options 尾巴。
+     *
+     * legado 里第二个参数是请求参数对象，写惯了的人会把它拼进第一个字符串：
+     * 七猫聚合就是 `java.ajax(url + ',' + JSON.stringify(options), 12000)`。
+     * 直接整串当 URL 发会拼出一个带 `,{...}` 的地址，必然 404。
+     */
+    private fun ajaxUrl(raw: String): String {
+        val s = raw.trim()
+        val cut = s.indexOf(",{")
+        return if (cut > 0) s.substring(0, cut).trim() else s
+    }
+
+    /** 在当前 result 上跑一条 legado 选择器，按序返回命中项。 */
+    private fun selectArray(cx: Context, scope: Scriptable, env: Env, rule: String): Scriptable {
+        val arr = cx.newArray(scope, 0)
+        var n = 0
+        for (seg in LegadoSelector.chain(rule.trim()).segments) {
+            val vals = when (val p = Selector.parse(seg)) {
+                is Selector.Css -> HtmlSelect.select(env.result, p, Selector.Pick.HTML, null)
+                is Selector.Json -> JsonPathLite.select(env.result, p.path)
+                is Selector.XPath -> XPathLite.select(env.result, p.expr, Selector.Pick.HTML, null)
+                null -> emptyList()
+            }
+            for (v in vals) ScriptableObject.putProperty(arr, n++, v)
+            if (vals.isNotEmpty()) break
+        }
+        return arr
+    }
+
+    /**
+     * `java.connect(url)` 的链式对象：`.raw().request().url()` / `.get()` / `.body()`。
+     *
+     * legado 真返回 okhttp 调用链，书源只用到「把相对地址补成绝对地址」这一层，
+     * 所以这里只摆形状，不发请求。
+     */
+    private fun connectObj(cx: Context, scope: Scriptable, url: String): Scriptable {
+        val o = cx.newObject(scope)
+        val self = { o }
+        ScriptableObject.putProperty(o, "url", JsFunction(scope) { url })
+        ScriptableObject.putProperty(o, "raw", JsFunction(scope) { self() })
+        ScriptableObject.putProperty(o, "request", JsFunction(scope) { self() })
+        ScriptableObject.putProperty(o, "newCall", JsFunction(scope) { self() })
+        ScriptableObject.putProperty(o, "build", JsFunction(scope) { self() })
+        ScriptableObject.putProperty(o, "execute", JsFunction(scope) { self() })
+        ScriptableObject.putProperty(o, "body", JsFunction(scope) { "" })
+        ScriptableObject.putProperty(o, "get", JsFunction(scope) { "" })
+        ScriptableObject.putProperty(o, "toString", JsFunction(scope) { url })
+        return o
+    }
+
     /** 登录信息（`upLoginData` / `getLoginInfoMap`），按源地址隔离。 */
     private val loginMemo = java.util.concurrent.ConcurrentHashMap<String, LinkedHashMap<String, String>>()
 
@@ -541,7 +674,13 @@ object JsEngine {
     private fun bytesToStr(v: Any?, charset: String?): String = when (v) {
         null -> ""
         is Scriptable -> String(jsBytes(v), charsetOf(charset))
-        else -> v.toString()
+        // `strToBytes` 输出的是 `196,208,206,196` 这种数字串，要按字节还原。
+        else -> {
+            val t = v.toString()
+            if (t.isNotEmpty() && t.all { it.isDigit() || it == ',' || it == '-' || it == ' ' }) {
+                String(bytesOf(t), charsetOf(charset))
+            } else t
+        }
     }
 
     private fun jsBytes(s: Scriptable?): ByteArray {
@@ -729,6 +868,7 @@ object JsEngine {
         ScriptableObject.putProperty(security, "MessageDigest", mdCls)
         ScriptableObject.putProperty(javaPkg, "security", security)
 
+
         // javax.crypto.Mac + spec.SecretKeySpec（哔咔漫画的 HmacSHA256 签名）
         val crypto = cx.newObject(scope)
         val macInst: (Array<Any?>) -> Any? = { a ->
@@ -773,9 +913,266 @@ object JsEngine {
 
         val root = cx.newObject(scope)
         ScriptableObject.putProperty(root, "java", javaPkg)
+
         ScriptableObject.putProperty(root, "javax", javaxPkg)
         return root
     }
+
+    /**
+     * `org.jsoup.Jsoup` 最小壳。
+     *
+     * 只实现书源真的用到的那层：`parse` / `parseBodyFragment` → `select(q)`，
+     * 元素对象支持 `text()` / `html()` / `attr(k)` / `size()` / `first()` / `last()` / `eq(i)` / `get(i)`。
+     * 选定器求值走 [HtmlSelect]，跟引擎其余部分同一套语义。
+     */
+    private fun jsoupShell(cx: Context, scope: Scriptable): Scriptable {
+        fun elements(html: String, q: String): List<HtmlSelect.Node> =
+            HtmlSelect.nodesOf(html, RuleNode.parse(q)) ?: emptyList()
+
+        fun wrap(html: String, nodes: List<HtmlSelect.Node>): Scriptable {
+            val arr = cx.newArray(scope, nodes.size)
+            nodes.forEachIndexed { i, nd ->
+                val el = cx.newObject(scope)
+                ScriptableObject.putProperty(el, "text", JsFunction(scope) {
+                    HtmlSelect.extractNode(html, nd, Selector.Pick.TEXT, null) ?: ""
+                })
+                ScriptableObject.putProperty(el, "html", JsFunction(scope) {
+                    HtmlSelect.extractNode(html, nd, Selector.Pick.HTML, null) ?: ""
+                })
+                ScriptableObject.putProperty(el, "outerHtml", JsFunction(scope) {
+                    HtmlSelect.extractNode(html, nd, Selector.Pick.HTML, null) ?: ""
+                })
+                ScriptableObject.putProperty(el, "attr", JsFunction(scope) { a ->
+                    HtmlSelect.extractNode(html, nd, Selector.Pick.ATTR, str(a, 0)) ?: ""
+                })
+                ScriptableObject.putProperty(el, "toString", JsFunction(scope) {
+                    HtmlSelect.extractNode(html, nd, Selector.Pick.TEXT, null) ?: ""
+                })
+                ScriptableObject.putProperty(arr, i, el)
+            }
+            // `select()` 返回的是 Elements，除了下标还能 `.size()` / `.get(i)` / `.attr(k)`（取首个）。
+            ScriptableObject.putProperty(arr, "size", JsFunction(scope) { nodes.size })
+            ScriptableObject.putProperty(arr, "get", JsFunction(scope) { a ->
+                ScriptableObject.getProperty(arr, num(a.getOrNull(0), 0))
+            })
+            ScriptableObject.putProperty(arr, "eq", JsFunction(scope) { a ->
+                wrap(html, nodes.getOrNull(num(a.getOrNull(0), 0))?.let { listOf(it) } ?: emptyList())
+            })
+            ScriptableObject.putProperty(arr, "first", JsFunction(scope) {
+                wrap(html, nodes.firstOrNull()?.let { listOf(it) } ?: emptyList())
+            })
+            ScriptableObject.putProperty(arr, "last", JsFunction(scope) {
+                wrap(html, nodes.lastOrNull()?.let { listOf(it) } ?: emptyList())
+            })
+            // 空集合上的取值一律给空串：legado 的 Jsoup 不抛异常。
+            // 书城网包首页没有目标表单，以前这里 NPE，整条源报「脚本出错：null」。
+            val head = nodes.firstOrNull()
+            ScriptableObject.putProperty(arr, "text", JsFunction(scope) {
+                head?.let { HtmlSelect.extractNode(html, it, Selector.Pick.TEXT, null) } ?: ""
+            })
+            ScriptableObject.putProperty(arr, "html", JsFunction(scope) {
+                head?.let { HtmlSelect.extractNode(html, it, Selector.Pick.HTML, null) } ?: ""
+            })
+            ScriptableObject.putProperty(arr, "attr", JsFunction(scope) { a ->
+                head?.let { HtmlSelect.extractNode(html, it, Selector.Pick.ATTR, str(a, 0)) } ?: ""
+            })
+            return arr
+        }
+
+        fun doc(html: String): Scriptable {
+            val d = cx.newObject(scope)
+            ScriptableObject.putProperty(d, "select", JsFunction(scope) { a ->
+                wrap(html, elements(html, str(a, 0)))
+            })
+            ScriptableObject.putProperty(d, "body", JsFunction(scope) {
+                wrap(html, elements(html, "body"))
+            })
+            ScriptableObject.putProperty(d, "html", JsFunction(scope) { html })
+            ScriptableObject.putProperty(d, "toString", JsFunction(scope) { html })
+            return d
+        }
+
+        val jsoupCls = cx.newObject(scope)
+        ScriptableObject.putProperty(jsoupCls, "parse", JsFunction(scope) { a -> doc(str(a, 0)) })
+        ScriptableObject.putProperty(jsoupCls, "parseBodyFragment", JsFunction(scope) { a -> doc(str(a, 0)) })
+        ScriptableObject.putProperty(jsoupCls, "clean", JsFunction(scope) { a -> str(a, 0) })
+        val jsoupPkg = cx.newObject(scope)
+        ScriptableObject.putProperty(jsoupPkg, "Jsoup", jsoupCls)
+        val orgPkg = cx.newObject(scope)
+        ScriptableObject.putProperty(orgPkg, "jsoup", jsoupPkg)
+        return orgPkg
+    }
+
+    /** 脚本传入的「字节」：数字数组、逗号串都算。 */
+    private fun bytesOf(v: Any?): ByteArray = when (v) {
+        null -> ByteArray(0)
+        is Scriptable -> jsBytes(v)
+        else -> {
+            val s = v.toString()
+            // 数字串（`196,208,206,196`）与数组字样（`[196,208]`）都按字节解析，
+            // 其余当普通文本。`strToBytes` 的输出正好是这个形状。
+            val digits = s.trim().trim('[', ']')
+            if (digits.isNotEmpty() && digits.split(',').all { p ->
+                    p.trim().trim('"').toIntOrNull() != null
+                }) {
+                digits.split(',').mapNotNull { it.trim().trim('"').toIntOrNull()?.toByte() }.toByteArray()
+            } else s.toByteArray(Charsets.UTF_8)
+        }
+    }
+
+    /** `java.gzip(bytes)`：gunzip。 */
+    private fun gzipDecode(b: ByteArray): String =
+        java.util.zip.GZIPInputStream(java.io.ByteArrayInputStream(b)).use {
+            String(it.readBytes(), Charsets.UTF_8)
+        }
+
+    /** `java.gzinflate(bytes)`：legado 默认 raw deflate；失败再试带 zlib 头的。 */
+    private fun inflateDecode(b: ByteArray): String {
+        val raw = runCatching {
+            val inf = java.util.zip.Inflater(true)
+            inf.setInput(b)
+            val out = java.io.ByteArrayOutputStream()
+            val buf = ByteArray(4096)
+            while (!inf.finished()) {
+                val n = inf.inflate(buf)
+                if (n == 0) break
+                out.write(buf, 0, n)
+            }
+            inf.end()
+            out.toByteArray()
+        }
+        if (raw.isSuccess) return String(raw.getOrThrow(), Charsets.UTF_8)
+        val z = runCatching {
+            java.util.zip.InflaterInputStream(java.io.ByteArrayInputStream(b)).use { it.readBytes() }
+        }
+        return z.map { String(it, Charsets.UTF_8) }.getOrDefault("")
+    }
+
+    /**
+     * `java.HMac(alg, key)`：返回可 `.doFinalBase64String(data)` 的对象。
+     *
+     * legado 里这是 `HMac` 类，源写 `new java.HMac('HmacSHA256', key).doFinalBase64String(s)`。
+     */
+    private fun hmac(cx: Context, scope: Scriptable, a: Array<Any?>): Scriptable {
+        val alg = str(a, 0).ifBlank { "HmacSHA256" }
+        var key = bytesOf(a.getOrNull(1))
+        val o = cx.newObject(scope)
+        ScriptableObject.putProperty(o, "init", JsFunction(scope) { b ->
+            key = bytesOf(b.firstOrNull()); ""
+        })
+        fun mac(data: ByteArray): ByteArray = runCatching {
+            val m = javax.crypto.Mac.getInstance(alg)
+            m.init(javax.crypto.spec.SecretKeySpec(key, alg))
+            m.doFinal(data)
+        }.getOrDefault(ByteArray(0))
+        ScriptableObject.putProperty(o, "doFinal", JsFunction(scope) { b ->
+            jsFromBytes(cx, scope, mac(bytesOf(b.firstOrNull())))
+        })
+        ScriptableObject.putProperty(o, "doFinalBase64String", JsFunction(scope) { b ->
+            java.util.Base64.getEncoder().encodeToString(mac(bytesOf(b.firstOrNull())))
+        })
+        ScriptableObject.putProperty(o, "doFinalHexString", JsFunction(scope) { b ->
+            mac(bytesOf(b.firstOrNull())).joinToString("") { "%02x".format(it) }
+        })
+        return o
+    }
+
+    /** `java.desEncode(text, key, transformation?, iv?)` —— 输出 Base64。 */
+    private fun desEncode(a: Array<Any?>): String = runCatching {
+        cbcCipher(a, javax.crypto.Cipher.ENCRYPT_MODE, "DES")
+            .doFinal(str(a, 0).toByteArray(Charsets.UTF_8))
+            .let { java.util.Base64.getEncoder().encodeToString(it) }
+    }.getOrDefault("")
+
+    private fun desDecode(a: Array<Any?>): String = runCatching {
+        // legado 的 desDecode 入参是 Base64；但源也传十六进制，两种都试。
+        val bytes = runCatching { java.util.Base64.getDecoder().decode(str(a, 0)) }
+            .getOrElse { hexBytes(str(a, 0)) }
+        String(cbcCipher(a, javax.crypto.Cipher.DECRYPT_MODE, "DES").doFinal(bytes), Charsets.UTF_8)
+    }.getOrDefault("")
+
+    private fun aesEncode(a: Array<Any?>, toBase64: Boolean): String = runCatching {
+        val out = cbcCipher(a, javax.crypto.Cipher.ENCRYPT_MODE, "AES")
+            .doFinal(str(a, 0).toByteArray(Charsets.UTF_8))
+        if (toBase64) java.util.Base64.getEncoder().encodeToString(out)
+        else out.joinToString("") { "%02x".format(it) }
+    }.getOrDefault("")
+
+    private fun aesDecode(a: Array<Any?>, fromBase64: Boolean): String = runCatching {
+        val bytes = if (fromBase64) java.util.Base64.getDecoder().decode(str(a, 0)) else hexBytes(str(a, 0))
+        String(cbcCipher(a, javax.crypto.Cipher.DECRYPT_MODE, "AES").doFinal(bytes), Charsets.UTF_8)
+    }.getOrDefault("")
+
+    /** DES/AES 共用的 cipher：参数序 `(text, key, transformation?, iv?)`。 */
+    private fun cbcCipher(a: Array<Any?>, mode: Int, alg: String): javax.crypto.Cipher {
+        val trans = str(a, 2).ifBlank { "$alg/ECB/PKCS5Padding" }
+        val iv = str(a, 3)
+        val c = javax.crypto.Cipher.getInstance(trans)
+        val spec = javax.crypto.spec.SecretKeySpec(str(a, 1).toByteArray(Charsets.UTF_8), alg)
+        if (iv.isNotEmpty() && trans.contains("CBC", true)) {
+            c.init(mode, spec, javax.crypto.spec.IvParameterSpec(iv.toByteArray(Charsets.UTF_8)))
+        } else c.init(mode, spec)
+        return c
+    }
+
+    /** `java.xml2Json(xml)`：最简单的 XML → JSON。属性与文本都收。 */
+    private fun xml2Json(xml: String): String {
+        val s = xml.trim()
+        if (s.isEmpty()) return "{}"
+        val root = runCatching {
+            val f = javax.xml.parsers.DocumentBuilderFactory.newInstance()
+            f.isNamespaceAware = false
+            f.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
+            f.newDocumentBuilder().parse(java.io.ByteArrayInputStream(s.toByteArray(Charsets.UTF_8)))
+        }.getOrNull() ?: return "{}"
+        return nodeToJson(root.documentElement)
+    }
+
+    private fun nodeToJson(n: org.w3c.dom.Node): String {
+        val sb = StringBuilder("{")
+        var first = true
+        fun put(k: String, v: String) {
+            if (!first) sb.append(',')
+            first = false
+            sb.append('"').append(k.replace("\\", "\\\\").replace("\"", "\\\"")).append("\":").append(v)
+        }
+        val attrs = n.attributes
+        if (attrs != null) for (i in 0 until attrs.length) {
+            val at = attrs.item(i)
+            put(at.nodeName, "\"" + at.nodeValue.replace("\\", "\\\\").replace("\"", "\\\"") + "\"")
+        }
+        val kids = n.childNodes
+        val groups = LinkedHashMap<String, MutableList<org.w3c.dom.Node>>()
+        val text = StringBuilder()
+        for (i in 0 until kids.length) {
+            val c = kids.item(i)
+            when (c.nodeType) {
+                org.w3c.dom.Node.ELEMENT_NODE -> groups.getOrPut(c.nodeName) { mutableListOf() }.add(c)
+                org.w3c.dom.Node.TEXT_NODE, org.w3c.dom.Node.CDATA_SECTION_NODE -> text.append(c.nodeValue)
+            }
+        }
+        val t = text.toString().trim()
+        if (t.isNotEmpty() && groups.isEmpty()) return "\"" + t.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+        if (t.isNotEmpty()) put("#text", "\"" + t.replace("\\", "\\\\").replace("\"", "\\\"") + "\"")
+        for ((k, list) in groups) {
+            if (list.size == 1) put(k, nodeToJson(list[0]))
+            else put(k, list.joinToString(",", "[", "]") { nodeToJson(it) })
+        }
+        return sb.append('}').toString()
+    }
+
+    /** legado 的 `java.getConfig(k, def)` —— 键不存在时给默认值。 */
+    private fun cfgGet(env: Env, k: String): String = env.sourceVars["cfg.$k"] ?: ""
+
+    private fun cfgPut(env: Env, k: String, v: String) {
+        if (k.isNotEmpty()) env.sourceVars["cfg.$k"] = v
+    }
+
+    /**
+     * `getReadConfig(k)`：legado 里阅读配置是独立一组项，
+     * 名字与 `getConfig` 不冲突，这里统一走 `cfg.read.` 前缀。
+     */
+    private fun readCfgGet(env: Env, k: String): String = env.sourceVars["cfg.read.$k"] ?: ""
 
     private fun mapToJs(cx: Context, scope: Scriptable, m: Map<String, String>): Scriptable {
         val o = cx.newObject(scope)
@@ -797,7 +1194,9 @@ object JsEngine {
         } catch (e: Exception) {
             // 吞掉异常但必须留痕迹：八叉书库就是这样被误判成「缺 header()」的。
             log("书源请求失败", arrayOf(url.take(80), e.message ?: e.javaClass.simpleName))
-            ""
+            // 失败也要给响应对象：源常写 `java.get(u,{}).headers("Location")`，
+            // 给空串会在 `.headers` 上报 `Cannot find function`（无忧书城）。
+            response(cx, scope, Http.Response("", url, null, 0))
         }
     }
 
@@ -836,11 +1235,28 @@ object JsEngine {
         ScriptableObject.putProperty(o, "string", JsFunction(scope) { text })
         ScriptableObject.putProperty(o, "toString", JsFunction(scope) { text })
         ScriptableObject.putProperty(o, "code", JsFunction(scope) { r.code })
+        // legado 的 `statusCode()`：言情小说吧拿它判 200 再 setContent。
+        ScriptableObject.putProperty(o, "statusCode", JsFunction(scope) { r.code })
         ScriptableObject.putProperty(o, "url", JsFunction(scope) { r.finalUrl })
         ScriptableObject.putProperty(o, "header", JsFunction(scope) { a ->
             r.headers[(a.firstOrNull()?.toString() ?: "").lowercase()] ?: ""
         })
-        ScriptableObject.putProperty(o, "headers", JsFunction(scope) { _ ->
+        // legado 里响应头是 `headers("Location")`，返回的是**列表**，源写 `htmlUrl[0]`。
+        // 无忧书城拿它取跳转地址，以前报 `Cannot find function headers`。
+        // 键大小写不敏感：站点发的是 `Location`，源也按 `Location` 查。
+        ScriptableObject.putProperty(o, "headers", JsFunction(scope) { a ->
+            val vals = cx.newArray(scope, 0)
+            val k = (a.firstOrNull()?.toString() ?: "").lowercase()
+            val v = r.headers[k] ?: r.headers.entries.firstOrNull { it.key.lowercase() == k }?.value
+            if (v != null) {
+                // 同名头可能合并成逗号串（Set-Cookie），按 legado 拆成多项。
+                v.split(",").forEachIndexed { i, part ->
+                    ScriptableObject.putProperty(vals, i, part.trim())
+                }
+            }
+            vals
+        })
+        ScriptableObject.putProperty(o, "headersMap", JsFunction(scope) { _ ->
             val m = cx.newObject(scope)
             for ((k, v) in r.headers) ScriptableObject.putProperty(m, k, v)
             m
@@ -856,6 +1272,13 @@ object JsEngine {
     private fun cacheKey(sourceKey: String, key: String) = "$sourceKey|$key"
 
     /** `java.getCookie(tag, key)`：从「tag → 整串 cookie」里取某项。 */
+    /** 把 `k=v` 并进该 URL 已有的 Cookie 串，同名覆盖，不重复。 */
+    private fun cookieMerge(env: Env, tag: String, prefix: String, value: String) {
+        val old = env.cookies[tag] ?: ""
+        val parts = old.split(';').map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith(prefix) }
+        env.cookies[tag] = (parts + "$prefix$value").joinToString("; ")
+    }
+
     private fun cookieGet(env: Env, tag: String, key: String): String {
         val raw = env.cookies[tag] ?: return env.cookies[key] ?: ""
         for (part in raw.split(';')) {

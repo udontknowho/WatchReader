@@ -389,6 +389,10 @@ object HtmlSelect {
         return sel.tag.isEmpty() || node.tag == sel.tag
     }
 
+    /** 给 JsEngine 的 Jsoup 壳用：对单个已命中的节点取值。 */
+    internal fun extractNode(html: String, node: Node, pick: Selector.Pick, attr: String?): String? =
+        extract(html, node, pick, attr)
+
     private fun extract(html: String, node: Node, pick: Selector.Pick, attr: String?): String? {
         val outer = html.substring(node.start, minOf(node.end, html.length))
         return when (pick) {
