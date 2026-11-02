@@ -1055,9 +1055,117 @@ class MainActivity : Activity() {
     private fun showTocMenu(info: BookInfo) {
         val marks = BookmarkStore.forBook(info.bookId).size
         Widgets.menuDialog(this, null, listOf(
+            "跳章" to { showJumpDialog(info, tocSrc) },
             "书签（$marks）" to { showMarks(info) },
             "导出 TXT" to { exportTxt(info) },
         )).show()
+    }
+
+    /**
+     * 跳章：滑杆选大范围，下面的数字框填精确章号，两者互相跟随。
+     *
+     * 189 dp 屏上目录一次只画 [TOC_WINDOW] 章，五百章的书想读到第 300 章
+     * 得点十几次「后面还有 N 章」。legado 的目录菜单也带跳章。
+     */
+    private fun showJumpDialog(info: BookInfo, src: BookSource?) {
+        val total = info.chapters.size
+        if (total <= 0) { toast("这本书还没有章节"); return }
+        val start = (readProgress(info.bookId) + 1).coerceIn(1, total)
+
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(Md3.dp(this@MainActivity, 12), Md3.dp(this@MainActivity, 2),
+                       Md3.dp(this@MainActivity, 12), Md3.dp(this@MainActivity, 2))
+        }
+        val dialog = Widgets.styleDialog(android.app.AlertDialog.Builder(this)
+            .setTitle("跳到第几章").setView(box).create())
+
+        // 章名跟着选中的章号一起显示：只看数字选章等于闭眼跳。
+        val title = Md3.ellipsize(Md3.text(this, "", Md3.FS_SM, Md3.onSurfaceVariant))
+        fun paintTitle(n: Int) {
+            val t = info.chapters.getOrNull(n - 1)?.title.orEmpty()
+            title.text = if (t.isBlank()) "第 $n 章" else "第 $n 章 · $t"
+        }
+
+        var pick = start
+        // 两个控件互相写，不设守卫会来回触发、滑杆跳字。
+        var syncing = false
+
+        val num = EditText(this).apply {
+            hint = "1 ~ $total"
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setSingleLine()
+            setText("$start")
+            setSelection(text.length)
+            setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, Md3.FS_MD)
+            setTextColor(Md3.onSurface)
+            setHintTextColor(Md3.onSurfaceVariant)
+            background = Md3.bg(Md3.surface4, Md3.dp(this@MainActivity, 8).toFloat())
+            setPadding(Md3.dp(this@MainActivity, 10), 0,
+                       Md3.dp(this@MainActivity, 10), 0)
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+        }
+
+        val slider = Widgets.sliderRow(this, "拖动选章", 1f, total.toFloat(), start.toFloat(),
+            steps = (total - 1).coerceAtLeast(1),
+            fmt = { v -> "第 ${v.toInt()} 章" }) { v ->
+            pick = v.toInt().coerceIn(1, total)
+            paintTitle(pick)
+            if (!syncing) {
+                syncing = true
+                num.setText("$pick")
+                num.setSelection(num.text.length)
+                syncing = false
+            }
+        }
+        box.addView(slider)
+        box.addView(num, Md3.lpDp(this, null, Md3.BTN))
+        box.addView(title, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = Md3.dp(this@MainActivity, Md3.GAP / 2) })
+
+        // 滑杆行的子项：0 = 标签行，1 = SeekBar。这里只借它同步位置。
+        val bar = slider.getChildAt(1) as? android.widget.SeekBar
+        num.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                if (syncing) return
+                val v = s?.toString()?.toIntOrNull() ?: return
+                if (v < 1 || v > total) return
+                pick = v
+                paintTitle(v)
+                syncing = true
+                bar?.progress = (v - 1) * 100
+                syncing = false
+            }
+        })
+        paintTitle(start)
+
+        fun go() {
+            val idx = (num.text.toString().toIntOrNull() ?: pick).coerceIn(1, total) - 1
+            dialog.dismiss()
+            // 先把目录窗口挪到目标章附近：从阅读页返回时直接落在这一页。
+            tocWinStart = (idx - TOC_WINDOW / 2).coerceAtLeast(0)
+            val ch = info.chapters[idx]
+            if (ch.locked) { toast("第 ${idx + 1} 章是付费章，取不到正文"); showToc(info, src) }
+            else preview(info, idx)
+        }
+        num.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) { go(); true } else false
+        }
+
+        val row = Md3.row(this).apply { setPadding(0, Md3.dp(this@MainActivity, 8), 0, 0) }
+        row.addView(Widgets.button(this, "取消", "outline") { dialog.dismiss() },
+            LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f))
+        row.addView(Widgets.button(this, "跳过去", "filled") { go() },
+            LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f).apply {
+                leftMargin = Md3.dp(this@MainActivity, Md3.GAP)
+            })
+        box.addView(row)
+
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.show()
     }
 
     /**
