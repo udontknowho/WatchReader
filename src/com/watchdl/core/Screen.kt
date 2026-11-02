@@ -99,6 +99,12 @@ sealed interface Screen {
      * 不带数据 —— 进度在 SharedPreferences 里，每次进屏现读，读一章回来就是新的。
      */
     object Records : Screen
+    /**
+     * 缓存管理（#26）：各书已下载正文的占用，可一键清理正文。
+     *
+     * 不带数据 —— 字节数每次进屏现算；清理完重画本页就是新值。
+     */
+    object Cache : Screen
     /** 「我的」页：规则与其它两组入口，照 legado `ui/main/my`。不带数据，每次进屏现读。 */
     object My : Screen
     /**
@@ -132,6 +138,7 @@ fun screenId(s: Screen?): String = when (s) {
     is Screen.Marks -> "marks:${s.info.bookId}"
     Screen.MarksAll -> "marksAll"
     Screen.Records -> "records"
+    Screen.Cache -> "cache"
     is Screen.Swap -> "swap:" + s.info.bookId.ifBlank { s.info.name + s.info.author }
     is Screen.Discover -> "discover:${s.site}:${s.gender}:${s.rankKey}"
     is Screen.Market -> "market:${s.page}"

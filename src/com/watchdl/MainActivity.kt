@@ -16,6 +16,7 @@ import com.watchdl.core.*
 import com.watchdl.ui.book.showDetail
 import com.watchdl.ui.book.showSwap
 import com.watchdl.ui.my.showMy
+import com.watchdl.ui.my.showCache
 import com.watchdl.ui.reader.*
 import com.watchdl.ui.search.*
 import com.watchdl.ui.shelf.*
@@ -262,6 +263,7 @@ class MainActivity : Activity() {
             is Screen.Marks -> showMarks(s.info)
             Screen.MarksAll -> showAllMarks()
             Screen.Records -> showRecords()
+            Screen.Cache -> showCache()
             is Screen.Swap -> showSwap(s.info, s.src)
             is Screen.Find -> showFind(s.query, s.hits, s.scanned, s.done)
             Screen.Shelf -> showShelf()
@@ -1813,6 +1815,7 @@ class MainActivity : Activity() {
             is Screen.Marks -> showMarks(s.info)
             Screen.MarksAll -> showAllMarks()
             Screen.Records -> showRecords()
+            Screen.Cache -> showCache()
             is Screen.Swap -> showSwap(s.info, s.src)
             is Screen.Find -> showFind(s.query, s.hits, s.scanned, s.done)
             Screen.My -> showMy()
@@ -1837,6 +1840,7 @@ class MainActivity : Activity() {
             is Screen.Marks -> showToc(s.info)
             Screen.MarksAll -> showMy()
             Screen.Records -> showMy()
+            Screen.Cache -> showMy()
             is Screen.Swap -> goBackToPrevious()
             is Screen.Find -> showMy()
             is Screen.Detail -> goBackToPrevious()

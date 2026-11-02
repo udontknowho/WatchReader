@@ -147,6 +147,26 @@ class JobStore(private val root: File) {
         out
     }
 
+    /**
+     * 清掉已下载正文，保留目录与阅读进度（#26）。
+     *
+     * 只删 chapters.jsonl、把章节与作业状态改回 PENDING：章节表还在 job.json 里，
+     * 重下时能直接用回目录，不用重新取。
+     * 状态用正则就位改，**不重写整份 json** —— 别处刚写进去的字段会被旧快照盖掉。
+     * resume 传 true：writeJob 里那条「原状态是 CANCELLED 就继续保持」的分支会把
+     * 我们刚改的 PENDING 又打回 CANCELLED，取消过的书就永远清不成待下。
+     */
+    fun clearChapters(bookId: String) {
+        synchronized(lockFor(bookId)) {
+            chaptersFile(bookId).delete()
+            val raw = readJob(bookId) ?: return
+            val json = raw
+                .replace(Regex("(\"status\"\\s*:\\s*)\"[A-Z]+\""), "$1\"PENDING\"")
+                .replace(Regex("(\"state\"\\s*:\\s*)\"[A-Z]+\""), "$1\"PENDING\"")
+            writeJob(bookId, json, isCancelled = { false }, resume = { true })
+        }
+    }
+
     /** 只改 state 字段，其余原样保留。取消下载时用来把 RUNNING 改成 PAUSED。 */
     fun writeState(bookId: String, state: JobState) {
         synchronized(lockFor(bookId)) {

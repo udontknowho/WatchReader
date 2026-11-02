@@ -65,6 +65,8 @@ internal fun MainActivity.showMy() {
         e("书签", "bookmark") { showAllMarks() }
         // 阅读记录（#25）：跨书按最后阅读时间列书，点一条接着读。
         e("阅读记录", "history") { showRecords() }
+        // 缓存管理（#26）：看正文占多少，可一键清正文（保留目录与进度）。
+        e("缓存管理", "download") { showCache() }
         e("文件管理", "grid")
         e("关于", "more") { showAbout() }
         // 不再放「退出」：手表上直接划掉就结束进程，单独一个按钮反而含义含糊
