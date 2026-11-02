@@ -217,7 +217,9 @@ class DownloadService : Service() {
                     val running = currentBookId.get()
                     val existing = running?.let {
                         runCatching {
-                            Downloader.restore(JobStore(File(filesDir, "jobs")), it)
+                            // 作业在 books/ 下，不是 jobs/。以前这里写成 jobs，
+                            // 于是「正在下载另一本」时那条通知恒报 0/0/0。
+                            Downloader.restore(JobStore(File(filesDir, "books")), it)
                         }.getOrNull()
                     }
                     val d = existing?.count(ChapterStatus.DONE) ?: 0
