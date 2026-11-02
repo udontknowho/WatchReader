@@ -54,7 +54,8 @@ private fun MainActivity.cacheSummary(rows: List<CacheUsage>): String? {
 }
 
 /** 人读字节数。只要 B/KB/MB 三档，为这点格式引第三方库不值得。 */
-internal fun humanBytes(n: Long): String = when {    n >= 1024L * 1024L -> String.format(Locale.US, "%.1f MB", n / 1024.0 / 1024.0)
+internal fun humanBytes(n: Long): String = when {
+    n >= 1024L * 1024L -> String.format(Locale.US, "%.1f MB", n / 1024.0 / 1024.0)
     n >= 1024L -> String.format(Locale.US, "%.0f KB", n / 1024.0)
     else -> "$n B"
 }
@@ -82,7 +83,8 @@ private object CacheUi {
         else -> "全部"
     }
 
-    /** 这本书是否过当前筛选（搜索 + 状态）。 */    fun matches(u: CacheUsage): Boolean {
+    /** 这本书是否过当前筛选（搜索 + 状态）。 */
+    fun matches(u: CacheUsage): Boolean {
         val q = query.trim()
         if (q.isNotEmpty() && !u.name.contains(q, true) && !u.author.contains(q, true)) return false
         return when (filter) {
@@ -154,26 +156,24 @@ internal fun MainActivity.showCache() {
         return
     }
 
-    col.addView(Widgets.sectionLabel(this,
-        "${CacheUi.filterName()} ${shown.size}/${rows.size} 本 · 正文 ${humanBytes(shown.sumOf { it.bytes })}"))
-    // 两段分区。legado 分「书架 / 未加入书架」，靠的是书是否在书架里；
-    // 本地没有书架概念，但「有正文 / 正文已清空」是同一形状：一眼分出
-    // 能离线读的书和要去「重新下载」的书。空的一组不画标题。
+    // 段标题自带统计。上一版先叠一行「全部 12/12 本 · 正文 30 MB」，再叠
+    // 「有正文 10 本」「正文已清空 2 本」，189 × 248 dp 上三行标题就把第一张
+    // 书卡挤出屏了。现在只留分组标题，数写在标题里。
     val withBody = shown.filter { it.cached > 0 }
     val noBody = shown.filter { it.cached == 0 }
     if (withBody.isNotEmpty()) {
-        col.addView(Widgets.sectionLabel(this, "有正文 ${withBody.size} 本"))
+        col.addView(Widgets.sectionLabel(this,
+            "有正文 ${withBody.size} 本 · ${humanBytes(withBody.sumOf { it.bytes })}"))
         for (u in withBody) addCacheBook(col, u)
     }
     if (noBody.isNotEmpty()) {
-        col.addView(Widgets.sectionLabel(this, "正文已清空 ${noBody.size} 本"))
+        col.addView(Widgets.sectionLabel(this, "待重新下载 ${noBody.size} 本"))
         for (u in noBody) addCacheBook(col, u)
     }
-    col.addView(Md3.text(this,
-        "点一本书展开章级列表，逐章看状态、删正文。\n" +
-            "删的只是本地正文副本，目录与阅读进度保留，但要联网重下才能离线读；" +
-            "书源失效就取不回来。要整库腾空间，去「文件管理」。",
-        Md3.FS_SM, Md3.onSurfaceVariant))
+    // 只有真在筛选时才提一句总数，否则这句话每屏都占一行，读的人又不需要它。
+    if (shown.size != rows.size) {
+        col.addView(Md3.text(this, "筛出 ${shown.size}/${rows.size} 本", Md3.FS_SM, Md3.onSurfaceVariant))
+    }
     root.addView(body, Md3.lpWeight(1f))
     addCacheQueueBar(shown)
 }
@@ -203,7 +203,7 @@ private fun MainActivity.addCacheQueueBar(rows: List<CacheUsage>) {
         val missing = rows.filter { it.cached < it.total }
         val queued = DownloadService.queueOf(filesDir).items().size
         if (missing.isEmpty() && queued == 0) return
-        val label = if (missing.isNotEmpty()) "全部开始（缺章 ${missing.size} 本）" else "继续队列（$queued 本）"
+        val label = if (missing.isNotEmpty()) "全部开始 · ${missing.size} 本" else "继续队列 · $queued 本"
         bar.addView(Widgets.button(this, label, "filled") { startAllCache(missing) },
             Md3.lpWeight(1f))
     }
