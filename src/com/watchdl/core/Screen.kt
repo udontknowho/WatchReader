@@ -11,7 +11,6 @@ package com.watchdl.core
 
 /** 当前屏。手表一次只显示一屏内容。 */
 sealed interface Screen {
-    object Home : Screen
     data class Hits(
         val keyword: String,
         val hits: List<BookHit>,
@@ -57,13 +56,24 @@ sealed interface Screen {
     /** 书源市场（yiove）。`hits` 为拉到的列表，`page` 为已拉到的页码。 */
     data class Market(val hits: List<YioveSource.Item>, val total: Int, val page: Int) : Screen
     /**
-     * 书架：已下载书籍的封面墙。
+     * 书架：已下载书籍的封面墙，也是应用首页（照 legado：进应用落在书架）。
      *
      * 不带数据 —— 书架的内容全在本地 `books/` 目录里，每次进屏现读。
      * 下载完成、删除、重命名之后回来就能看到新状态，不用比对缓存。
      */
     object Shelf : Screen
     data class Progress(val info: BookInfo) : Screen
+    /** 书签列表。带 info 是为了点一条能直接取那一章正文；书签本身每次进屏现读。 */
+    data class Marks(val info: BookInfo) : Screen
+    /** 「我的」页：规则与其它两组入口，照 legado `ui/main/my`。不带数据，每次进屏现读。 */
+    object My : Screen
+    /**
+     * 书详情，照 legado `ui/book/info`。
+     *
+     * 从搜索结果进来时 [info] 的章节表是空的（还没取目录），其余字段都有；
+     * 从目录/进度屏进来时字段全。是否为空决定「查看目录」是直接跳还是先取。
+     */
+    data class Detail(val info: BookInfo, val src: BookSource? = null) : Screen
 }
 
 /**
@@ -75,18 +85,21 @@ sealed interface Screen {
  */
 fun screenId(s: Screen?): String = when (s) {
     null -> "?"
-    Screen.Home -> "home"
     Screen.Sources -> "sources"
     Screen.Settings -> "settings"
     Screen.Shelf -> "shelf"
+    Screen.My -> "my"
     is Screen.Hits -> "hits:${s.keyword}"
     // 目录屏身份用**书名**而不是 bookId：loadToc 时 bookId 还不确知（可能试多个源，
     // 每条源返回的 id 不同），拿 bookId 做身份会让回调认不出自己。
     is Screen.Toc -> "toc:${s.info.name}${s.info.author}"
     is Screen.Reader -> "reader:${s.info.bookId}"
     is Screen.Progress -> "progress:${s.info.bookId}"
+    is Screen.Marks -> "marks:${s.info.bookId}"
     is Screen.Discover -> "discover:${s.site}:${s.gender}:${s.rankKey}"
     is Screen.Market -> "market:${s.page}"
+    // 搜索命中时 bookId 可能为空（个别源不返回），退回书名+作者做身份。
+    is Screen.Detail -> "detail:" + s.info.bookId.ifBlank { s.info.name + s.info.author }
 }
 
 /**

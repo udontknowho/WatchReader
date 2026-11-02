@@ -9,7 +9,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import com.watchdl.core.*
-import com.watchdl.ui.Md3
+import com.watchdl.ui.theme.Md3
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -107,7 +107,6 @@ class DownloadService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Md3.configure(this)
         when (intent?.action) {
             ACTION_CANCEL -> {
                 cancelFlag.set(true)

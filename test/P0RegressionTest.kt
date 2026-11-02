@@ -107,7 +107,8 @@ private fun assetsMustNotClobberCloudCheck(): Int {
     val f = java.io.File("src/com/watchdl/MainActivity.kt")
     if (!f.isFile) { println("  ✗ 找不到 MainActivity.kt"); return 1 }
     val src = f.readText()
-    val i = src.indexOf("private fun extractAssets()")
+    // 只锚函数名：重构会把 private 改成 internal，写死可见性会让自检误报。
+    val i = src.indexOf(" fun extractAssets()")
     if (i < 0) { println("  ✗ 找不到 extractAssets"); return 1 }
     // 只取函数体：取一大段会把别处的 continue / FILE_NAME 也算进来，自检就抓不住回归了。
     val end = src.indexOf("\n    }", i)

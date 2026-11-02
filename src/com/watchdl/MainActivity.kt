@@ -13,8 +13,14 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.*
 import com.watchdl.core.*
-import com.watchdl.ui.Md3
-import com.watchdl.ui.Widgets
+import com.watchdl.ui.book.showDetail
+import com.watchdl.ui.my.showMy
+import com.watchdl.ui.reader.*
+import com.watchdl.ui.search.*
+import com.watchdl.ui.shelf.*
+import com.watchdl.ui.source.*
+import com.watchdl.ui.theme.Md3
+import com.watchdl.ui.theme.Widgets
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -42,7 +48,7 @@ class MainActivity : Activity() {
      * 所以不能写成 `by lazy` —— 那样云端更新完还拿旧列表，等于白拉。
      */
     private var multiCache: MultiSource? = null
-    private val multi: MultiSource get() = multiCache ?: buildMulti().also { multiCache = it }
+    internal val multi: MultiSource get() = multiCache ?: buildMulti().also { multiCache = it }
 
     private fun buildMulti(): MultiSource {
         DeviceRegister.init(File(filesDir, "fanqie"))
@@ -94,17 +100,23 @@ class MainActivity : Activity() {
     }
 
     /** 兼容旧调用点：单源接口取第一个（番茄）。真正搜索走 [multi]。 */
-    private val source: BookSource by lazy {
+    internal val source: BookSource by lazy {
         DeviceRegister.init(File(filesDir, "fanqie"))
         FanqieApp(DeviceRegister.get())
     }
-    private lateinit var root: LinearLayout
-    private lateinit var input: EditText
+    internal lateinit var root: LinearLayout
+    internal lateinit var input: EditText
 
-    private var screen: Screen = Screen.Home
+    private var screen: Screen = Screen.Shelf
+
+    /**
+     * 当前屏。搬出去的屏代码只读它，不写 —— 换屏一律走 [setScreen]。
+     * 不能直接开放 `screen`：internal var 的 setter 与 [setScreen] 的 JVM 名撞车。
+     */
+    internal val curScreen: Screen get() = screen
 
     /** 切屏统一入口。换屏就意味着上一屏的后台任务全部作废。 */
-    private fun setScreen(next: Screen) {
+    internal fun setScreen(next: Screen) {
         if (next === screen || next == screen) return
         // 同一屏换内容（搜索结果边跑边上屏、目录重载）时**不能撤任务**：
         // 撤了就把正在跑的那轮搜索自己干掉。屏身份由 screenId 定义，
@@ -140,7 +152,7 @@ class MainActivity : Activity() {
      * 收一个 `(T) -> Unit` 而不是在内部调 `runOnUiThread`，是因为各个调用点
      * 要处理的返回值不一样（有的带游标，有的是 Result，有的只看异常）。
      */
-    private fun <T> bg(owner: Screen, body: () -> T, then: (Result<T>) -> Unit) {
+    internal fun <T> bg(owner: Screen, body: () -> T, then: (Result<T>) -> Unit) {
         val ownerId = screenId(owner)
         val t = thread(start = true, isDaemon = true) {
             try {
@@ -162,7 +174,7 @@ class MainActivity : Activity() {
      * [ownerId] 用 [screenId] 算，只比业务身份（书名、书 id、榜类），
      * 不比数据 —— 否则「还没结果」的回调永远等不到自己的结果屏。
      */
-    private fun postAlive(ownerId: String, body: () -> Unit) {
+    internal fun postAlive(ownerId: String, body: () -> Unit) {
         runOnUiThread {
             // S20：判据抽到 core 的 shouldDeliverCallback，测试调的是真实现。
             if (!shouldDeliverCallback(isGone(), ownerId, screenId(screen))) return@runOnUiThread
@@ -171,7 +183,7 @@ class MainActivity : Activity() {
     }
 
     /** 重载：调用方手里只有屏对象时用它，内部转成 [screenId]。 */
-    private fun postAlive(owner: Screen, body: () -> Unit) = postAlive(screenId(owner), body)
+    internal fun postAlive(owner: Screen, body: () -> Unit) = postAlive(screenId(owner), body)
 
     /** Activity 已经不适合再碰界面了。 */
     private fun isGone(): Boolean = isFinishing || isDestroyed
@@ -199,7 +211,16 @@ class MainActivity : Activity() {
      * 于是源变 null，默默退回默认的番茄源，等于换个源进去、返回一次就串源。
      * 现在用一个固定字段记住，只有不传 src 时才用它。
      */
-    private var tocSrc: BookSource? = null
+    internal var tocSrc: BookSource? = null
+
+    /**
+     * 进书详情页时手上带着的同名候选源。
+     *
+     * 详情页的「查看目录」要靠它走 [loadToc] 的逐源重试。
+     * 不放进 [Screen.Detail] 是因为它是「怎么进来的」，不是「哪一屏」——
+     * 与 [tocSrc] 同一类状态。
+     */
+    internal var detailCandidates: List<BookHit> = emptyList()
 
     /**
      * 上一屏，用于「原路返回」。
@@ -213,14 +234,14 @@ class MainActivity : Activity() {
     private val returnStack = ArrayDeque<Screen>()
 
     /** 记下当前屏，供返回时重放。只在向前跳转前调。 */
-    private fun rememberReturn() {
+    internal fun rememberReturn() {
         // 同一屏不要重复压：重复调用会让返回要按两次才动。
         if (returnStack.lastOrNull() != screen) returnStack.addLast(screen)
         while (returnStack.size > 8) returnStack.removeFirst()
     }
 
     /** 回到进来的那一屏；没有记录就回首页。 */
-    private fun goBackToPrevious() {
+    internal fun goBackToPrevious() {
         replay(returnStack.removeLastOrNull())
     }
 
@@ -237,8 +258,10 @@ class MainActivity : Activity() {
             // 隔几分钟回来还显示旧列表，用户看不出它已过期。
             is Screen.Discover -> showDiscover(s.site, s.gender, s.rankKey)
             is Screen.Settings -> showSettings()
+            is Screen.Marks -> showMarks(s.info)
             Screen.Shelf -> showShelf()
-            else -> showHome()
+            is Screen.Detail -> showDetail(s.info, s.src)
+            else -> showShelf()
         }
     }
     private var progressDone = 0
@@ -247,31 +270,45 @@ class MainActivity : Activity() {
     // 续传时的起点章数。速度/剩余时间只能用增量算：拿总数除以本次耗时
     // 会算出「2190 章/分 · 约 37 秒」，实际要跑 5 分钟。
     private var progressBase = 0
-    /**
-     * 首页「最近下载」里正在下的那一本书的副标题（P1-1）。
-     *
-     * 以前进度广播只在进度屏消费，停在首页时那一行一直是进屏时的数，
-     * 看着像下载卡死了。这里只留一个回调改那一行文字，不重建整屏。
-     */
-    private val homeProgressRows = HashMap<String, (Int, Int) -> Unit>()
+    /** 书架当前是不是封面墙档。两档共用一屏，切底不进返回栈。 */
+    internal var shelfGrid = true
     /** 熔断原因，bookId → 一句人能读懂的话。开下时清掉。 */
     private val abortHints = HashMap<String, String>()
-    private var readerSize = Md3.FS_READ
-    private var readerSpacing = 1.75f
-    private var readerBackground = Color.rgb(20, 18, 24)
+    internal var readerSize = Md3.FS_READ
+    internal var readerSpacing = 1.75f
+    internal var readerBackground = Color.rgb(20, 18, 24)
 
     /** 当前阅读页的滚动视图与位置。onPause 时要靠它们落盘。 */
-    private var readerBody: android.widget.ScrollView? = null
-    private var readerBookId = ""
-    private var readerIndex = -1
-    private var readerOffset = 0
-    private var scrollSave: Runnable? = null
+    internal var readerBody: android.widget.ScrollView? = null
+    internal var readerBookId = ""
+    internal var readerIndex = -1
+    internal var readerOffset = 0
+    internal var scrollSave: Runnable? = null
 
     /** 表冠灵敏度：每格位移（px）。表冠一格系统只给 1 个单位，必须放大才看得出。 */
-    private var crownStep = 60f
+    internal var crownStep = 60f
 
     /** 表冠跟手时长（ms）。越短越跟手，太短会抖。 */
-    private var crownGlide = 50
+    internal var crownGlide = 50
+
+    /**
+     * 主题只存 id。存档里的 id 认不出来时 [Palette.find] 兜底回默认色 ——
+     * 删掉一套配色不该让应用起不来。
+     */
+    private fun loadThemePrefs() {
+        Md3.applyPalette(Palette.find(getSharedPreferences("reader", MODE_PRIVATE).getString("theme", null)))
+    }
+
+    /**
+     * 换主题。配色是 [Md3] 单例上的值，只影响之后新建的视图，
+     * 所以存盘后必须重画当前屏，否则屏上还是旧色。
+     */
+    internal fun pickTheme(id: String) {
+        getSharedPreferences("reader", MODE_PRIVATE).edit().putString("theme", id).apply()
+        Md3.applyPalette(Palette.find(id))
+        // 只从设置页进得来，重画设置页即可；滚动会回顶（主题行本来就在顶上）。
+        showSettings()
+    }
 
     /** 阅读设置落盘。以前改完只活在内存里，杀进程就全丢。 */
     private fun loadReaderPrefs() {
@@ -287,7 +324,7 @@ class MainActivity : Activity() {
      * 上次读到第几章（下标）。跟着最后一次阅读走，回看会退回去。
      * 0 表示没记录过（和「读到第一章」等价，不影响使用）。
      */
-    private fun readProgress(bookId: String): Int {
+    internal fun readProgress(bookId: String): Int {
         val tag = bookId.take(64)
         val prefs = getSharedPreferences("reader", MODE_PRIVATE)
         // S20：换算逻辑抽到 core 的 resolveStoredIndex，测试调的是真实现。
@@ -306,10 +343,10 @@ class MainActivity : Activity() {
         getSharedPreferences("reader", MODE_PRIVATE).getInt("pos_" + bookId.take(64), -1)
 
     /** 最近一次把这本书翻开的时刻。0 = 没记录过。 */
-    private fun readTime(bookId: String): Long =
+    internal fun readTime(bookId: String): Long =
         getSharedPreferences("reader", MODE_PRIVATE).getLong("last_" + bookId.take(64), 0L)
 
-    private fun saveProgress(bookId: String, index: Int) {
+    internal fun saveProgress(bookId: String, index: Int) {
         if (bookId.isBlank() || index < 0) return
         val prefs = getSharedPreferences("reader", MODE_PRIVATE)
         val tag = bookId.take(64)
@@ -329,10 +366,10 @@ class MainActivity : Activity() {
     private val SEG_BASE = 1000
 
     /** 上次读到本章的第几个像素。换章时清零。 */
-    private fun readOffset(bookId: String): Int =
+    internal fun readOffset(bookId: String): Int =
         getSharedPreferences("reader", MODE_PRIVATE).getInt("off_" + bookId.take(64), 0)
 
-    private fun saveOffset(bookId: String, index: Int, offset: Int, sync: Boolean = false) {
+    internal fun saveOffset(bookId: String, index: Int, offset: Int, sync: Boolean = false) {
         if (bookId.isBlank() || index < 0) return
         val prefs = getSharedPreferences("reader", MODE_PRIVATE)
         val kIndex = "oidx_" + bookId.take(64)
@@ -355,7 +392,7 @@ class MainActivity : Activity() {
         saveOffset(readerBookId, readerIndex, body.scrollY, sync = true)
     }
 
-    private fun saveReaderPrefs(size: Float, spacing: Float, bg: Int) {
+    internal fun saveReaderPrefs(size: Float, spacing: Float, bg: Int) {
         readerSize = size
         readerSpacing = spacing
         readerBackground = bg
@@ -374,10 +411,10 @@ class MainActivity : Activity() {
      * legado 书源原来写死串行，实测 0.17 章/秒，一本 1600 章要近三小时；
      * 瓶颈是单章请求延迟，并发直接乘上去。各站限流强度差别很大，所以交给用户选。
      */
-    private fun lanes(): Int =
+    internal fun lanes(): Int =
         getSharedPreferences("reader", MODE_PRIVATE).getInt("lanes", DownloadService.DEFAULT_LANES)
 
-    private fun pickLanes() {
+    internal fun pickLanes() {
         val cur = lanes()
         val items = listOf(1, 2, 3, 4, 6, 8).map { n ->
             (if (n == cur) "$n 线程（当前）" else "$n 线程") to {
@@ -392,10 +429,12 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // 尺寸按屏幕自适应。手表保持紧凑档，手机放大。
-        Md3.configure(this)
+        // 版面表必须在建任何视图之前定下来：手写档和手机档的导航/页签高度不同。
+        Md3.load(this)
+        loadThemePrefs()
         loadReaderPrefs()
         DevLog.file = File(filesDir, "dev.log")
+        BookmarkStore.file = File(filesDir, "bookmarks.json")
         DevLog.setEnabled(getSharedPreferences("reader", MODE_PRIVATE).getBoolean("devlog", false))
         // 幂等；无论开关开没开都挂上（崩溃现场是开关来不及开的那类问题），
         // 关着时只多一行 logcat。
@@ -408,7 +447,7 @@ class MainActivity : Activity() {
         cleanDirtyJobs()
         ensureNotifyPermission()
         // S19：进程被回收后重建时回到原来那一屏，别让用户重搜书名。
-        if (!restoreScreen(savedInstanceState)) showHome()
+        if (!restoreScreen(savedInstanceState)) showShelf()
         // 报告 P0-1：从下载通知点进来时落在进度屏，而不是首页。
         // 新建实例走 onCreate，已在前台则走 onNewIntent。
         openFromNotification(intent)
@@ -479,9 +518,9 @@ class MainActivity : Activity() {
             }
             // 库变了，multi 是 lazy 且已经缓存了旧列表 —— 必须作废重建成新的。
             runOnUiThread {
-                // 不在首页就不弹：启动那几秒同步常落在「发现」屏上，一句 toast
+                // 不在书架就不弹：启动那几秒同步常落在「发现」屏上，一句 toast
                 // 盖在空白列表上，看着就是「点进去没东西」的一部分。
-                rebuildSources { if (screen is Screen.Home) toast(r.message) }
+                rebuildSources { if (screen is Screen.Shelf) toast(r.message) }
             }
         }
     }
@@ -494,244 +533,6 @@ class MainActivity : Activity() {
 
     // ══════════════════ 屏幕 ══════════════════
 
-    /** ① 首页：搜索框 + 最近下载。 */
-    private fun showHome() {
-        setScreen(Screen.Home)
-        homeProgressRows.clear()
-        root.removeAllViews()
-        // 主屏内容自明，但顶栏完全没字时用户看不出这是什么应用（测试报告 P1-6）。
-        root.addView(Widgets.topBar(this, "小说下载器", onBack = null, backGlyph = "",
-            trailing = listOf("⚙" to { rememberReturn(); showSettings() })))
-
-        val body = Widgets.scrollBody(this, crownStep, crownGlide)
-        val col = Widgets.contentColumn(body)
-
-        // 搜索框与按钮并成一行：分两行时按钮独自吃掉 46dp（约五分之一屏高），
-        // 而两者做的是同一件事（开输入框）。
-        val searchRow = Md3.row(this)
-        val sb = Widgets.searchBar(this, "搜索书名或作者") { askKeyword() }
-        searchRow.addView(sb, LinearLayout.LayoutParams(0, Md3.dp(this, Md3.SEARCH), 1f))
-        val btn = Widgets.button(this, "搜索", "filled", { askKeyword() })
-        searchRow.addView(btn, LinearLayout.LayoutParams(Md3.dp(this, 56), Md3.dp(this, Md3.SEARCH)).apply {
-            leftMargin = Md3.dp(this@MainActivity, Md3.GAP)
-        })
-        searchRow.layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, Md3.SEARCH),
-        ).apply { bottomMargin = Md3.dp(this@MainActivity, Md3.GAP * 2) }
-        col.addView(searchRow)
-
-        // 发现页与书架并成一行：两者都是「去别的屏」，各占一半宽度。
-        // 竖着排会和搜索行一起把首屏占满，往下滑才看得到最近下载。
-        val navRow = Md3.row(this)
-        val discoverBtn = Widgets.button(this, "发现榜单", "tonal") { showDiscover() }
-        discoverBtn.contentDescription = "发现榜单"
-        navRow.addView(discoverBtn, LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f))
-        val shelfBtn = Widgets.button(this, "书架", "tonal") { showShelf() }
-        shelfBtn.contentDescription = "书架"
-        navRow.addView(shelfBtn, LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f).apply {
-            leftMargin = Md3.dp(this@MainActivity, Md3.GAP)
-        })
-        navRow.layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, Md3.BTN),
-        ).apply { bottomMargin = Md3.dp(this@MainActivity, Md3.GAP * 2) }
-        col.addView(navRow)
-
-        // 首页不放「设置」按钮：用户嫌碍事（2026-10-21）。
-        // 字号/行距/背景在阅读页的 ⚙ 里都有，功能不丢；书源页从「发现」旁的入口进。
-
-        // 最近下载
-        // 只认真正含 job.json 的目录。
-        // 以前只看「是目录」—— 空的、导出的、脏 bookId 留下的都会进列表，
-        // 而 restore 全返回 null，于是有分组标题、下面却空空如也。
-        val books = shelfBooks(limit = 8)
-        val bookCount = shelfBookCount()
-        // 导出目录挪到 files/export，不再混在作业目录里（见 exportTxt）。
-        if (books.isEmpty()) {
-            col.addView(Widgets.emptyState(this, "▤", "还没有下载过\n搜索书名即可开始"))
-        } else {
-            col.addView(Widgets.sectionLabel(this, "最近下载"))
-            for (job in books) {
-                val done = job.count(ChapterStatus.DONE)
-                val failed = job.count(ChapterStatus.FAILED)
-                val tail = progressTail(done, job.total, failed)
-                val sub = if (job.author.isBlank()) tail else "${job.author} · $tail"
-                val displayName = job.name.ifBlank {
-                    "未命名 · ${job.total} 章"
-                }
-                val item = Widgets.listItem(
-                    this, displayName, sub, twoLine = true, highlight = false,
-                    trailing = "⋮",
-                    onTrailingClick = { showJobMenu(job) },
-                ) { openBook(job.bookId, job.name.ifBlank { displayName }, job.author) }
-                // 只有正在下的那一本需要跟着广播走：其余书的进度不会自己变。
-                if (DownloadService.runningBookId == job.bookId) {
-                    val subView = item.getChildAt(item.childCount - 1) as? android.widget.TextView
-                    val author = job.author
-                    val total = job.total
-                    if (subView != null) homeProgressRows[job.bookId] = { d, f ->
-                        val t = progressTail(d, total, f)
-                        subView.text = if (author.isBlank()) t else "$author · $t"
-                    }
-                }
-                col.addView(item)
-            }
-            // 首页只露 8 本，其余全在书架页 —— 否则下载多了以后首页要滑很久
-            // 才够得到搜索框。少于 8 本时不显入口，上面「书架」按钮已够用。
-            if (bookCount > 8) {
-                col.addView(Widgets.button(this, "全部 $bookCount 本", "text") { showShelf() },
-                    Md3.lpDp(this, null, Md3.BTN).apply { topMargin = Md3.dp(this@MainActivity, Md3.GAP) })
-            }
-        }
-        root.addView(body)
-    }
-
-    /** 最近下载行的进度尾巴。副标题统一两段，字段数固定，列表才能纵向扫读。 */
-    private fun progressTail(done: Int, total: Int, failed: Int): String =
-        if (failed > 0) "$done/$total 章 · 失败 $failed" else "$done/$total 章"
-
-    /**
-     * 书架数据：已下载的书，最近读过的在前。
-     *
-     * 首页的「最近下载」和书架页共用这一份读取 —— 两边各写一遍的话，
-     * 目录过滤、排序依据、restoreLight 的选型迟早会不一致。
-     *
-     * 用 [Downloader.restoreLight]：只要书名、作者、章节数与进度，
-     * 不解析 chapters.jsonl（真实数据 1.5 MB，实测 12 ms，且是主线程）。
-     */
-    private fun shelfBooks(limit: Int = Int.MAX_VALUE): List<BookJob> {
-        // 先按 job.json 里的原始 bookId 取阅读时间，没有阅读记录的才退回目录修改时间。
-        val dirs = jobsDir().listFiles()
-            ?.filter { it.isDirectory && File(it, "job.json").isFile }
-            ?.map { dir -> dir to runCatching { File(dir, "job.json").readText() }.getOrNull()
-                ?.let { com.watchdl.core.TinyJson.path(it, "bookId") }.orEmpty() }
-            ?.sortedByDescending { (dir, id) -> readTime(id).takeIf { it > 0 } ?: dir.lastModified() }
-            ?: return emptyList()
-        // 用 job.json 里的**原始 bookId**，不能用目录名 ——
-        // 目录名是 safeDirName 净化过的，再拿去 restore 会被二次净化，对不上。
-        // 排序只用到 bookId 与时间，所以先排完再 restore —— 首页只要 8 本，
-        // 剩下的书不必为「看不见的卡片」付一次读盘。
-        return dirs.asSequence()
-            .mapNotNull { (_, id) ->
-                id.takeIf { it.isNotBlank() }?.let { Downloader.restoreLight(jobsStore(), it) }
-            }
-            .take(limit)
-            .toList()
-    }
-
-    /**
-     * 书架上的书总数。首页要显示「全部 N 本」，但只渲染 8 本，
-     * 不能拿渲染结果的长度当总数。
-     */
-    private fun shelfBookCount(): Int =
-        jobsDir().listFiles()
-            ?.count { it.isDirectory && File(it, "job.json").isFile }
-            ?: 0
-
-    /**
-     * 书架：已下载的书，两列封面墙。
-     *
-     * 书源不提供封面 —— `job.json` 只存书名/作者/章节/进度，`Downloader.persist`
-     * 没有 cover 字段。所以封面是**生成的占位卡片**：书名首字 + 按书名定的固定配色。
-     * 同一本书每次进来颜色一致，靠颜色区分书籍，不靠图片。
-     *
-     * 只给两列：手表屏宽约 189 dp，减掉两侧边距后每张卡还有 ~85 dp，
-     * 一首字刚好放得下；三列就只剩 50 dp，书名两个字都显示不下。
-     */
-    private fun showShelf() {
-        setScreen(Screen.Shelf)
-        root.removeAllViews()
-        root.addView(Widgets.topBar(this, "书架", onBack = { goBackToPrevious() }))
-
-        val body = Widgets.scrollBody(this, crownStep, crownGlide)
-        val col = Widgets.contentColumn(body)
-        val books = shelfBooks()
-        if (books.isEmpty()) {
-            col.addView(Widgets.emptyState(this, "▤", "书架是空的\n搜索书名即可开始"))
-            root.addView(body)
-            return
-        }
-
-        // 两列排：每行两个卡片，高度由内容决定，纵向滚动。
-        for (chunk in books.chunked(2)) {
-            val row = Md3.row(this)
-            row.gravity = android.view.Gravity.TOP
-            for (job in chunk) {
-                row.addView(shelfCard(job), LinearLayout.LayoutParams(0,
-                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    // 行间距交给卡片自己的下边距；列间距只给左边那张。
-                    if (row.childCount > 0) leftMargin = Md3.dp(this@MainActivity, Md3.GAP)
-                })
-            }
-            // 奇数本时补个空位，否则最后一张卡会撑满整行。
-            if (chunk.size == 1) row.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-            col.addView(row, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                .apply { bottomMargin = Md3.dp(this@MainActivity, Md3.GAP * 2) })
-        }
-        root.addView(body)
-    }
-
-    /** 书架占位色卡可用色。都取 Md3 里的容器色，在白/黑背景下都能读。 */
-    private fun shelfCard(job: BookJob): LinearLayout {
-        val card = Md3.column(this)
-        card.isClickable = true
-        card.isFocusable = true
-        val displayName = job.name.ifBlank { "未命名" }
-        // 点击后进目录（与首页列表一致）
-        card.setOnClickListener { openBook(job.bookId, displayName, job.author) }
-        card.contentDescription = "$displayName，${job.author.ifBlank { "未知作者" }}"
-
-        // 封面区：颜色按书名哈希定，同一本书颜色稳定。
-        val cover = Md3.text(this, coverGlyph(job), 26f, Md3.onPrimaryContainer, bold = true).apply {
-            gravity = android.view.Gravity.CENTER
-            background = Md3.bg(shelfColor(job), Md3.R_CARD.toFloat())
-        }
-        card.addView(cover, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, 58)))
-
-        // 书名两行封顶，下方作者一行截断。
-        val title = Md3.text(this, displayName, Md3.FS_SM, Md3.onSurface).apply {
-            maxLines = 2
-            ellipsize = android.text.TextUtils.TruncateAt.END
-            setPadding(0, Md3.dp(this@MainActivity, Md3.GAP), 0, 0)
-        }
-        card.addView(title)
-        val done = job.count(ChapterStatus.DONE)
-        // 字号走 Md3.FS_SM 而不是硬编码 9sp：MD3 的 labelSmall 下限是 11sp，
-        // 9sp 在手表上已经难读；FS_SM 还会随屏宽档位放大。
-        card.addView(Md3.ellipsize(Md3.text(this,
-            if (job.author.isBlank()) "$done/${job.total} 章" else job.author,
-            Md3.FS_SM, Md3.onSurfaceVariant)))
-
-        // 触控区不够大时补高（Md3.TAP = 34 dp），否则手表上不好点。
-        card.minimumHeight = Md3.dp(this, Md3.TAP)
-        return card
-    }
-
-    /**
-     * 占位封面上显示的字：书名首字。
-     *
-     * 取第一个非空白字符。书名以标点开头（《》「」）时跳过，
-     * 否则整墙的封面全是同一个括号。
-     */
-    private fun coverGlyph(job: BookJob): String {
-        val src = job.name.ifBlank { "未" }
-        // 书名以标点开头（《》「」）时跳过，否则整墙封面全是同一个括号。
-        src.firstOrNull { it.isLetterOrDigit() }?.let { return it.toString() }
-        // 兜底不能取 take(1)：书名以 emoji 开头时它是代理对，截半个会显示成方块。
-        // 用码点切，保证切出的是完整字符。
-        val cp = src.codePointAt(0)
-        return String(Character.toChars(cp))
-    }
-
-    /** 占位色：取几个容器色，按书名哈希固定选一个。 */
-    private fun shelfColor(job: BookJob): Int {
-        val palette = intArrayOf(
-            Md3.primaryContainer, Md3.secondaryContainer, Md3.surface4, Md3.outlineVariant,
-        )
-        return palette[Math.floorMod(job.name.hashCode(), palette.size)]
-    }
-
     /** 目录页一次渲染多少章（M8）。1600 章的书分 16 段，不再一次建 6400 个 View。 */
     private val TOC_WINDOW = 100
 
@@ -739,24 +540,25 @@ class MainActivity : Activity() {
     private val INTRO_LINES = 3
 
     /** 搜索结果一次只建这么多张卡（理由见 showHits 里的注释）。 */
-    private val HITS_WINDOW = 60
+    internal val HITS_WINDOW = 60
 
     /** 搜索结果当前窗口起点。换关键词时不重置就会停在越界位置。 */
-    private var hitsWinStart = 0
+    internal var hitsWinStart = 0
+    internal var seenHits: MutableSet<String> = mutableSetOf()
     /** 目录页当前窗口的起始章下标。进目录时按上次读到的那章重置。 */
     private var tocWinStart = 0
+    /** 目录过滤词。空串 = 不过滤。存在 Activity 而不是 Screen 里：它只是屏内状态。 */
+    internal var tocQuery = ""
+    /**
+     * 下一次进阅读页要补做的滚动。
+     *
+     * 书签记的是像素、正文搜索给的是字符偏移，两者都要等正文布局完成才能定位，
+     * 所以统一成一个「拿到 ScrollView 后干什么」的回调，在 `showReader` 的 post 里消费一次。
+     */
+    internal var pendingJump: ((android.widget.ScrollView) -> Unit)? = null
 
     /** 匹配度打分，越小越靠前。 */
 
-    /** ② 搜索结果。 */
-    /**
-     * 下一批要搜的起点。返回 null 表示源已经轮过一圈了。
-     *
-     * 只有 pool（含被 MAX_SOURCES 剔除的源）大于本轮用量时，换一批才能真正换出新源；
-     * 否则转一圈回到原处，翻页就是白翻。
-     */
-    private fun nextSourceBatch(h: Screen.Hits): Int? =
-        SourceRotation.next(h.offset, h.searchedSources, multi.searchable)
 
     /**
      * 换一批时把已经看过的条目从新结果里剔掉。
@@ -764,134 +566,10 @@ class MainActivity : Activity() {
      * 不同批的源会命中同一本书，不去掉的话换一批只能看到“又一张重复的书”。
      * 用书名+作者而不是 bookId —— 同书不同站的 id 完全不一样。
      */
-    private var seenHits: MutableSet<String> = mutableSetOf()
 
-    private fun hitKey(h: BookHit) = "${h.name.trim()}\u0001${h.author.trim()}"
-
-    /** 搜索结果页的「换一批源」。 */
-    private fun rotateSources(h: Screen.Hits) {
-        val next = nextSourceBatch(h)
-        if (next == null) {
-            toast("源已经轮过一圈了")
-        } else {
-            seenHits.clear()
-            doSearch(h.keyword, next)
-        }
-    }
-
-    private fun showHits(keyword: String, allHits: List<BookHit>, stat: MultiSource.Result? = null, offset: Int = 0,
-                        batch: Int = 0, replay: Boolean = false) {
-        // 排序（P2）：各源拼接顺序完全随机，实测 1700+ 条里目标书可能落在
-        // 第 900 位。手表小屏只看得到几条，不排等于没有。
-        //
-        // 新的一次搜索要把窗口拍回开头：不重置就会停在上次翻到的位置，
-        // 用户看到的是「新搜索结果从第 61 条开始」。
-        if (!replay) hitsWinStart = 0
-        //
-        // 两层排序：先按匹配度分档，档内**同名书必须相邻** —— 列表里同一本书
-        // 现在按源各占一行，分散在各处就失去了「挑个能用的源」的意义。
-        // 重放是「回到已经看过的那一屏」，条目必然都在 seenHits 里；
-        // 再过滤一次会把整屏清空，用户看到的是「没有找到」。
-        val all = allHits.asSequence()
-            .filter { it.name.isNotBlank() }
-            .filter { replay || hitKey(it) !in seenHits }
-            .sortedWith(compareBy<BookHit> { MatchScore.of(it.name, keyword) }.thenBy { it.name.trim() })
-            .toList()
-        // 记下来，换一批时不再重复显示。
-        if (!replay) all.forEach { seenHits += hitKey(it) }
-        // 同一本书多个源只出一张卡：屏上只看得见 3.5 行，四张重复卡会把别的结果挤掉。
-        // 点卡片仍是按书名重新搜索，所以合并不会丢掉「换个源」的能力。
-        val hits = all.distinctBy { "${it.name.trim()}\u0001${it.author.trim()}" }
-        // 同名书共几源：必须在合并前统计，合并后每个名字只剩一条。
-        val sourceCount = all.groupingBy { "${it.name.trim()}\u0001${it.author.trim()}" }.eachCount()
-        setScreen(Screen.Hits(keyword, hits, offset, stat?.total ?: 0, all))
-        root.removeAllViews()
-        root.addView(Widgets.topBar(this, "搜索结果", onBack = { goBackToPrevious() }))
-
-        val body = Widgets.scrollBody(this, crownStep, crownGlide)
-        val col = Widgets.contentColumn(body)
-
-        // 多源统计卡：告诉用户跑了几条源、几条没响应。
-        // 不加这行的话，用户不知道「搜索结果少」是源少还是源挂了。
-        if (stat != null) {
-            // 文案长短会决定它是 1 行还是 2 行，下面列表就上下跳 24px（P1-3）。
-            // 手表屏 378px 宽，失败源那段很容易溢出—— 限定单行 + 末尾省略，
-            // 完整数字本来在下方书源页里看得到。
-            val line = Md3.ellipsize(Md3.text(this,
-                "找到 ${hits.size} 本",
-                Md3.FS_SM, Md3.onSurfaceVariant))
-            col.addView(line)
-        }
-
-        // 换一批源：**固定在滚动区外**，不跟着列表一起滑走。
-        // 放列表顶部的话，一往下滑就看不见了 —— 而那正是想换一批的时候。
-        // 重进这一屏时 stat 为 null，改用屏上记的批次大小。
-        val batch = stat?.total ?: batch.takeIf { it > 0 }
-            ?: (screen as? Screen.Hits)?.searchedSources ?: 0
-        val hitsScreen = Screen.Hits(keyword, hits, offset, batch, all)
-        val sourceTotal = multi.searchable
-        val canRotate = batch > 0 && offset + batch < sourceTotal
-        val remaining = sourceTotal - offset - batch
-        // 当前屏的批次状态，换一批后 [showHits] 靠它算下一批。
-        setScreen(hitsScreen)
-
-        if (hits.isEmpty()) {
-            // N6：15 个源全挂（断网、DNS 挂了）时，说「换个关键词」是错的建议 ——
-            // 用户会去改关键词，而问题在网络。responded 为 0 说明一条源都没回话。
-            val msg = when {
-                stat != null && stat.responded == 0 && stat.total > 0 ->
-                    "所有源都没有响应\n检查网络后再试"
-                stat != null && stat.responded < stat.total ->
-                    "没有找到「$keyword」\n${stat.total - stat.responded} 个源没响应，可换一批"
-                else -> "没有找到「$keyword」\n换个关键词试试"
-            }
-            col.addView(Widgets.emptyState(this, "∅", msg), Md3.lpWeight(1f))
-        } else {
-            // 510 条结果一次性建 510 个 View，手表上量到 616ms 掉帧（2026-10-27 日志）。
-            // 跟目录那一屏用同一个办法：只建一窗，翻页换窗。
-            val winStart = hitsWinStart.coerceIn(0, maxOf(0, hits.size - HITS_WINDOW))
-            hitsWinStart = winStart
-            val winEnd = (winStart + HITS_WINDOW).coerceAtMost(hits.size)
-            for (h in hits.subList(winStart, winEnd)) {
-                // 第二行显示作者 + 来源站名。源名放最后，因为它是用户挑源要看的。
-                val cleanSource = h.sourceName.takeIf { it.isNotBlank() && !it.contains("{{") && !it.contains("@{") }
-                val sub = listOf(h.author.takeIf { it.isNotBlank() }, cleanSource)
-                    .filterNotNull().joinToString(" · ")
-                // 同一本书有多个源时标出来，否则用户以为是两本不同的书。
-                val n = sourceCount[hitKey(h)] ?: 1
-                val title = if (n > 1) "${h.name}（$n 源）" else h.name
-                col.addView(Widgets.listItem(this, title, sub, twoLine = true, highlight = true) {
-                    openHit(h)
-                })
-            }
-            // 翻页条：只在结果超过一窗时才出，否则会让小屏多占两行。
-            if (hits.size > HITS_WINDOW) {
-                val nav = Widgets.button(this, "${winStart + 1}–$winEnd / ${hits.size} 条", "tonal", {
-                    hitsWinStart = if (winEnd >= hits.size) 0 else winEnd
-                    showHits(keyword, allHits, stat, offset, batch, replay = true)
-                })
-                nav.contentDescription = "翻到下一百条"
-                col.addView(nav)
-            }
-        }
-        root.addView(body)
-
-        // 换一批源：放在**固定底栏**，列表怎么滑都在。
-        if (canRotate) {
-            val next = Widgets.button(this, "换一批（还剩 $remaining 条）", "tonal", {
-                rotateSources(hitsScreen)
-            })
-            next.contentDescription = "换一批源，还剩 $remaining 条"
-            next.layoutParams = Md3.lpDp(this, null, Md3.BTN).apply {
-                topMargin = Md3.dp(this@MainActivity, Md3.GAP / 2)
-                bottomMargin = Md3.dp(this@MainActivity, Md3.GAP / 2)
-            }
-            root.addView(next)
-        }
-    }
 
     /** ③ 目录 + 下载。 */
-    private fun showToc(info: BookInfo, src: BookSource? = null) {
+    internal fun showToc(info: BookInfo, src: BookSource? = null) {
         // 源跟着屏幕走：预览/下载要从同一个源取正文，否则多源下会串源。
         val useSrc = src ?: tocSrc
         tocSrc = useSrc
@@ -904,7 +582,10 @@ class MainActivity : Activity() {
         setScreen(Screen.Toc(info, useSrc))
         root.removeAllViews()
         root.addView(Widgets.topBar(this, info.name, onBack = { goBackToPrevious() },
-            trailing = listOf("⋮" to { showTocMenu(info) })))
+            trailing = listOf(
+                "search" to { askTocQuery(info, useSrc) },
+                "more" to { showTocMenu(info) },
+            )))
 
         val body = Widgets.scrollBody(this, crownStep, crownGlide)
         val col = Widgets.contentColumn(body)
@@ -987,7 +668,7 @@ class MainActivity : Activity() {
         row.addView(go, LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f))
         // 差几章的书把导出提到主按钮后，右边这个按钮不能再是导出的复制品 ——
         // 否则那几章失败的永远没地方重试。它改成「续下」入口。
-        val exp = Widgets.button(this, if (nearlyDone) "↻" else "⤓", "tonal") {
+        val exp = Md3.squareButton(this, if (nearlyDone) "refresh" else "download", "tonal") {
             if (nearlyDone) startDownload(info) else exportTxt(info)
         }
         exp.contentDescription = if (nearlyDone) "继续下载" else "导出 TXT"
@@ -1001,16 +682,37 @@ class MainActivity : Activity() {
         // M8：以前一次性给全部章节建 View，1600 章约 6400 个，直接 ANR。
         // 现在只渲染一个以 [tocWinStart] 为起点的窗口，两端给「往前/往后」按钮，
         // 点了换窗口重绘整个列表 —— 不做增量插入，索引不会错。
-        val listAnchor = col.childCount
         val winStart = tocWinStart.coerceIn(0, (info.chapters.size - 1).coerceAtLeast(0))
         val winEnd = (winStart + TOC_WINDOW - 1).coerceAtMost(info.chapters.lastIndex)
-        if (winStart > 0) {
-            col.addView(Widgets.button(this, "↑ 前面还有 $winStart 章", "text") {
-                tocWinStart = (winStart - TOC_WINDOW).coerceAtLeast(0)
-                showToc(info, src)
+        // 过滤时不走窗口：命中数已被 ReaderFind 截住，直接给前 TOC_WINDOW 条。
+        // 过滤态下不提供「前后还有 N 章」—— 那是窗口概念，和搜索结果是两回事。
+        val found = if (tocQuery.isBlank()) null
+                    else ReaderFind.titles(info.chapters.map { it.title }, tocQuery)
+        if (found != null) {
+            val head = Md3.row(this)
+            head.addView(Md3.ellipsize(Md3.text(this, "「$tocQuery」命中 ${found.size} 章",
+                Md3.FS_SM, Md3.onSurfaceVariant)),
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            head.addView(Md3.text(this, "清空", Md3.FS_SM, Md3.primary, bold = true).apply {
+                isClickable = true
+                setPadding(Md3.dp(this@MainActivity, 8), 0, Md3.dp(this@MainActivity, 4), 0)
+                contentDescription = "清空目录过滤"
+                setOnClickListener { tocQuery = ""; showToc(info, useSrc) }
             })
+            col.addView(head)
         }
-        for (i in winStart..winEnd) {
+        // 列表锚点必须在过滤头之后取：前面每加一个子项，下标就往后错一位。
+        val listAnchor = col.childCount
+        val shown = (found ?: (winStart..winEnd).toList()).take(TOC_WINDOW)
+        if (found == null) {
+            if (winStart > 0) {
+                col.addView(Widgets.button(this, "↑ 前面还有 $winStart 章", "text") {
+                    tocWinStart = (winStart - TOC_WINDOW).coerceAtLeast(0)
+                    showToc(info, src)
+                })
+            }
+        }
+        for (i in shown) {
             val ch = info.chapters[i]
             val st = job?.statuses?.get(i)
             val (mark, color) = when {
@@ -1019,20 +721,28 @@ class MainActivity : Activity() {
                 st == ChapterStatus.FAILED -> "✗" to Md3.error
                 else -> null to Md3.onSurfaceVariant
             }
-            col.addView(Widgets.chapterItem(this, i + 1, ch.title, mark, color) {
+            col.addView(Widgets.chapterItem(this, i + 1, ch.title, mark, color,
+                highlight = i == lastRead) {
                 if (ch.locked) toast("这是付费章，取不到正文") else preview(info, i)
             })
         }
-        val rest = info.chapters.size - 1 - winEnd
-        if (rest > 0) {
-            col.addView(Widgets.button(this, "↓ 后面还有 $rest 章", "text") {
-                tocWinStart = winEnd + 1
-                showToc(info, src)
-            })
+        if (found != null) {
+            if (shown.isEmpty()) {
+                col.addView(Widgets.emptyState(this, "search", "没有标题含「$tocQuery」的章"))
+            }
+        } else {
+            val rest = info.chapters.size - 1 - winEnd
+            if (rest > 0) {
+                col.addView(Widgets.button(this, "↓ 后面还有 $rest 章", "text") {
+                    tocWinStart = winEnd + 1
+                    showToc(info, src)
+                })
+            }
         }
         // 直接滚到上次读到的那章：五百章的书手动滑到第 300 章是不可能的事。
-        if (lastRead in winStart..winEnd) {
-            val target = col.getChildAt(listAnchor + (lastRead - winStart))
+        val jumpAt = shown.indexOf(lastRead)
+        if (jumpAt >= 0) {
+            val target = col.getChildAt(listAnchor + jumpAt)
             body.post { target?.let { body.smoothScrollTo(0, it.top) } }
         }
         root.addView(body)
@@ -1047,7 +757,7 @@ class MainActivity : Activity() {
      * 就是每秒数次整屏重建 + 数 MB 读盘，手表上直接掉帧。
      * 现在只在换书或首次进入时重建，之后走 [refreshProgressLive] 只改文字。
      */
-    private fun showProgress(info: BookInfo) {
+    internal fun showProgress(info: BookInfo) {
         val same = (screen as? Screen.Progress)?.info?.bookId == info.bookId &&
             progressNum != null
         setScreen(Screen.Progress(info))
@@ -1134,342 +844,15 @@ class MainActivity : Activity() {
         sub.text = "已下载 $progressDone 章，失败 $progressFailed 章$speed$remain"
     }
 
-    /** ⑤ 书源管理。 */
-    private fun showSources() {
-        setScreen(Screen.Sources)
-        root.removeAllViews()
-        root.addView(Widgets.topBar(this, "书源", onBack = { goBackToPrevious() }))
-
-        val body = Widgets.scrollBody(this, crownStep, crownGlide)
-        val col = Widgets.contentColumn(body)
-
-        // 副标题原本是「从 yiove 在线拉取，点选即可导入」，单行省略号把它压到卡片边缘（P1-5）。
-        col.addView(Widgets.listItem(
-            this, "书源市场", "yiove 在线库，点选导入",
-            twoLine = true, highlight = false,
-            leading = Md3.text(this, "☁", Md3.FS_MD, Md3.primary),
-        ) { showMarket(1, emptyList()) })
-        // 云端整包更新：改一个 JSON 推上去就不必重新发包。
-        col.addView(Widgets.listItem(
-            this, "更新书源库", "从云端拉取最新书源包",
-            twoLine = true, highlight = false,
-            leading = Md3.text(this, "↓", Md3.FS_MD, Md3.primary),
-        ) { updateFromCloud() })
-        // 并发线程数：通用书源默认串行太慢（实测 0.17 章/秒），交给用户自己定。
-        col.addView(Widgets.listItem(
-            this, "下载线程", "当前 ${lanes()} 线程 · 越多越易被限流",
-            twoLine = true, highlight = false,
-            leading = Md3.text(this, "≡", Md3.FS_MD, Md3.primary),
-        ) { pickLanes() })
-        col.addView(Widgets.sectionLabel(this, "本地书源"))
-
-        val owner: Screen = Screen.Sources
-        bg(owner, {
-            // 整段必须包 try：这里任何一步抛异常，线程会静默死掉，
-            // 界面停在空白状态 —— 看起来就是「书源 0 条」，却没有任何提示。
-            runCatching {
-                extractAssets()
-                buildLocalSourceRows()
-            }.getOrElse {
-                DevLog.log("WatchDL", "读取本地书源失败：${it.message}")
-                null
-            }
-        }) { res ->
-            val data = res.getOrNull()
-            if (data == null) {
-                col.addView(Widgets.emptyState(this, "⚠", "读取本地书源失败\n请重装或重新导入"))
-                root.addView(body)
-                return@bg
-            }
-            val (files, rows, total, usable) = data
-            run {
-                val card = Widgets.card(this, outlined = true)
-                card.addView(Md3.text(this, "可用 $usable / 共 $total 条", Md3.FS_MD, Md3.onSurface))
-                // 路径是内部信息（P1-4），只在 debug 包显示 —— 用户拿它无用处。
-                if (rows.count { it.mark == "✗" } > 0 && isDebugBuild()) {
-                    card.addView(Md3.text(this,
-                        "目录 ${files.size} 个文件 · ${srcDirPath}",
-                        Md3.FS_SM, Md3.onSurfaceVariant))
-                }
-                // ── 诊断区：只在真的出问题时才显示 ──
-                //
-                // 手表屏幕小，这三行（正则自检 / 失败明细 / 导入抛点）是排障用的，
-                // 源全可用时显示只会误导："失败 6 条" 看着像故障，实际是
-                // "这 6 条需修补且已自动修补"。所以全好就藏，有问题才冒出来。
-                // logcat 里始终写全量，需要时仍可读到。
-                val badRe = SafeRegex.probe(RegexProbe.ALL) + SafeRegex.probe(RegexProbe.FROM_SOURCES)
-                val lenientBad = SafeRegex.probeLenient(
-                    badRe.map { it.substringBefore(" | ") to it.substringAfter("正则=") })
-                    .filter { it.contains("仍失败") }
-                val trace = ImportTrace.last
-                val broken = rows.count { it.mark == "✗" }
-                DevLog.log("WatchDL",
-                    "正则自检：字面 ${RegexProbe.ALL.size} / 书源 ${RegexProbe.FROM_SOURCES.size} / " +
-                    "裸编译失败 ${badRe.size}（走后兜底仍失败 ${lenientBad.size}）/ 导入抛点 ${trace ?: "无"}")
-                badRe.take(6).forEach { DevLog.log("WatchDL", "裸编译失败 $it") }
-                lenientBad.take(6).forEach { DevLog.log("WatchDL", "兜底仍失败 $it") }
-
-                // 只有「有源不可用」或「修补后仍编不过 / 导入抛过异常」才展示
-                if (broken > 0 || lenientBad.isNotEmpty() || trace != null) {
-                    // 只给结论，不贴正则原文：189dp 宽的屏上那几行只会溢出卡片。
-                    if (lenientBad.isNotEmpty()) {
-                        card.addView(Md3.text(this,
-                            "${lenientBad.size} 条书源已自动修正",
-                            Md3.FS_SM, Md3.onSurfaceVariant))
-                    }
-                    if (trace != null) {
-                        card.addView(Md3.text(this, "有源在导入时出错，详情见日志",
-                            Md3.FS_SM, Md3.onSurfaceVariant))
-                    }
-                } else {
-                    // 全好：一句结论就够了，不再列数字与明细（那是排障才需要的）
-                    card.addView(Md3.text(this, "全部可导入", Md3.FS_SM, Md3.onSurfaceVariant))
-                }
-                // 按原因归类，比逐条列 780 行有用得多。
-                // 全好时上面已经写过「全部可导入」，这里不再重复。
-                val byReason = rows.filter { it.mark == "✗" }
-                    .groupBy { shortReason(it.note) }
-                    .entries.sortedByDescending { it.value.size }
-                if (byReason.isNotEmpty()) {
-                    card.addView(Md3.text(this,
-                        "${rows.count { it.mark == "✗" }} 条暂不可用",
-                        Md3.FS_SM, Md3.onSurfaceVariant))
-                    byReason.take(3).forEach { (reason, list) ->
-                        card.addView(Md3.ellipsize(
-                            Md3.text(this, "· ${list.size} 条：$reason", Md3.FS_SM, Md3.onSurfaceVariant)))
-                    }
-                    if (byReason.size > 3) {
-                        card.addView(Md3.text(this, "· 另有 ${byReason.size - 3} 类原因", Md3.FS_SM, Md3.onSurfaceVariant))
-                    }
-                }
-                // 「来源」原来是逐条列内部文件名（2972e4a8_kk笔趣阁_http_…），
-                // 对用户没有任何用处。文件数并进卡片一行，列表只留给真实书源。
-                card.addView(Md3.text(this, "源文件 ${files.size} 个", Md3.FS_SM, Md3.onSurfaceVariant))
-                col.addView(card)
-
-                // 全部列出，可用的排前面。以前只列"可用"的，用户会以为源丢了 ——
-                // 54 条里 11 条不可用是正常的，应当看得见、能知道原因。
-                val sorted = rows.sortedBy { if (it.mark == "✓") 0 else if (it.mark == "⚠") 1 else 2 }
-                col.addView(Widgets.sectionLabel(this, "全部书源（${rows.size}）"))
-                sorted.take(400).forEach { r ->
-                    val color = when (r.mark) {
-                        "✓" -> Md3.ok
-                        "⚠" -> Md3.primary
-                        else -> Md3.error
-                    }
-                    // M7：声明明文、且实测 https 也升级不上去的源才标「明文」。
-                    // 探测结论来自 [Http.cleartextHosts]：没发过请求的源还不知道，不预标。
-                    val plain = r.declaredHttp && r.plainConfirmed
-                    val sub = listOfNotNull(
-                        r.note?.let { shortReason(it) },
-                        if (plain) "明文传输" else null,
-                    ).joinToString(" · ").ifEmpty { null }
-                    col.addView(Widgets.listItem(
-                        this, r.name, sub, twoLine = sub != null,
-                        highlight = false,
-                        leading = Md3.text(this, r.mark, Md3.FS_SM, color),
-                    ))
-                }
-                if (sorted.size > 400) {
-                    col.addView(Md3.text(this, "（还有 ${sorted.size - 400} 条未显示）",
-                        Md3.FS_SM, Md3.onSurfaceVariant))
-                }
-            }
-        }
-        root.addView(body)
-    }
-
-    /**
-     * 书源市场。列表只拿元数据（快），点某一条才拉完整规则（约 1 秒），
-     * 装上后落盘缓存，下次不再拉。
-     *
-     * 全站 31606 条 / 2.5 GB，全量拉要 9 小时，所以不做整库导入。
-     */
-    /**
-     * 发现页：选站点 → 选频道 → 选分类 → 看那一个榜。
-     *
-     * 以前是一条混合流，把几个榜各取一页轮流拼起来 —— 结果「番茄更新」那种新鲜但
-     * 难看的书把好榜的份额挤掉了。现在番茄有 26 个分类 × 阅读/新书两榜，起点有 5 个榜，
-     * 全并行拉一次就是 52 个请求，所以改成**选中后只拉一个榜**。
-     *
-     * 番茄分类榜走页面 SSR，一屏 10 本、不可翻页；起点每页 20 本、可翻到第 10 页。
-     * 点书名走既有的多源搜索：起点没有对应 [BookSource]，番茄榜单的书也未必能直取目录。
-     */
-    private fun showDiscover(
-        site: String = "fq",
-        gender: String = "male",
-        rankKey: String = "",
-    ) {
-        setScreen(Screen.Discover(site, gender, rankKey))
-        root.removeAllViews()
-
-        // 这个站点+频道下有哪些榜。
-        val genderEnum = if (gender == "female") RankConfig.Gender.FEMALE else RankConfig.Gender.MALE
-        val siteEnum = if (site == "qd") RankConfig.Site.QIDIAN else RankConfig.Site.FANQIE
-        val avail = discoverRanks().filter { it.site == siteEnum && it.gender == genderEnum }
-        // 没指定就选第一个。两栏布局里右栏空着等于白占一半屏。
-        val sel = avail.firstOrNull { it.key == rankKey } ?: avail.firstOrNull()
-
-        root.addView(Widgets.topBar(this, sel?.name ?: "发现",
-            onBack = { goBackToPrevious() },
-            trailing = listOf("⟳" to { showDiscover(site, gender, rankKey) })))
-
-        // 站点与频道合成一行。手表屏高只有 248dp，两个各带分组标题的区块
-        // 各吃掉约 69dp，两栏就没地方了。
-        val head = Md3.row(this)
-        head.setPadding(Md3.dp(this, Md3.PAD), 0, Md3.dp(this, Md3.PAD), 0)
-        for ((on, label, act) in listOf<Triple<Boolean, String, () -> Unit>>(
-            Triple(site == "fq", "番茄", { if (site != "fq") showDiscover("fq", gender, "") }),
-            Triple(site == "qd", "起点", { if (site != "qd") showDiscover("qd", gender, "") }),
-            Triple(gender == "male", "男频", { if (gender != "male") showDiscover(site, "male", "") }),
-            Triple(gender == "female", "女频", { if (gender != "female") showDiscover(site, "female", "") }),
-        )) {
-            val b = Widgets.button(this, label, if (on) "filled" else "tonal", act)
-            b.contentDescription = label
-            head.addView(b, LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f).apply {
-                if (head.childCount > 0) leftMargin = Md3.dp(this@MainActivity, Md3.GAP / 2)
-            })
-        }
-        head.layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, Md3.BTN),
-        ).apply { bottomMargin = Md3.dp(this@MainActivity, Md3.GAP) }
-        root.addView(head)
-
-        if (avail.isEmpty()) {
-            root.addView(Widgets.emptyState(this, "▤", "这个频道暂时没有榜单"), Md3.lpWeight(1f))
-            return
-        }
-        val cur = sel ?: return
-
-        // 两栏：左分类（自己滚），右书目（表冠滚）。
-        val split = Md3.row(this)
-        split.layoutParams = Md3.lpWeight(1f)
-        split.setPadding(Md3.dp(this, Md3.PAD), 0, Md3.dp(this, Md3.PAD), Md3.dp(this, Md3.PAD))
-        root.addView(split)
-
-        // 侧栏宽度：手表 189dp 下给 59dp，四字分类刚好放得下；
-        // 手机上放大到 100dp，右栏书名也就没那么挤。
-        val railScroll = ScrollView(this).apply {
-            isVerticalScrollBarEnabled = true
-            scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY
-            layoutParams = LinearLayout.LayoutParams(
-                Md3.dp(this@MainActivity, if (Md3.isWide(this@MainActivity)) 100 else 59),
-                ViewGroup.LayoutParams.MATCH_PARENT)
-        }
-        val rail = Md3.column(this)
-        railScroll.addView(rail, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        split.addView(railScroll)
-
-        // 右侧书目用 scrollBody 是为了白拿它的表冠滚动；它自带的四周 PAD
-        // 在这里会顶出一倍的缝，所以置零，边距由 split 统一给。
-        val paneBody = Widgets.scrollBody(this, crownStep, crownGlide)
-        paneBody.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
-            .apply { leftMargin = Md3.dp(this@MainActivity, Md3.GAP) }
-        paneBody.setPadding(0, 0, 0, 0)
-        split.addView(paneBody)
-        val pane = Widgets.contentColumn(paneBody)
-
-        for (r in avail) {
-            val on = r.key == cur.key
-            // 榜单名形如「西方奇幻 · 阅读」，侧栏只放分类名。
-            val label = if (site == "qd") r.name else r.name.substringBefore(" · ")
-            val item = Md3.text(this, label, Md3.FS_SM,
-                if (on) Md3.onPrimaryContainer else Md3.onSurfaceVariant, bold = on).apply {
-                gravity = Gravity.CENTER_VERTICAL
-                maxLines = 2
-                setPadding(Md3.dp(context, 6), Md3.dp(context, 3), Md3.dp(context, 6), Md3.dp(context, 3))
-                minimumHeight = Md3.dp(context, Md3.ITEM)
-                background = if (on) Md3.bg(Md3.primaryContainer, Md3.R_ITEM.toFloat())
-                             else Md3.ripple(context, Color.TRANSPARENT, Md3.R_ITEM.toFloat())
-                contentDescription = label
-                isClickable = true
-                setOnClickListener { if (!on) showDiscover(site, gender, r.key) }
-            }
-            rail.addView(item, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { bottomMargin = Md3.dp(this@MainActivity, 2) })
-        }
-
-        val holder = Md3.column(this)
-        pane.addView(holder)
-        holder.addView(Md3.text(this, "正在拉取…", Md3.FS_SM, Md3.onSurfaceVariant))
-
-        // 云端配置照旧在后台刷：拉到了且列表真变了就重画一次，没变就不动。
-        refreshRanks(Screen.Discover(site, gender, rankKey)) {
-            showDiscover(site, gender, rankKey)
-        }
-
-        bg(Screen.Discover(site, gender, rankKey), { loadOneRank(cur) }) { res ->
-            holder.removeAllViews()
-            res.onSuccess { hits ->
-                if (hits.isEmpty()) {
-                    holder.addView(Md3.text(this, "这个榜暂时没有内容",
-                        Md3.FS_SM, Md3.onSurfaceVariant))
-                } else {
-                    for (h in hits) holder.addView(discoverItem(pane, h))
-                }
-            }.onFailure { e ->
-                holder.addView(Md3.text(this, "取不到：${e.message?.take(60)}",
-                    Md3.FS_SM, Md3.error))
-                holder.addView(Widgets.button(this, "重试", "tonal", {
-                    showDiscover(site, gender, rankKey)
-                }))
-            }
-        }
-    }
-
-    /**
-     * 发现页的一行。
-     *
-     * 副标题优先用 [BookHit.extra]（排名 · 字数 · 最新章节），没有就退回作者。
-     * 点进去走多源搜索。
-     */
-    private fun discoverItem(col: LinearLayout, h: BookHit): LinearLayout {
-        val sub = listOf(
-            h.author.takeIf { it.isNotBlank() },
-            h.extra.takeIf { it.isNotBlank() },
-        ).filterNotNull().joinToString(" · ")
-        return Widgets.listItem(this, h.name, sub, twoLine = true, highlight = true) {
-            rememberReturn()
-            openDiscoverHit(h)
-        }
-    }
-
-    /**
-     * 拉起一个榜。
-     *
-     * 番茄分类榜一屏 10 本、不可翻页；起点每页 20 本，这里把前 [RankConfig.Rank.pages]
-     * 页串起来（最多 10 页 = 200 本）。整批共用一个死线，免得 10 页各自计时。
-     */
-    private fun loadOneRank(r: RankConfig.Rank): List<BookHit> {
-        // 字符表只读一次。读不到也不致命，书名只是带私用区字符。
-        val decoder = runCatching {
-            CharsetFontDecoder.fromFile(File(filesDir, "charset.json").absolutePath)
-        }.getOrNull()?.takeIf { it.isReady }
-
-        val gender = if (r.gender == RankConfig.Gender.FEMALE) "female" else "male"
-        val deadline = System.currentTimeMillis() + RankSource.PAGE_BUDGET_MS * 2
-        // S18：以前非起点榜一律 1 页，配置里写 pages:5 也无效。
-        // 现在按配置走，0 表示不可翻页。
-        val pages = r.pages.coerceIn(0, 10).coerceAtLeast(1)
-        val out = LinkedHashMap<String, BookHit>()
-        for (p in 1..pages) {
-            if (System.currentTimeMillis() > deadline) break
-            val got = runCatching { RankSource.fetch(r, gender, p, deadline, decoder) }
-                .getOrElse { if (p == 1) throw it else break }
-            for (h in got) out.putIfAbsent(h.bookId, h)
-        }
-        return out.values.toList()
-    }
-
+    // 发现榜单的缓存状态。屏代码在 ui/source/SourceScreen.kt，状态留在这里
+    // —— 扩展属性不能有初始化器，搬到那边就没法直接持有。
 
     /**
      * 当前可用的榜单。云端配置拉一次就缓存到内存，不每次翻页都去请求。
      *
      * 拉不到云端时用内置清单，所以发现页永远不会因此打不开。
      */
-    private var rankCache: List<RankConfig.Rank>? = null
+    internal var rankCache: List<RankConfig.Rank>? = null
 
     /**
      * 云端刷新**成功过**就不再重复问镜像。
@@ -1478,531 +861,17 @@ class MainActivity : Activity() {
      * 那时 `then` 根本不执行。若发起前就置真，用户点开发现页、立刻返回，
      * 本次进程就再也不会刷新云端配置了 —— 内置表里的榜会一直用到重启。
      */
-    private var rankRefreshed = false
+    internal var rankRefreshed = false
 
     /** 已有一个刷新任务在跑。**发起时置真、回调里清假**，与 [rankRefreshed] 分工不同。 */
-    private var rankRefreshing = false
+    internal var rankRefreshing = false
 
-    /**
-     * 当前可用的榜单。**已缓存的纯内存读，首次也只读磁盘和内置表，都不联网。**
-     *
-     * 以前这里直接调 [RankConfig.load]，而 load 最坏串行问 4 个镜像、
-     * 总预算 20 秒。它在主线程被调 —— 点「发现榜单」就冻住十几秒，看着就是卡死。
-     * 现在联网的部分全交给 [refreshRanks] 在后台做。
-     */
-    private fun discoverRanks(): List<RankConfig.Rank> {
-        rankCache?.let { return it }
-        val got = RankConfig.local(File(filesDir, "sources"))
-        // 空表不缓存 —— 否则一次取数失败会让本次进程再也不重试。
-        if (got.isNotEmpty()) rankCache = got
-        return got
-    }
 
-    /**
-     * 后台拉一次云端配置；拉到了就重新渲染当前发现页。
-     *
-     * 只在榜选择器画完之后调，所以即使慢或失败也不影响用户先看到本地榜单。
-     * 重渲染前已经靠 [postAlive] 核过屏身份 —— 用户已经走了就不重画。
-     */
-    private fun refreshRanks(owner: Screen, rerender: () -> Unit) {
-        if (rankRefreshing || rankRefreshed) return
-        rankRefreshing = true
-        bg(owner, { RankConfig.load(File(filesDir, "sources")) }) { res ->
-            rankRefreshing = false
-            val got = res.getOrNull()?.first ?: return@bg
-            if (got.isEmpty()) return@bg
-            rankRefreshed = true
-            val before = rankCache
-            rankCache = got
-            // 内容没变就不重画，避免回到发现页时闪一下。
-            if (got != before) rerender()
-        }
-    }
-    private fun showMarket(page: Int, accumulated: List<YioveSource.Item>) {
-        setScreen(Screen.Market(accumulated, 0, page))
-        root.removeAllViews()
-        root.addView(Widgets.topBar(this, "书源市场", onBack = { showSources() }))
-
-        val body = Widgets.scrollBody(this, crownStep, crownGlide)
-        val col = Widgets.contentColumn(body)
-        root.addView(body)
-
-        if (accumulated.isEmpty()) {
-            col.addView(Widgets.emptyState(this, "☁", "正在拉取第 $page 页…"))
-        } else {
-            renderMarket(col, accumulated, page)
-        }
-
-        val owner: Screen = Screen.Market(accumulated, 0, page)
-        bg(owner, { YioveSource.list(page = page, pageSize = 30) }) { res ->
-            res.onSuccess { p ->
-                val all = accumulated + p.items
-                setScreen(Screen.Market(all, p.total, page))
-                col.removeAllViews()
-                renderMarket(col, all, page, p.total, p.pages)
-            }.onFailure { e ->
-                col.removeAllViews()
-                col.addView(Widgets.emptyState(this, "⚠", "拉取失败：${e.message?.take(60)}"))
-                col.addView(Widgets.button(this, "重试", "tonal", { showMarket(page, accumulated) }))
-            }
-        }
-    }
-
-    private fun renderMarket(
-        col: LinearLayout,
-        items: List<YioveSource.Item>,
-        page: Int,
-        total: Int = 0,
-        pages: Int = 0,
-    ) {
-        // 已装过的标记出来（按 id 前 8 位找文件名）
-        val dir = sourcesDir()
-        val installed = YioveSource.installed(dir).map { it.name }.toSet()
-
-        if (total > 0) {
-            val card = Widgets.card(this, outlined = true)
-            card.addView(Md3.text(this, "共 $total 条 · 第 $page/$pages 页", Md3.FS_MD, Md3.onSurface))
-            card.addView(Md3.text(this,
-                "点选一条即拉取并导入；全量太大，只按需拉", Md3.FS_SM, Md3.onSurfaceVariant))
-            col.addView(card)
-        }
-
-        col.addView(Widgets.sectionLabel(this, "第 $page 页"))
-        val startIdx = if (total > 0) items.size - 30 else 0
-        items.drop(startIdx).forEach { it0 ->
-            val has = installed.any { it.startsWith(it0.id.take(8)) }
-            col.addView(Widgets.listItem(
-                this, it0.name,
-                if (has) "已导入" else "热度 ${it0.views}",
-                twoLine = true, highlight = false,
-                leading = Md3.text(this, if (has) "✓" else "↓", Md3.FS_SM,
-                    if (has) Md3.ok else Md3.onSurfaceVariant),
-            ) { if (!has) installFromMarket(it0.name, it0.id, page, items) })
-        }
-
-        val more = Widgets.button(this, "下一页", "tonal", { showMarket(page + 1, items) })
-        more.layoutParams = Md3.lpDp(this, null, Md3.BTN).apply {
-            topMargin = Md3.dp(this@MainActivity, Md3.GAP)
-        }
-        col.addView(more)
-    }
-
-    /** 拉单条规则并导入（约 1 秒），成功后回列表把该条标成已导入。 */
-    private fun installFromMarket(name: String, id: String, page: Int, shown: List<YioveSource.Item>) {
-        toast("正在拉取「$name」…")
-        val owner: Screen = Screen.Market(shown, 0, page)
-        bg(owner, { YioveSource.install(sourcesDir(), YioveSource.Item(id, name, "", 0)) }) { res ->
-            res.onSuccess { r ->
-                toast(if (r.ok) "已导入：${r.name}" else "不支持：${r.issue ?: "未知原因"}")
-                showMarket(page, shown.filter { it.name != name })
-            }.onFailure { toast("导入失败：${it.message?.take(50)}") }
-        }
-    }
-
-    /** 从云端整包更新书源库。成功后回书源页，能看到新的条数。 */
-    private fun updateFromCloud() {
-        toast("正在检查…")
-        val owner: Screen = Screen.Sources
-        bg(owner, {
-            CloudSource.update(sourcesDir(), onProgress = { msg -> postAlive(owner) { toast(msg) } })
-        }) { res ->
-            val r = res.getOrElse { e ->
-                DevLog.log("WatchDL", "云端更新失败：${e.message}")
-                CloudSource.Result(false, "更新异常：${e.message?.take(60)}")
-            }
-            toast(r.message)
-            // 不管成没成都会书源页 —— 失败时用户能看到当前条数，知道没被弄坏。
-            showSources()
-        }
-    }
-
-    /** 本地书源一行。 */
-    private data class SourceRow(
-        val file: String,
-        val name: String,
-        val mark: String,
-        val note: String?,
-        /** 声明为 http:// 的源（M7）；实际是否回落到明文由 [Http.cleartextHosts] 决定。 */
-        val declaredHttp: Boolean = false,
-        /** 书源根地址，用来把探测结论对到这条行上。null = 导入器没给出。 */
-        val host: String? = null,
-    ) {
-        /** 声明明文、且探测结果明确说这个 host 升不上 https。 */
-        val plainConfirmed: Boolean
-            get() = declaredHttp && host != null && Http.isCleartextHost(host)
-    }
-
-    /**
-     * 读 [filesDir]/sources 下所有 json，导入并统计。
-     *
-     * 抽成独立函数是为了让调用方能用 try 包住 —— 以前这段直接写在 thread 里，
-     * 一抛异常整屏就空白，表现成「书源 0 条」。
-     */
-    /** 诊断用：本地书源目录路径。 */
-    private val srcDirPath: String get() = File(filesDir, "sources").absolutePath
-
-    private fun buildLocalSourceRows(): Quad<List<File>, List<SourceRow>, Int, Int> {
-        val dir = File(filesDir, "sources").apply { mkdirs() }
-        val files = sourceFiles(dir)
-        val rows = mutableListOf<SourceRow>()
-        var total = 0
-        var usable = 0
-        for (f in files) {
-            val text = runCatching { f.readText() }.getOrNull() ?: continue
-            val imported = runCatching {
-                if (text.contains("bookSourceName")) LegadoImport.importAll(text)
-                else SonovelImport.importAllChecked(text).map { (n, r, issue) ->
-                    // S16：以前 `.map { (n, r) -> Imported(n, r, null) }`，issue 永远 null，
-                    // 缺字段被丢掉的条目在界面上完全不出声。
-                    LegadoImport.Imported(n, r, issue)
-                }
-            }.getOrElse {
-                DevLog.log("WatchDL", "导入 ${f.name} 失败：${it.message}")
-                emptyList()
-            }
-            if (imported.isEmpty()) continue
-            total += imported.size
-            usable += imported.count { it.rule != null }
-            imported.forEach { i ->
-                rows += SourceRow(f.name, i.name,
-                    if (i.rule == null) "✗" else if (i.issue != null) "⚠" else "✓", i.issue,
-                    i.declaredHttp, i.rule?.host)
-            }
-        }
-        // 探测是按 host 记的，回填到行上；没探过的 host 保留 null。
-        return Quad(files, rows, total, usable)
-    }
-
-    /** 四元组。Kotlin 标准库只有 Pair/Triple。 */
-    private data class Quad<A, B, C, D>(val a: A, val b: B, val c: C, val d: D)
-
-    /**
-     * 书源目录里**真正参与搜索**的 json。
-     *
-     * 书源目录原本是「所有 .json 都要」—— 于是任何时候往这里放过第二个文件
-     * （旧版留下的 `legado.qualified.json`、手工备份、云端整包的另一份），
-     * 它们会跟正式源库叠在一起，用户看到两百多个源却说不清哪来的。
-     * 2026-10-21 实测设备上 `legado.json`(175) + `legado.qualified.json`(42) = 217 条。
-     *
-     * 现在只认两类：
-     * - `legado.json`：云端 / 内置的整包源库（唯一会被同步覆盖的文件）
-     * - 不含 175 条整包特征的散装文件：书源市场单条导入、手动导入的
-     *
-     * 备份一律带 `.bak` 后缀，天然被 extension 过滤掉。
-     */
-    private fun sourceFiles(dir: File): List<File> =
-        dir.listFiles()
-            ?.filter { it.isFile && it.extension == "json" }
-            ?.filter { !it.name.startsWith(".") }
-            ?.sortedBy { it.name }
-            ?: emptyList()
-
-    /** 书源目录。本地书源与市场导入的都放这里。 */
-    private fun sourcesDir(): File = File(filesDir, "sources").apply { mkdirs() }
-
-    /**
-     * 把导入器的长原因压缩成一句能看的短句。
-     *
-     * `部分字段用脚本：searchUrl(脚本)、content(非@js脚本)` 这种在列表里
-     * 只占一行、又看不出重点，所以归类到几个大类。
-     */
-    private fun shortReason(note: String?): String {
-        val n = note ?: return ""
-        return when {
-            // 以前直接把「引擎正则错误：<字段> | <异常>」摊给用户看（P1-4）。
-            // 完整信息 logcat 里有，界面只说人话。
-            n.startsWith("引擎正则错误") -> "这条源的解析规则无法执行"
-            n.startsWith("解析异常") -> "解析这条源时出错"
-            n.contains("非@js脚本") || n.contains("非 @js 脚本") -> "用了不支持的脚本写法"
-            n.contains("脚本") && n.contains("部分字段") -> "部分字段靠脚本"
-            n.contains("无 searchUrl") -> "没有搜索地址（只能探索）"
-            n.contains("不是绝对地址") || n.contains("代码而非地址") -> "搜索地址不合法"
-            n.contains("源已禁用") -> "源已禁用"
-            n.contains("请求头用脚本") -> "请求头需要脚本"
-            n.length > 26 -> n.take(26) + "…"
-            else -> n
-        }
-    }
-
-    /** ⑥ 阅读器。 */
-    private fun showReader(info: BookInfo, index: Int, text: String, src: BookSource? = null) {
-        setScreen(Screen.Reader(info, index, text, src))
-        saveProgress(info.bookId, index)
-        // 浅色底时整套前景色都要换：正文、顶栏、底栏按钮、进度。
-        // 以前只换了正文，白底上顶栏还是黑块，上下章还是浅紫，几乎看不见。
-        val light = Color.red(readerBackground) > 100
-        val readerInk = if (light) Color.rgb(28, 27, 31) else Md3.onSurface
-        val readerAccent = if (light) Color.rgb(56, 30, 114) else Md3.primary
-        val readerMuted = if (light) Color.rgb(73, 69, 79) else Md3.onSurfaceVariant
-        val hairline = if (light) 0x24000000 else 0x24FFFFFF
-        root.removeAllViews()
-
-        val bar = Widgets.topBar(this, info.chapters[index].title, onBack = { showToc(info) },
-            trailing = listOf("⚙" to { showReaderSettings(info, index, text, src) }))
-        bar.setBackgroundColor(readerBackground)
-        if (light) Widgets.tintSubtree(bar, readerInk)
-        root.addView(bar)
-        root.addView(android.view.View(this).apply { setBackgroundColor(hairline) }, Md3.lpDp(this, null, 1))
-
-        val body = Widgets.scrollBody(this, crownStep, crownGlide)
-        body.setBackgroundColor(readerBackground)
-        val col = Widgets.contentColumn(body)
-
-        // 正文用专用字号（比正文 UI 大），行距 1.8 在手表上偏松，手机上刚好。
-        val tv = Md3.text(this, if (text.isEmpty()) "本章无正文" else text, readerSize, readerInk)
-        tv.setLineSpacing(Md3.dp(this, 2).toFloat(), readerSpacing)
-        tv.justificationMode = android.text.Layout.JUSTIFICATION_MODE_INTER_WORD
-        tv.setPadding(Md3.dp(this, 3), Md3.dp(this, 2), Md3.dp(this, 3), Md3.dp(this, 24))
-        col.addView(tv)
-
-        root.addView(body, Md3.lpWeight(1f))
-
-        // 读到哪了：滚动停下再记，滚动过程中每帧写盘没有意义。
-        // onPause / onDestroy 会再存一次，覆盖突然退出、切后台的情况。
-        readerBody = body
-        readerBookId = info.bookId
-        readerIndex = index
-        body.setOnScrollChangeListener { _, _, y, _, _ ->
-            readerOffset = y
-            scrollSave?.let { body.removeCallbacks(it) }
-            val task = Runnable { saveOffset(info.bookId, index, y) }
-            scrollSave = task
-            body.postDelayed(task, 400)
-        }
-        // 恢复上次读到的地方。等布局完成再滚，否则拿不到 maxScroll。
-        val restore = readOffset(info.bookId).takeIf { it > 0 }
-        if (restore != null) {
-            body.post {
-                val child = body.getChildAt(0)
-                val limit = ((child?.height ?: 0) - body.height +
-                    body.paddingTop + body.paddingBottom).coerceAtLeast(0)
-                body.scrollTo(0, restore.coerceAtMost(limit))
-            }
-        }
-
-        // 底部：进度 + 上/下一章。两边的点击目标都要够大，手机上单手也能摸到。
-        // 底栏必须背实底色 + 一根分隔线：否则正文从按钮下面露出来，看着像排版坏了。
-        val foot = Md3.row(this)
-        foot.gravity = Gravity.CENTER_VERTICAL
-        foot.setPadding(Md3.dp(this, 12), 0, Md3.dp(this, 12), 0)
-        foot.setBackgroundColor(readerBackground)
-        root.addView(android.view.View(this).apply { setBackgroundColor(hairline) }, Md3.lpDp(this, null, 1))
-
-        val prev = Md3.text(this, "‹ 上一章", Md3.FS_MD, readerAccent, bold = true).apply {
-            gravity = Gravity.CENTER
-        }
-        prev.isClickable = true
-        prev.minHeight = Md3.dp(this, Md3.HIT)
-        prev.setPadding(Md3.dp(this, 4), 0, Md3.dp(this, 4), 0)
-        // 与「下一节」对称：本章还有没读完的节时，回头必须先回上一节。
-        prev.setOnClickListener {
-            prevChapter(info, index)
-        }
-        // 第一章时置灰并真的禁用：以前只调 alpha，点了还能按，弹一句「已是第一章」。
-        if (index <= 0) { prev.alpha = 0.35f; prev.isClickable = false }
-        foot.addView(prev)
-
-        val m = Md3.text(this, "${index + 1} / ${info.chapters.size}", Md3.FS_SM, readerMuted).apply {
-            gravity = Gravity.CENTER_VERTICAL or Gravity.CENTER_HORIZONTAL
-            // 宽度不够时会折行，把底栏撑成两行（与左右按钮不共基线）。
-            setSingleLine(true)
-            minHeight = Md3.dp(this@MainActivity, Md3.HIT)
-        }
-        foot.addView(m, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-
-        val next = Md3.text(this, "下一章 ›", Md3.FS_MD, readerAccent, bold = true).apply {
-            gravity = Gravity.CENTER
-        }
-        next.isClickable = true
-        next.minHeight = Md3.dp(this, Md3.HIT)
-        next.setPadding(Md3.dp(this, 4), 0, Md3.dp(this, 4), 0)
-        // 本章还有未读的节时，这一下必须先翻节 —— 否则读者点「下一章」，
-        // 本章后半截就再也不会被看到。
-        next.setOnClickListener {
-            nextChapter(info, index)
-        }
-        if (index >= info.chapters.size - 1) {
-            next.alpha = 0.35f
-            next.isClickable = false
-        }
-        foot.addView(next)
-        // 高度必须容得下 HIT 高的子项，否则页码被挤到第二行（P0-3）。
-        foot.layoutParams = Md3.lpDp(this, null, Md3.HIT)
-        root.addView(foot)
-    }
-
-    /** 上一章。跳过连续的锁定章（付费章取不到正文）。 */
-    private fun prevChapter(info: BookInfo, index: Int) {
-        val prev = index - 1
-        if (prev < 0) { toast("已是第一章"); return }
-        if (info.chapters[prev].locked) {
-            val free = (prev downTo 0).firstOrNull { !info.chapters[it].locked }
-            if (free == null) { toast("前面都是付费章"); return }
-            preview(info, free)
-        } else preview(info, prev)
-    }
 
     // ══════════════════ 动作 ══════════════════
 
-    /** 用手表上的输入对话框要关键词。 */
-    private fun askKeyword() {
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(Md3.dp(this@MainActivity, 12), Md3.dp(this@MainActivity, 4),
-                       Md3.dp(this@MainActivity, 12), Md3.dp(this@MainActivity, 2))
-        }
-        // 平台默认的输入框是绿色下划线、绿色「取消」、20sp 标题，与 MD3 紫系冲突。
-        // 这里全部换成自绘：圆角底输入框 + 两个自绘按钮，对话框不再挂系统按钮。
-        val dialog = Widgets.styleDialog(android.app.AlertDialog.Builder(this)
-            .setTitle("搜索小说")
-            .setView(box)
-            .create())
-        input = EditText(this).apply {
-            hint = "书名或作者"
-            setSingleLine()
-            setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, Md3.FS_MD)
-            setHintTextColor(Md3.onSurfaceVariant)
-            setTextColor(Md3.onSurface)
-            background = Md3.bg(Md3.surface4, Md3.dp(this@MainActivity, 8).toFloat())
-            setPadding(Md3.dp(this@MainActivity, 10), 0, Md3.dp(this@MainActivity, 10), 0)
-            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
-        }
-        box.addView(input, Md3.lpDp(this, null, Md3.BTN + 4))
 
-        fun submit() {
-            val kw = input.text.toString().trim()
-            // 空关键词不关窗（P1-1）：以前直接 dismiss，用户以为自己按错了。
-            if (kw.isEmpty()) toast("请先输入书名") else { dialog.dismiss(); doSearch(kw) }
-        }
-        input.setOnEditorActionListener { _, actionId, _ ->
-            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH) { submit(); true } else false
-        }
 
-        val row = Md3.row(this)
-        row.setPadding(0, Md3.dp(this@MainActivity, 8), 0, 0)
-        row.addView(Widgets.button(this, "取消", "outline") { dialog.dismiss() },
-            LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f))
-        row.addView(Widgets.button(this, "搜索", "filled") { submit() },
-            LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f).apply {
-                leftMargin = Md3.dp(this@MainActivity, Md3.GAP)
-            })
-        box.addView(row)
-
-        dialog.setCanceledOnTouchOutside(true)
-        dialog.show()
-        // 手机上自动弹键盘，省一次点击。非主屏（手表/虚拟屏）不弹：
-        // 那里没有键盘，弹出来只会盖住界面 —— 实测在虚拟屏上会把整帧渲染卡住。
-        if ((display?.displayId ?: android.view.Display.DEFAULT_DISPLAY) ==
-            android.view.Display.DEFAULT_DISPLAY) {
-            input.requestFocus()
-            dialog.window?.setSoftInputMode(
-                android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
-        }
-    }
-
-    private fun doSearch(keyword: String, offset: Int = 0) {
-        // screen 必须同步跟上：进度回调靠它认屏，不换的话还停在上一屏，
-        // 回调全被屏守卫丢掉 —— 进度条不动、结果也回不来。
-        // 新的一轮搜索要清掉上一轮的「已见过」，否则同名书会被自己的旧记录过滤掉。
-        if (offset == 0) seenHits.clear()
-        setScreen(Screen.Hits(keyword, emptyList(), offset, 0))
-        root.removeAllViews()
-        root.addView(Widgets.topBar(this, "搜索中…", onBack = { showHome() }))
-        val body = Widgets.scrollBody(this, crownStep, crownGlide)
-        val col = Widgets.contentColumn(body)
-        // 进度文本每多一个源就改一次（P1-2）。以前 15~20 秒里只有一个静态的
-        // 「正在搜索」，用户分不清是在跑还是卡死了。
-        // 不能用 Widgets.emptyState —— 它内部自建 TextView，外面拿不到引用改字。
-        val box = Md3.column(this).apply {
-            gravity = android.view.Gravity.CENTER
-            setPadding(Md3.dp(this@MainActivity, 12), Md3.dp(this@MainActivity, 24),
-                       Md3.dp(this@MainActivity, 12), Md3.dp(this@MainActivity, 24))
-        }
-        box.addView(Md3.text(this, "⟳", 30f, Md3.onSurfaceVariant).apply { alpha = 0.3f; gravity = Gravity.CENTER })
-        val progress = Md3.text(this, "正在搜索「$keyword」\n已扫 0 个源", Md3.FS_MD, Md3.onSurfaceVariant)
-            .apply {
-                gravity = android.view.Gravity.CENTER
-                setPadding(0, Md3.dp(this@MainActivity, 10), 0, 0)
-            }
-        box.addView(progress)
-        // 进程条 + 出口提示：原来只有一个静态数字，卡住时用户不知道能不能退。
-        val bar = android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            isIndeterminate = true
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this@MainActivity, 3),
-            ).apply { topMargin = Md3.dp(this@MainActivity, 8) }
-        }
-        box.addView(bar)
-        box.addView(Md3.text(this, "超过 15 秒可以返回重试", Md3.FS_SM, Md3.onSurfaceVariant).apply {
-            gravity = android.view.Gravity.CENTER
-            setPadding(0, Md3.dp(this@MainActivity, 8), 0, 0)
-        })
-        col.addView(box)
-        root.addView(body)
-
-        val owner: Screen = Screen.Hits(keyword, emptyList(), offset, 0)
-        // 边跑边上屏：第一个带回命中的源到达就先显示，不等最慢那个源（实测 15 秒）。
-        // 累加器在 UI 线程外被写，同步表包一层。
-        val shown = java.util.Collections.synchronizedList(mutableListOf<BookHit>())
-        bg(owner, {
-            // 多源聚合：并发 5、总超时 15 秒，单源失败静默跳过。
-            // offset 让「换一批源」从下一批开始，而不是重跑同一批。
-            multi.searchDetailed(keyword, onProgress = { done, total ->
-                postAlive(owner) {
-                    progress.text = "正在搜索「$keyword」\n已扫 $done / $total 个源"
-                    bar.isIndeterminate = false
-                    bar.max = total.coerceAtLeast(1)
-                    bar.progress = done
-                }
-            }, offset = offset, onPartial = { fresh, done, total ->
-                shown.addAll(fresh)
-                postAlive(owner) {
-                    // 只在「还停在同一关键词的结果屏」且「列表没被滚动」时重绘。
-                    // 用户已经滚下去看别的书时刷屏，比慢更不能忍。
-                    val cur = screen as? Screen.Hits
-                    if (cur != null && cur.keyword == keyword && hitsWinStart == 0) {
-                        // replay = true：不重置窗口、不写 seenHits。
-                        // 写了的话下面的最终结果会被自己过滤成空表。
-                        showHits(keyword, shown.toList(),
-                            MultiSource.Result(shown.toList(), total, done, emptyList()),
-                            offset = offset, replay = true)
-                    }
-                }
-            })
-        }) { res ->
-            res.onSuccess { r ->
-                DevLog.log("WatchDL",
-                    "搜索「$keyword」：${r.hits.size} 条 / 响应 ${r.responded}/${r.total} 源" +
-                    if (r.failed.isEmpty()) "" else "，失败 ${r.failed.size}: ${r.failed.take(5)}")
-                showHits(keyword, r.hits, r, offset)
-            }.onFailure { e ->
-                toast("搜索失败：${e.message}")
-                showHome()
-            }
-        }
-    }
-
-    /**
-     * 按命中项选定该用哪个源。
-     *
-     * 多源聚合后，一本书可能来自任意一条 legado 书源，也可能来自番茄。
-     * [BookHit.sourceName] 带上了源名，用它在 [multi] 里找回具体那条源。
-     * 找不到（旧数据/空名）就退回番茄 —— 那是以前的行为，不会更差。
-     */
-    private fun sourceFor(hit: BookHit): BookSource = multi.pickFor(hit) ?: source
-
-    /** 打开一条命中项（搜索结果的点击入口）。 */
-    private fun openHit(hit: BookHit) {
-        val src = sourceFor(hit)
-        // 记下搜索结果这一屏，目录页返回时原样退回去。
-        rememberReturn()
-        val job = Downloader.restore(jobsStore(), hit.bookId)
-        if (job != null) {
-            showToc(BookInfo(hit.bookId, job.name.ifBlank { hit.name }, job.author.ifBlank { hit.author }, job.chapters), src)
-            return
-        }
-        loadToc(hit.name, hit.author, siblingsOf(hit))
-    }
 
     /**
      * 发现页的点击入口。
@@ -2013,7 +882,7 @@ class MainActivity : Activity() {
      *
      * 起点榜没有对应的[BookSource]，仍走多源搜索。
      */
-    private fun openDiscoverHit(hit: BookHit) {
+    internal fun openDiscoverHit(hit: BookHit) {
         rememberReturn()
         if (hit.sourceName != "番茄" || hit.bookId.isBlank()) {
             doSearch(hit.name)
@@ -2022,19 +891,6 @@ class MainActivity : Activity() {
         loadToc(hit.name, hit.author, listOf(hit))
     }
 
-    /**
-     * 取同一本书的其它源：优先当前搜索结果里同名的，其次就是它自己。
-     *
-     * 按当前顺序依次试（列表已按源名排过，同名的挨着），
-     * 让被点的那一条排第一。
-     */
-    private fun siblingsOf(hit: BookHit): List<BookHit> {
-        val all = (screen as? Screen.Hits)?.all.orEmpty()
-        val same = all.filter {
-            it.name.trim() == hit.name.trim() && it.author.trim() == hit.author.trim()
-        }
-        return (listOf(hit) + same).distinctBy { it.sourceName }
-    }
 
     /**
      * 依次尝试同名书的多个源，取到非空目录就用。
@@ -2045,7 +901,7 @@ class MainActivity : Activity() {
      *
      * 这与手表外的 e2e 逻辑一致（e2e 会逐个试到能用为止）。
      */
-    private fun loadToc(name: String, author: String, candidates: List<BookHit>, tried: Int = 0) {
+    internal fun loadToc(name: String, author: String, candidates: List<BookHit>, tried: Int = 0) {
         val hit = candidates.getOrNull(tried)
         if (hit == null) {
             showTocFailed(name, candidates)
@@ -2136,7 +992,7 @@ class MainActivity : Activity() {
             "「$name」取不到目录\n这条源可能需要登录或已失效"
         else
             "「$name」取不到目录\n试了 $count 个源都不行，可能是站点都改了"
-        col.addView(Widgets.emptyState(this, "⚠", msg))
+        col.addView(Widgets.emptyState(this, "warning", msg))
         col.addView(Widgets.button(this, "换源重试", "filled") {
             if (candidates.isNotEmpty()) loadToc(name, "", candidates) else toast("没有可重试的源")
         }, Md3.lpDp(this, null, Md3.BTN).apply { topMargin = Md3.dp(this@MainActivity, Md3.GAP) })
@@ -2146,7 +1002,7 @@ class MainActivity : Activity() {
     }
 
     /** 从作业反查书籍，恢复目录之后打开。 */
-    private fun openBook(bookId: String, name: String, author: String) {
+    internal fun openBook(bookId: String, name: String, author: String) {
         // 书架/最近下载进来的，返回时回到首页（对应 rememberReturn=null 的默认行为）。
         rememberReturn()
         val job = Downloader.restore(jobsStore(), bookId)
@@ -2157,7 +1013,7 @@ class MainActivity : Activity() {
 
         setScreen(Screen.Toc(BookInfo(bookId, name, author, emptyList())))
         root.removeAllViews()
-        root.addView(Widgets.topBar(this, name, onBack = { showHome() }))
+        root.addView(Widgets.topBar(this, name, onBack = { showShelf() }))
         val body = Widgets.scrollBody(this, crownStep, crownGlide)
         (Widgets.contentColumn(body)).addView(Widgets.emptyState(this, "⏳", "正在取目录…"))
         root.addView(body)
@@ -2165,52 +1021,12 @@ class MainActivity : Activity() {
         val owner: Screen = Screen.Toc(BookInfo(bookId, name, author, emptyList()))
         bg(owner, { source.toc(bookId, name, author) }) { res ->
             res.onSuccess { showToc(it, source) }
-                .onFailure { toast("目录失败：${it.message}"); showHome() }
+                .onFailure { toast("目录失败：${it.message}"); showShelf() }
         }
     }
 
-    /** 从记录的位置续读：章号 + 章内节号。 */
-    private fun preview(info: BookInfo, index: Int) {
-        val ch = info.chapters[index]
-        // 先读本地正文，只有缺章时才在线程中初始化源并联网。
-        val src = (screen as? Screen.Toc)?.src
-            ?: (screen as? Screen.Reader)?.src
-            ?: tocSrc
-        root.removeAllViews()
-        root.addView(Widgets.topBar(this, ch.title, onBack = { showToc(info) }))
-        val body = Widgets.scrollBody(this, crownStep, crownGlide)
-        (Widgets.contentColumn(body)).addView(Widgets.emptyState(this, "⟳", "正在取正文…"))
-        root.addView(body)
 
-        // 读者停在 Toc / Reader 屏上点章节，回来时应该还在原来的屏。
-        val owner: Screen = screen
-
-        thread {
-            try {
-                val line = jobsStore().readChapters(info.bookId)[ch.itemId]
-                val localHtml = line?.let { TinyJson.path(it, "content") }
-                val actualSrc = if (localHtml == null) (src ?: source) else src
-                val html = localHtml ?: actualSrc!!.content(ch.itemId, info.bookId)
-                val text = Downloader.htmlToText(html).ifEmpty { html.replace(Regex("<[^>]+>"), "\n").trim() }
-                postAlive(owner) { showReader(info, index, text, actualSrc) }
-            } catch (e: Exception) {
-                postAlive(owner) { toast("正文失败：${e.message}"); showToc(info, src) }
-            }
-        }
-    }
-
-    private fun nextChapter(info: BookInfo, index: Int) {
-        val next = index + 1
-        if (next >= info.chapters.size) { toast("已是最后一章"); return }
-        if (info.chapters[next].locked) {
-            // 跳过连续的锁定章
-            val free = (next until info.chapters.size).firstOrNull { !info.chapters[it].locked }
-            if (free == null) { toast("后面都是付费章"); return }
-            preview(info, free)
-        } else preview(info, next)
-    }
-
-    private fun startDownload(info: BookInfo) {
+    internal fun startDownload(info: BookInfo) {
         // S14：以前用内存里的 `downloading` 标志，唯一复位点在 [progressReceiver] 里，
         // 而接收器只在 onResume~onPause 之间注册。点下载 → 退回目录 → 按 Home（注销接收器）
         // → 服务被杀 → 回 App，标志还是 true，点「继续下载」直接 return，
@@ -2235,7 +1051,11 @@ class MainActivity : Activity() {
     }
 
     private fun showTocMenu(info: BookInfo) {
-        Widgets.menuDialog(this, null, listOf("导出 TXT" to { exportTxt(info) })).show()
+        val marks = BookmarkStore.forBook(info.bookId).size
+        Widgets.menuDialog(this, null, listOf(
+            "书签（$marks）" to { showMarks(info) },
+            "导出 TXT" to { exportTxt(info) },
+        )).show()
     }
 
     /**
@@ -2247,13 +1067,16 @@ class MainActivity : Activity() {
      *
      * 选段控件与阅读页共用同一个段式风格：浅紫填充 + 深字。
      */
-    private fun showSettings() {
+    internal fun showSettings() {
         setScreen(Screen.Settings)
         root.removeAllViews()
         root.addView(Widgets.topBar(this, "设置", onBack = { goBackToPrevious() }))
 
         val body = Widgets.scrollBody(this, crownStep, crownGlide)
         val col = Widgets.contentColumn(body)
+
+        col.addView(Widgets.sectionLabel(this, "外观"))
+        themeChips(col)
 
         col.addView(Widgets.sectionLabel(this, "阅读显示"))
 
@@ -2405,6 +1228,39 @@ class MainActivity : Activity() {
         root.addView(body)
     }
 
+    /**
+     * 主题选择：六套两行三列。
+     *
+     * 用芯片而不是一行下拉：换主题后颜色立刻变，得看得见才选得动。
+     * 选中态沿用全局段式风格（浅色填充 + 深字）。
+     */
+    private fun themeChips(col: LinearLayout) {
+        Palette.all.chunked(3).forEach { group ->
+            val row = Md3.row(this)
+            group.forEachIndexed { i, p ->
+                val on = p.id == Md3.palette.id
+                val chip = Md3.text(this, p.name, Md3.FS_SM,
+                    if (on) Md3.onPrimary else Md3.onSurfaceVariant, bold = on).apply {
+                    gravity = Gravity.CENTER
+                    isClickable = true
+                    background = Md3.ripple(this@MainActivity,
+                        if (on) Md3.primary else Color.TRANSPARENT,
+                        Md3.dp(this@MainActivity, 13).toFloat(),
+                        if (on) null else Md3.outlineVariant)
+                    setOnClickListener { pickTheme(p.id) }
+                    contentDescription = "主题 ${p.name}" + if (on) "，当前" else ""
+                }
+                row.addView(chip, LinearLayout.LayoutParams(0, Md3.dp(this, 30), 1f).apply {
+                    leftMargin = if (i == 0) 0 else Md3.dp(this@MainActivity, 4)
+                })
+            }
+            col.addView(row, Md3.lp().apply { bottomMargin = Md3.dp(this@MainActivity, 2) })
+        }
+        // 下一节标题紧跟其后，给一点呼吸。
+        col.addView(Md3.text(this, "", Md3.FS_SM, Md3.onSurfaceVariant),
+            Md3.lpDp(this, null, 2))
+    }
+
     private fun devLogOn() = getSharedPreferences("reader", MODE_PRIVATE).getBoolean("devlog", false)
 
     private fun devLogHint(): String {
@@ -2506,7 +1362,7 @@ class MainActivity : Activity() {
         packageManager.getPackageInfo(packageName, 0).versionName ?: ""
     }.getOrDefault("")
 
-    private fun showJobMenu(job: BookJob) {
+    internal fun showJobMenu(job: BookJob) {
         Widgets.menuDialog(this, job.name.ifBlank { "未命名 · ${job.total} 章" }, listOf(
             "重命名" to { renameJob(job) },
             "导出 TXT" to { exportTxt(BookInfo(job.bookId, job.name, job.author, job.chapters)) },
@@ -2539,7 +1395,7 @@ class MainActivity : Activity() {
                 val raw = jobsStore().readJob(job.bookId) ?: return@setPositiveButton
                 val json = raw.replace(Regex("(\\\"name\\\"\\s*:\\s*)\\\"[^\\\"]*\\\""), "$1${Downloader.quote(name)}")
                 jobsStore().writeJob(job.bookId, json)
-                showHome()
+                showShelf()
             }.create()).show()
     }
 
@@ -2565,7 +1421,7 @@ class MainActivity : Activity() {
                     runOnUiThread {
                         if (gone) {
                             toast("已删除")
-                            showHome()
+                            showShelf()
                         } else toast("删除失败：目录仍被占用")
                     }
                 }
@@ -2623,7 +1479,7 @@ class MainActivity : Activity() {
         return granted
     }
 
-    private fun exportTxt(info: BookInfo) {
+    internal fun exportTxt(info: BookInfo) {
         if (!ensureLegacyStorage()) {
             toast("需要存储权限才能导出")
             return
@@ -2686,17 +1542,11 @@ class MainActivity : Activity() {
                 if (abort != null && info != null) abortHints[info.bookId] = abort
                 if (finished) {
                     toast(abort ?: "下载结束：成功 $progressDone，失败 $progressFailed")
-                    // 结束时首页那一行的数字要变成最终值（P1-1）。
-                    when {
-                        info != null -> showToc(info)
-                        screen is Screen.Home -> showHome()
-                    }
+                    // 结束时书架上的进度数字要变成最终值。
+                    if (info != null) showToc(info)
+                    else if (screen is Screen.Shelf) showShelf()
                 } else if (info != null) {
                     showProgress(info)
-                } else if (screen is Screen.Home) {
-                    DownloadService.runningBookId?.let { id ->
-                        homeProgressRows[id]?.invoke(progressDone, progressFailed)
-                    }
                 }
             }.onFailure { e ->
                 DevLog.log("WatchDL", "进度刷新失败（已忽略）：${e.message}")
@@ -2750,7 +1600,7 @@ class MainActivity : Activity() {
     /**
      * 重建被回收前的屏。目录从 `job.json` 读回，读不到就退到书库首页。
      *
-     * 返回 true 表示已恢复，[onCreate] 不再走 `showHome`。
+     * 返回 true 表示已恢复，[onCreate] 不再走 `showShelf`。
      */
     private fun restoreScreen(state: Bundle?): Boolean {
         val kind = state?.getString("screen") ?: return false
@@ -2782,47 +1632,49 @@ class MainActivity : Activity() {
 
     @Deprecated("手表没有返回手势，按返回键回上一层")
     /**
-     * 屏幕尺寸变了（旋转、折叠屏、手机接显示器）要重新算缩放，
-     * 因为 manifest 里 configChanges 拦下了系统重建。
+     * 配色、字体缩放这些配置变了要重画：manifest 里 configChanges 拦下了系统重建。
+     * 屏宽也可能变了（分屏、外接屏），所以先重选版面表再重画。
      */
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
-        val before = Md3.scaleFactor()
-        Md3.configure(this)
-        if (Md3.scaleFactor() != before) {
-            // 尺寸档位变了才重建界面，否则只是无谓闪烁
-            when (val s = screen) {
-                is Screen.Home -> showHome()
-                is Screen.Toc -> showToc(s.info)
-                is Screen.Reader -> showReader(s.info, s.index, s.text, s.src)
-                // 传 null 会丢掉批次信息，「换一批源」按钮就没了；
-                // 但 Result 需要真实统计，屏上只记了批次大小，
-                // 所以改用 batch 参数直接传。
-                is Screen.Hits -> showHits(s.keyword, s.all, offset = s.offset,
-                    batch = s.searchedSources)
-                is Screen.Market -> showMarket(s.page, s.hits)
-                is Screen.Sources -> showSources()
-                is Screen.Progress -> showProgress(s.info)
-                Screen.Settings -> showSettings()
-                // 配置变更重建**不刷新**：这里只是重画，联网会让旋转/展开后卡一下。
-                is Screen.Discover -> showDiscover(s.site, s.gender, s.rankKey)
-                Screen.Shelf -> showShelf()
-            }
+        Md3.load(this)
+        when (val s = screen) {
+            is Screen.Toc -> showToc(s.info)
+            is Screen.Reader -> showReader(s.info, s.index, s.text, s.src)
+            // 传 null 会丢掉批次信息，「换一批源」按钮就没了；
+            // 但 Result 需要真实统计，屏上只记了批次大小，
+            // 所以改用 batch 参数直接传。
+            is Screen.Hits -> showHits(s.keyword, s.all, offset = s.offset,
+                batch = s.searchedSources)
+            is Screen.Market -> showMarket(s.page, s.hits)
+            is Screen.Sources -> showSources()
+            is Screen.Progress -> showProgress(s.info)
+            Screen.Settings -> showSettings()
+            // 配置变更重建**不刷新**：这里只是重画，联网会让旋转/展开后卡一下。
+            is Screen.Discover -> showDiscover(s.site, s.gender, s.rankKey)
+            Screen.Shelf -> showShelf()
+            is Screen.Marks -> showMarks(s.info)
+            Screen.My -> showMy()
+            is Screen.Detail -> showDetail(s.info, s.src)
         }
     }
 
     override fun onBackPressed() {
         when (val s = screen) {
-            Screen.Home -> super.onBackPressed()
+            // 书架是根栏：在这一栏按返回才退出应用。
+            Screen.Shelf -> super.onBackPressed()
+            // 另外两栏按返回回书架栏，不退出 —— 手势返回在手表上很容易误触。
+            is Screen.Discover -> showShelf()
+            Screen.My -> showShelf()
             is Screen.Toc -> goBackToPrevious()
             is Screen.Hits -> goBackToPrevious()
             is Screen.Reader -> showToc(s.info)
             is Screen.Sources -> goBackToPrevious()
             is Screen.Market -> showSources()
             is Screen.Progress -> showToc(s.info)
-            is Screen.Discover -> goBackToPrevious()
-            Screen.Shelf -> goBackToPrevious()
             Screen.Settings -> goBackToPrevious()
+            is Screen.Marks -> showToc(s.info)
+            is Screen.Detail -> goBackToPrevious()
         }
     }
 
@@ -2855,11 +1707,11 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun jobsDir(): File = File(filesDir, "books").apply { mkdirs() }
+    internal fun jobsDir(): File = File(filesDir, "books").apply { mkdirs() }
 
     /** 导出目录。**不能放进 jobsDir** —— 它会被当成一个下载作业。 */
     private fun exportDir(): File = File(filesDir, "export").apply { mkdirs() }
-    private fun jobsStore(): JobStore = JobStore(jobsDir())
+    internal fun jobsStore(): JobStore = JobStore(jobsDir())
 
     /** 首次运行时把 assets 里的字符表与书源复制到私有目录。 */
     /**
@@ -2872,7 +1724,7 @@ class MainActivity : Activity() {
      * 2. **失败要重试、不能静默** —— 以前包在 `runCatching` 里，
      *    解压失败时界面只是安静地显示 0 条，看不出原因。
      */
-    private fun extractAssets() {
+    internal fun extractAssets() {
         copyAsset("charset.json", File(filesDir, "charset.json"))
         val srcDir = File(filesDir, "sources").apply { mkdirs() }
         val names = runCatching { assets.list("sources")?.toList() }.getOrNull().orEmpty()
@@ -2919,119 +1771,11 @@ class MainActivity : Activity() {
         DevLog.log("WatchDL", "解压 $assetPath 最终失败；书源列表可能为空")
     }
 
-    /**
-     * 阅读设置。
-     *
-     * 一屏装得下：一行实时预览 + 三行「标签 + 三段选择」。
-     * 旧版是三组上下堆叠的大按钮加一个固定高度预览块，总高超过对话框可见区，
-     * 「行距」整行被裁掉半截，只能滚动；选中态还靠「● 」前缀表示。
-     * 改值只重画预览与按钮配色，不重建视图树。
-     */
-    private fun showReaderSettings(info: BookInfo, index: Int, text: String, src: BookSource?) {
-        val sizes = listOf("小" to Md3.FS_MD, "中" to Md3.FS_READ, "大" to Md3.FS_XL)
-        val spacings = listOf("紧" to 1.35f, "标准" to 1.75f, "松" to 1.9f)
-        val bgs = listOf(
-            "深" to Color.rgb(20, 18, 24),
-            "浅" to Color.WHITE,
-            "暖" to Color.rgb(255, 248, 230),
-        )
 
-        var curSize = readerSize
-        var curSpacing = readerSpacing
-        var curBg = readerBackground
-        var refresh: () -> Unit = {}
-
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(Md3.dp(this@MainActivity, 12), Md3.dp(this@MainActivity, 2),
-                       Md3.dp(this@MainActivity, 12), 0)
-        }
-
-        val preview = Md3.text(this, "示例正文，看看效果。", Md3.FS_READ, Md3.onSurface).apply {
-            setPadding(Md3.dp(this@MainActivity, 8), Md3.dp(this@MainActivity, 6),
-                       Md3.dp(this@MainActivity, 8), Md3.dp(this@MainActivity, 6))
-            maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.END
-        }
-        box.addView(preview)
-
-        fun paintPreview() {
-            preview.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, curSize)
-            preview.setLineSpacing(Md3.dp(this, 1).toFloat(), curSpacing)
-            preview.setTextColor(if (Color.red(curBg) > 100) Color.rgb(28, 27, 31) else Md3.onSurface)
-            preview.background = Md3.bg(curBg, Md3.dp(this, 8).toFloat())
-        }
-
-        fun persist() {
-            saveReaderPrefs(curSize, curSpacing, curBg)
-            refresh()
-        }
-
-        /** 一行「标签 + 三段」。返回刷新函数；改值后由 refresh 统一调用。 */
-        fun segmentRow(
-            label: String,
-            options: List<Pair<String, Any>>,
-            get: () -> Any,
-            set: (Any) -> Unit,
-        ): () -> Unit {
-            val row = Md3.row(this).apply { setPadding(0, Md3.dp(this@MainActivity, 3), 0, 0) }
-            row.addView(Md3.text(this, label, Md3.FS_SM, Md3.onSurfaceVariant),
-                LinearLayout.LayoutParams(Md3.dp(this, 26), ViewGroup.LayoutParams.WRAP_CONTENT))
-            val chips = mutableListOf<Pair<TextView, Any>>()
-            options.forEachIndexed { i, opt ->
-                val chip = Md3.text(this, opt.first, Md3.FS_SM, Md3.onSurfaceVariant).apply {
-                    gravity = Gravity.CENTER
-                    isClickable = true
-                    setOnClickListener { set(opt.second); persist() }
-                }
-                chips.add(chip to opt.second)
-                row.addView(chip, LinearLayout.LayoutParams(0, Md3.dp(this, 26), 1f).apply {
-                    leftMargin = if (i == 0) 0 else Md3.dp(this@MainActivity, 4)
-                })
-            }
-            box.addView(row)
-            return {
-                val cur = get()
-                chips.forEach { pair ->
-                    val sel = pair.second == cur
-                    pair.first.setTypeface(null,
-                        if (sel) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
-                    // 选中态与全局一致：浅紫填充 + 深字（发现页、按钮都用这套）。
-                    // 原来这里用 secondaryContainer 深紫，同一应用两套选中语义。
-                    pair.first.setTextColor(if (sel) Md3.onPrimary else Md3.onSurfaceVariant)
-                    pair.first.background = Md3.ripple(this,
-                        if (sel) Md3.primary else Color.TRANSPARENT,
-                        Md3.dp(this, 13).toFloat(),
-                        if (sel) null else Md3.outlineVariant)
-                }
-            }
-        }
-
-        val rowSize = segmentRow("字号", sizes.map { it.first to (it.second as Any) },
-            { curSize as Any }) { curSize = it as Float }
-        val rowSpacing = segmentRow("行距", spacings.map { it.first to (it.second as Any) },
-            { curSpacing as Any }) { curSpacing = it as Float }
-        val rowBg = segmentRow("背景", bgs.map { it.first to (it.second as Any) },
-            { curBg as Any }) { curBg = it as Int }
-
-        refresh = {
-            rowSize(); rowSpacing(); rowBg(); paintPreview()
-        }
-        refresh()
-
-        val dialog = Widgets.styleDialog(android.app.AlertDialog.Builder(this)
-            .setTitle("阅读设置")
-            .setView(box)
-            .setNegativeButton("完成", null)
-            .create())
-        dialog.setOnDismissListener { showReader(info, index, text, src) }
-        dialog.show()
-    }
-
-    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+    internal fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
 
     /** 是否 debug 包。内部路径、诊断信息只给开发者看（P1-4）。 */
-    private fun isDebugBuild(): Boolean =
+    internal fun isDebugBuild(): Boolean =
         (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
 
     private companion object {

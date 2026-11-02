@@ -1,10 +1,12 @@
-package com.watchdl.ui
+package com.watchdl.ui.theme
 
 import android.content.Context
 import android.graphics.Color
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -28,7 +30,7 @@ object Widgets {
         ctx: Context,
         title: CharSequence,
         onBack: (() -> Unit)? = null,
-        backGlyph: String = "←",
+        backGlyph: String = "back",
         trailing: List<Pair<String, () -> Unit>> = emptyList(),
     ): LinearLayout {
         val bar = Md3.row(ctx)
@@ -47,7 +49,6 @@ object Widgets {
         bar.layoutParams = Md3.lpDp(ctx, null, Md3.TOP_BAR)
         return bar
     }
-
     /** 搜索框。34dp 高，圆角胶囊。传入 onTap 可点开输入。 */
     fun searchBar(ctx: Context, hint: CharSequence, onTap: (() -> Unit)? = null): LinearLayout {
         val bar = Md3.row(ctx)
@@ -139,18 +140,61 @@ object Widgets {
             setPadding(Md3.dp(ctx, 2), Md3.dp(ctx, 5), Md3.dp(ctx, 2), Md3.dp(ctx, 3))
         }
 
+    /**
+     * 分组卡：照 legado `SplicedColumnGroup` —— 圆角容器包住整组条目，
+     * 组标题在卡上方，卡与卡之间留白。组内条目一律 [groupItem]。
+     */
+    fun groupCard(ctx: Context, title: CharSequence?, build: (LinearLayout) -> Unit): LinearLayout {
+        val wrap = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        if (title != null) {
+            wrap.addView(sectionLabel(ctx, title).apply {
+                setPadding(Md3.dp(ctx, Md3.PAD), Md3.dp(ctx, Md3.GAP),
+                    Md3.dp(ctx, Md3.PAD), Md3.dp(ctx, Md3.GAP / 2))
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+        val card = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Md3.bg(Md3.surface2, Md3.R_CARD.toFloat())
+        }
+        build(card)
+        wrap.addView(card, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        wrap.layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = Md3.dp(ctx, Md3.GAP * 2) }
+        return wrap
+    }
+
+    /** 组内条目：保留 [listItem] 自己算好的高度，只换背景（卡片底不用再画一层）。 */
+    fun groupItem(
+        ctx: Context,
+        title: CharSequence,
+        subtitle: CharSequence? = null,
+        glyph: String? = null,
+        onClick: (() -> Unit)? = null,
+    ): LinearLayout = listItem(
+        ctx = ctx, title = title, subtitle = subtitle, twoLine = subtitle != null,
+        leading = glyph?.let { Icons.view(ctx, it, Md3.onSurfaceVariant, Md3.ICON_LEAD) },
+        onClick = onClick,
+    ).apply {
+        background = Md3.ripple(ctx, Color.TRANSPARENT, Md3.R_ITEM.toFloat())
+    }
+
     /** 按钮。转发到 [Md3.button]，让调用处只认 Widgets 一个入口。 */
     fun button(ctx: Context, label: CharSequence, variant: String = "filled", onClick: (() -> Unit)? = null): TextView =
         Md3.button(ctx, label, variant, onClick)
 
-    /** 应用栏图标按钮。 */
-    fun iconButton(ctx: Context, glyph: String, onClick: (() -> Unit)? = null): TextView =
+    /** 应用栏图标按钮。转发到 [Md3.iconButton]，让调用处只认 Widgets 一个入口。 */
+    fun iconButton(ctx: Context, glyph: String, onClick: (() -> Unit)? = null): View =
         Md3.iconButton(ctx, glyph, onClick)
 
     /** 把整棵子树里的文字改成指定颜色。阅读器切浅色底时，顶栏字形要跟着变深。 */
     fun tintSubtree(v: View, color: Int) {
         when (v) {
             is TextView -> v.setTextColor(color)
+            // 矢量图标不是 TextView，漏了它阅读页浅色底下图标还是浅色，看不见。
+            is IconView -> v.tint = color
             is ViewGroup -> for (i in 0 until v.childCount) tintSubtree(v.getChildAt(i), color)
         }
     }
@@ -190,8 +234,69 @@ object Widgets {
             background = Md3.ripple(ctx, Color.TRANSPARENT, 0f)
             isClickable = true
             setOnClickListener { dlg?.dismiss() }
-        }, Md3.lpDp(ctx, null, 40))
+        }, Md3.lpDp(ctx, null, 36))
         dlg = android.app.AlertDialog.Builder(ctx).setView(box).create()
+        dlg.setCanceledOnTouchOutside(true)
+        return dlg
+    }
+
+    /**
+     * 长清单菜单：整屏对话框（MD3 full-screen dialog）。
+     *
+     * 以前是「两列 × 34 dp 行 × 11sp」硬挤进一个浮层 —— 11 项挤两列后每列只有
+     * 86 dp 宽，字缩到 11sp 还贴边；而浮层在 189 dp 宽的屏上又几乎占满整屏，
+     * 于是既没有浮层的留白感，也没有整屏的秩序感。用户判词：「弹窗好丑」。
+     *
+     * 现在按整屏处理：不透明底色、48 dp 顶栏（标题 + 关闭）、列表可滚。
+     * 手表屏只有 248 dp 高，一屏放不下 11 项，滚动比分页可靠 ——
+     * 分页的「更多…」实测会穿透到下层页面。
+     */
+    fun longMenuDialog(
+        ctx: Context,
+        title: CharSequence?,
+        items: List<Pair<CharSequence, () -> Unit>>,
+    ): android.app.Dialog {
+        val dlg = android.app.Dialog(ctx)
+        val root = Md3.column(ctx).apply { setBackgroundColor(Md3.surface) }
+
+        val bar = Md3.row(ctx)
+        bar.setPadding(Md3.dp(ctx, Md3.PAD), 0, 0, 0)
+        bar.addView(
+            Md3.ellipsize(Md3.text(ctx, title ?: "", Md3.FS_LG, Md3.onSurface, bold = true))
+                .apply { gravity = Gravity.CENTER_VERTICAL },
+            LinearLayout.LayoutParams(0, Md3.dp(ctx, Md3.TAB_H), 1f),
+        )
+        // 这块表没有实体返回键，关闭按钮就是唯一出口。
+        bar.addView(Md3.iconButton(ctx, "close", { dlg.dismiss() }, desc = "关闭"),
+            LinearLayout.LayoutParams(Md3.dp(ctx, Md3.TAP), Md3.dp(ctx, Md3.TAB_H)))
+        root.addView(bar, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(ctx, Md3.TAB_H)))
+
+        val list = Md3.column(ctx)
+        for ((label, act) in items) {
+            list.addView(Md3.ellipsize(Md3.text(ctx, label, Md3.FS_MD, Md3.onSurface)).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(Md3.dp(ctx, Md3.PAD), 0, Md3.dp(ctx, Md3.PAD), 0)
+                background = Md3.ripple(ctx, Color.TRANSPARENT, 0f)
+                isClickable = true
+                setOnClickListener { dlg.dismiss(); act() }
+            }, Md3.lpDp(ctx, null, Md3.TAP))
+        }
+        val sv = ScrollView(ctx).apply {
+            isVerticalScrollBarEnabled = false
+            addView(list)
+        }
+        root.addView(sv, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        dlg.setContentView(root)
+        dlg.window?.apply {
+            setLayout(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Md3.surface))
+        }
         dlg.setCanceledOnTouchOutside(true)
         return dlg
     }
@@ -236,7 +341,7 @@ object Widgets {
         subtitle: CharSequence? = null,
         twoLine: Boolean = subtitle != null,
         highlight: Boolean = false,
-        leading: TextView? = null,
+        leading: View? = null,
         trailing: CharSequence? = null,
         trailingColor: Int = Md3.onSurfaceVariant,
         onTrailingClick: (() -> Unit)? = null,
@@ -247,9 +352,11 @@ object Widgets {
             gravity = if (twoLine) Gravity.CENTER_VERTICAL else Gravity.CENTER_VERTICAL
         }
         item.setPadding(
-            Md3.dp(ctx, Md3.PAD * 0.75), Md3.dp(ctx, 3),
-            Md3.dp(ctx, Md3.PAD * 0.75), Md3.dp(ctx, 3),
+            Md3.dp(ctx, Md3.PAD), 0,
+            Md3.dp(ctx, Md3.PAD), 0,
         )
+        // M3 lists：单行 56dp、双行 72dp，由最高的元素决定。
+        item.minimumHeight = Md3.dp(ctx, if (twoLine) Md3.ITEM_TALL else Md3.ITEM)
         val bgColor = if (highlight) Md3.surface3 else Color.TRANSPARENT
         item.background = Md3.ripple(ctx, bgColor, Md3.R_ITEM.toFloat())
         if (onClick != null) {
@@ -265,16 +372,31 @@ object Widgets {
 
         val titleView = Md3.ellipsize(Md3.text(ctx, title, Md3.FS_MD, Md3.onSurface))
         val trailingView = trailing?.let { t ->
-            Md3.text(ctx, t, Md3.FS_SM, trailingColor).apply {
-                contentDescription = if (t.toString() == "⋮") "更多操作" else t
-                gravity = Gravity.CENTER
-                setPadding(Md3.dp(ctx, 6), 0, 0, 0)
-                if (onTrailingClick != null) {
-                    isClickable = true
-                    // 行右侧的 ⋮ 原来热区约 10 dp，手指点不中；补到 HIT。
-                    minimumWidth = Md3.HIT
-                    minimumHeight = Md3.HIT
-                    setOnClickListener { onTrailingClick() }
+            val icon = Icons.name(t.toString())
+            if (icon != null) {
+                Icons.view(ctx, icon, trailingColor, 18).apply {
+                    contentDescription = when (t.toString()) {
+                        "more", "⋮" -> "更多操作"; else -> t
+                    }
+                    if (onTrailingClick != null) {
+                        isClickable = true
+                        // 行右侧的 ⋮ 原来热区约 10 dp，手指点不中；补到 HIT。
+                        minimumWidth = Md3.HIT
+                        minimumHeight = Md3.HIT
+                        setOnClickListener { onTrailingClick() }
+                    }
+                }
+            } else {
+                Md3.text(ctx, t, Md3.FS_SM, trailingColor).apply {
+                    contentDescription = t
+                    gravity = Gravity.CENTER
+                    setPadding(Md3.dp(ctx, 6), 0, 0, 0)
+                    if (onTrailingClick != null) {
+                        isClickable = true
+                        minimumWidth = Md3.HIT
+                        minimumHeight = Md3.HIT
+                        setOnClickListener { onTrailingClick() }
+                    }
                 }
             }
         }
@@ -328,6 +450,7 @@ object Widgets {
         title: CharSequence,
         status: CharSequence? = null,
         statusColor: Int = Md3.onSurfaceVariant,
+        highlight: Boolean = false,
         onClick: (() -> Unit)? = null,
     ): LinearLayout {
         val mark = if (status != null) {
@@ -343,6 +466,7 @@ object Widgets {
             title = title,
             subtitle = null,
             twoLine = false,
+            highlight = highlight,
             leading = Md3.text(ctx, "$index", Md3.FS_SM, Md3.onSurfaceVariant).apply {
                 minWidth = Md3.dp(ctx, 22)
             },
@@ -391,8 +515,7 @@ object Widgets {
     /**
      * 可滚动内容区。
      *
-     * 手机上内容列限宽居中：否则阅读器一行铺满整屏，视线很难跑。
-     * 手表上 [Md3.CONTENT_MAX] 不参与限宽 —— 屏只有 189dp，限定宽只会把内容列撑出屏外。
+     * 不再做「限宽居中」：这是手表屏，189 dp 宽本来就只有一条内容列。
      *
      * 滚动条显式打开并加粗：Android 默认在 2.0 density 下只有约 4px，
      * 手表上既看不见也够不着。
@@ -433,54 +556,40 @@ object Widgets {
                 }
                 true
             }
-            // 外层横向容器负责居中，内层 col 限宽
-            val outer = Md3.row(ctx)
-            outer.gravity = Gravity.CENTER_HORIZONTAL
             val col = Md3.column(ctx)
-            // 限宽只在真的比屏窄时才生效。以前无条件给 CONTENT_MAX，
-            // 手表档是个 4000dp 的「不限宽」哨兵值，落到 LinearLayout 上就是溢出屏外。
-            val maxW = Md3.dp(ctx, Md3.CONTENT_MAX)
-            val screenW = ctx.resources.displayMetrics.widthPixels
-            col.layoutParams = if (maxW in 1 until screenW) {
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                    weight = 1f
-                    width = maxW
-                }
-            } else {
-                LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            }
-            outer.addView(col)
-            addView(outer, LinearLayout.LayoutParams(
+            addView(col, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
 
     /**
      * 取出 [scrollBody] 里真正放内容的列。
-     *
-     * 外面多包了一层横向容器用于居中限宽，所以不能直接 `getChildAt(0)`。
      */
-    fun contentColumn(body: ScrollView): LinearLayout {
-        val outer = body.getChildAt(0) as? LinearLayout ?: return LinearLayout(body.context)
-        return (outer.getChildAt(0) as? LinearLayout) ?: outer
-    }
+    fun contentColumn(body: ScrollView): LinearLayout =
+        (body.getChildAt(0) as? LinearLayout) ?: LinearLayout(body.context)
 
-    /** 空状态。 */
+    /** 空状态。传图标名（或旧字形）就在上面画一个大图标。 */
     fun emptyState(ctx: Context, glyph: String, message: CharSequence): LinearLayout {
         val box = Md3.column(ctx)
         box.gravity = Gravity.CENTER
         box.setPadding(Md3.dp(ctx, 12), Md3.dp(ctx, 24), Md3.dp(ctx, 12), Md3.dp(ctx, 24))
-        box.addView(Md3.text(ctx, glyph, 30f * (1f + (Md3.scaleFactor() - 1f) * 0.6f), Md3.onSurfaceVariant)
-            .apply {
+        val icon = Icons.name(glyph)
+        if (icon != null) {
+            box.addView(Icons.view(ctx, icon, Md3.onSurfaceVariant, 32).apply {
+                alpha = 0.3f
+                // 大图标是装饰，真正要读的是下面那句 message（P1-7）
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }, Md3.lpDp(ctx, null, 32))
+        } else {
+            box.addView(Md3.text(ctx, glyph, 30f, Md3.onSurfaceVariant).apply {
                 alpha = 0.3f
                 // 容器居中只有子 View 宽度不撑满时才生效；文字自己还得居中一次，
                 // 否则符号靠在左边（实测偏左 122 px）。
                 gravity = Gravity.CENTER
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                // 大字 emoji 是装饰，真正要读的是下面那句 message（P1-7）
                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             })
+        }
         val m = Md3.text(ctx, message, Md3.FS_MD, Md3.onSurfaceVariant).apply {
             gravity = Gravity.CENTER
             setPadding(0, Md3.dp(ctx, 10), 0, 0)
@@ -489,29 +598,138 @@ object Widgets {
         return box
     }
 
-    /** 底部导航。 */
+    /**
+     * 底部导航。三栏共用一条，对应 legado 的书籍/发现/我的。
+     *
+     * 图标走 [Icons] 矢量图，标签仍是文字：手表上光图标分不清「书架」与「发现」。
+     */
     fun navBar(ctx: Context, items: List<Triple<String, String, Boolean>>, onSelect: ((Int) -> Unit)? = null): LinearLayout {
         val nav = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             background = Md3.bg(Md3.surface2, 0)
+            // 高度 64dp 内只放得下 32dp 指示器 + 4dp + 标签，上下不再加固定内边距，
+            // 交给格子的 gravity=CENTER 居中 —— 写 12/16 会把内容顶出容器。
         }
         items.forEachIndexed { i, (glyph, label, active) ->
+            val tint = if (active) Md3.onSecondaryContainer else Md3.onSurfaceVariant
             val cell = Md3.column(ctx).apply {
                 gravity = Gravity.CENTER
+                background = Md3.ripple(ctx, Color.TRANSPARENT, 0f)
+                contentDescription = label
                 isClickable = onSelect != null
                 onSelect?.let { cb -> setOnClickListener { cb(i) } }
             }
-            val ico = Md3.text(ctx, glyph, Md3.FS_MD, if (active) Md3.onSecondaryContainer else Md3.onSurfaceVariant).apply {
-                gravity = Gravity.CENTER
+            val icon = Icons.name(glyph)
+            // legado AppNavigationBar：胶囊固定 64×32 RoundedCornerShape(16)，
+            // 居中放，不随格子缩水。上一版用 MATCH_PARENT+margin 让格子决定宽度，
+            // 结果屏上置成 46dp 的扁块。格子 63dp 放 64dp 胶囊差 1dp，
+            // 居中后左右各溢 0.5dp，被裁掉的是圆弧端点，看不出束。
+            val ind = FrameLayout(ctx).apply {
+                background = if (active) Md3.bg(Md3.secondaryContainer, Md3.NAV_IND_H / 2f) else null
             }
-            ico.background = if (active) Md3.bg(Md3.secondaryContainer, 11f) else Md3.bg(Color.TRANSPARENT, 11f)
-            cell.addView(ico, Md3.lpDp(ctx, 44, 22))
-            cell.addView(Md3.text(ctx, label, 9f, if (active) Md3.onSecondaryContainer else Md3.onSurfaceVariant))
+            val ico: View = if (icon != null) {
+                Icons.view(ctx, icon, tint, Md3.ICON_ACTION).apply {
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                }
+            } else {
+                Md3.text(ctx, glyph, Md3.FS_MD, tint).apply { gravity = Gravity.CENTER }
+            }
+            ind.addView(ico, FrameLayout.LayoutParams(
+                Md3.dp(ctx, Md3.ICON_ACTION), Md3.dp(ctx, Md3.ICON_ACTION), Gravity.CENTER))
+            val cellInd = LinearLayout(ctx)
+            cellInd.gravity = Gravity.CENTER
+            cellInd.addView(ind, FrameLayout.LayoutParams(
+                Md3.dp(ctx, Md3.NAV_IND_W), Md3.dp(ctx, Md3.NAV_IND_H)))
+            cell.addView(cellInd, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(ctx, Md3.NAV_IND_H)))
+            // 指示器到标签 4dp。标签也撑满格子并居中，不与图标各自的偏移叠在一起。
+            cell.addView(Md3.text(ctx, label, Md3.FS_LABEL, tint).apply {
+                gravity = Gravity.CENTER
+                maxLines = 1
+                isSingleLine = true
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = Md3.dp(ctx, 4)
+            })
             nav.addView(cell, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
         }
         nav.layoutParams = Md3.lpDp(ctx, null, Md3.NAV)
         return nav
+    }
+
+    /**
+     * 分组页签行。照 legado 的 `AppTabRow`：选中页签给胶囊底色，未选中只有文字。
+     *
+     * 宽了能横向滑：手表 189dp 上三四个页签就满，再多也不挤成一团。
+     */
+    /**
+     * 大标题行：左边一个标题，右边动作图标，动作钉在右端不随标题滚。
+     *
+     * 和 [tabRow] 的区别就在标题的画法 —— 页签是「可选项」，选中项要给
+     * secondaryContainer 胶囊；标题不是可选项，画成 22sp 加粗的 onSurface 纯文字。
+     * 之前书架把标题塞进 tabRow，只有一个「页签」且恒为选中，看起来永远亮着，
+     * 用户判词：「大标题还是被选中状态」。
+     */
+    fun headerRow(
+        ctx: Context,
+        title: CharSequence,
+        trailing: List<Pair<String, () -> Unit>> = emptyList(),
+    ): LinearLayout {
+        val bar = Md3.row(ctx)
+        bar.setPadding(Md3.dp(ctx, Md3.PAD), 0, 0, Md3.dp(ctx, Md3.GAP))
+        bar.addView(
+            Md3.ellipsize(Md3.text(ctx, title, Md3.FS_LG, Md3.onSurface, bold = true)).apply {
+                gravity = Gravity.CENTER_VERTICAL
+            },
+            LinearLayout.LayoutParams(0, Md3.dp(ctx, Md3.TAB_H), 1f),
+        )
+        for ((glyph, act) in trailing) {
+            bar.addView(Md3.iconButton(ctx, glyph, act), LinearLayout.LayoutParams(
+                Md3.dp(ctx, Md3.TAP), Md3.dp(ctx, Md3.TAB_H)))
+        }
+        return bar
+    }
+
+    fun tabRow(
+        ctx: Context,
+        titles: List<String>,
+        selected: Int,
+        onSelect: (Int) -> Unit,
+        trailing: List<Pair<String, () -> Unit>> = emptyList(),
+    ): LinearLayout {
+        val row = Md3.row(ctx)
+        titles.forEachIndexed { i, t ->
+            val on = i == selected
+            val cell = Md3.text(ctx, t, 14f,
+                if (on) Md3.onSecondaryContainer else Md3.onSurfaceVariant, bold = on).apply {
+                gravity = Gravity.CENTER
+                background = Md3.ripple(ctx, if (on) Md3.secondaryContainer else Color.TRANSPARENT, 20f)
+                setPadding(Md3.dp(ctx, 10), 0, Md3.dp(ctx, 10), 0)
+                minimumHeight = Md3.dp(ctx, Md3.TAB_H)
+                isClickable = true
+                contentDescription = t
+                setOnClickListener { if (i != selected) onSelect(i) }
+            }
+            row.addView(cell, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { if (i > 0) leftMargin = Md3.dp(ctx, 2) })
+        }
+        // 页签可横滑，但动作图标必须钉在右边、不随页签滚走。
+        // 上一版把图标塞进滚动行里：三个页签 198dp 就占满 189dp 屏，图标直接被推出屏外。
+        val scroller = HorizontalScrollView(ctx).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(row, ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+        val bar = Md3.row(ctx)
+        bar.setPadding(Md3.dp(ctx, Md3.PAD), 0, 0, Md3.dp(ctx, Md3.GAP))
+        bar.addView(scroller, LinearLayout.LayoutParams(0, Md3.dp(ctx, Md3.TAB_H), 1f))
+        for ((glyph, act) in trailing) {
+            bar.addView(Md3.iconButton(ctx, glyph, act), LinearLayout.LayoutParams(
+                Md3.dp(ctx, Md3.TAP), Md3.dp(ctx, Md3.TAB_H)))
+        }
+        return bar
     }
 
     /** Snackbar。 */
