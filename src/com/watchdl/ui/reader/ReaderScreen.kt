@@ -81,6 +81,14 @@ internal object ReaderUi {
     var findAt = -1
     /** 命中列表属于哪一章（书号#章号）。换章后旧偏移失效，必须丢掉。 */
     var findOwner = ""
+
+    /**
+     * 换章的序号令牌。
+     *
+     * 换章不清屏了（旧页继续画着），连点两下就会有两个线程在跑，
+     * 先发的那次可能后回来盖掉新章 —— 只认最后一次派发的令牌。
+     */
+    var pageToken = 0
 }
 
 /**
@@ -759,14 +767,22 @@ internal fun MainActivity.preview(info: BookInfo, index: Int, atEnd: Boolean = f
         ?: tocSrc
     // 正文要重取，屏上的菜单连着的旧视图树跟着作废。
     com.watchdl.ui.reader.ReaderMenu.reset()
-    root.removeAllViews()
-    root.addView(Widgets.topBar(this, ch.title, onBack = { showToc(info) }))
-    val body = Widgets.scrollBody(this, crownStep, crownGlide)
-    (Widgets.contentColumn(body)).addView(Widgets.emptyState(this, "refresh", "正在取正文…"))
-    root.addView(body)
+    // 换章不清屏（legado 是旧页一直画着、新页就绪后当帧换窗口，
+    // `feature/reader/ReaderCanvasSurface.kt:607-636` 的 pendingPageWindow）：
+    // 已在阅读页时旧正文继续显着，正文取到后同帧交给 showReader 替换。
+    // 先铺一页「正在取正文…」再整屏重建，就是每换一章闪两下的根源。
+    if (curScreen !is Screen.Reader) {
+        root.removeAllViews()
+        root.addView(Widgets.topBar(this, ch.title, onBack = { showToc(info) }))
+        val body = Widgets.scrollBody(this, crownStep, crownGlide)
+        (Widgets.contentColumn(body)).addView(Widgets.emptyState(this, "refresh", "正在取正文…"))
+        root.addView(body)
+    }
 
     // 读者停在 Toc / Reader 屏上点章节，回来时应该还在原来的屏。
     val owner: Screen = curScreen
+    // 连点两下就会有两个线程在跑，先发的可能后回来盖掉新章。
+    val token = ++ReaderUi.pageToken
 
     thread {
         try {
@@ -779,9 +795,15 @@ internal fun MainActivity.preview(info: BookInfo, index: Int, atEnd: Boolean = f
             // 这个代价比「标题里的广告尾巴没去掉」大得多。所以在 preview 这一处做，
             // 不在目录、不在 showReader。
             val text = ReplaceRuleStore.apply(raw, isTitle = false)
-            postAlive(owner) { showReader(info, index, text, actualSrc, atEnd) }
+            postAlive(owner) {
+                if (token != ReaderUi.pageToken) return@postAlive
+                showReader(info, index, text, actualSrc, atEnd)
+            }
         } catch (e: Exception) {
-            postAlive(owner) { toast("正文失败：${e.message}"); showToc(info, src) }
+            postAlive(owner) {
+                if (token != ReaderUi.pageToken) return@postAlive
+                toast("正文失败：${e.message}"); showToc(info, src)
+            }
         }
     }
 }
