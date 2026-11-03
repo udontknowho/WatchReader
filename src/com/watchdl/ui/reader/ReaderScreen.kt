@@ -118,6 +118,23 @@ internal object ReaderUi {
      */
     var bodyView: TextView? = null
     var titleView: TextView? = null
+
+    /**
+     * 拼接块里的下一章标题与正文（章末不足一屏时把下一章开头接在同一屏）。
+     *
+     * 样式与正文同一条路（[styleBody]），[nextRaw] 存**原始文本**：
+     * 存已挂段距 span 的串，改字号时会连旧 span 一起带上，段距会对不上。
+     */
+    var nextTitleView: TextView? = null
+    var nextView: TextView? = null
+    var nextRaw = ""
+    /**
+     * 拼接块的世代号。
+     *
+     * 下一章正文是异步取的，回来时页面可能已经换章 / 已重建：
+     * 每次 showReader 自增一次，回调先比这个，旧世代的结果直接丢掉。
+     */
+    var spliceGen = 0
     var findQuery = ""
     var findHits: List<ReaderFind.Hit> = emptyList()
     /** 当前停在的命中下标，-1 表示还没定位。 */
@@ -164,6 +181,10 @@ internal object ReaderMenu {
         // 正文/标题控件是上一屏的，留着就是泄漏旧视图树。
         ReaderUi.bodyView = null
         ReaderUi.titleView = null
+        // 拼接块的两个控件同样是上一屏的，留着会往已摘下的视图树里写字。
+        ReaderUi.nextView = null
+        ReaderUi.nextTitleView = null
+        ReaderUi.nextRaw = ""
         // 自动翻页的回调里握着上一屏的 ScrollView，不摘掉就会继续翻章。
         // 这里只取消待跑的回调，不动用户开关：换章重建后要接着翻（showReader 末尾重新排程）。
         ReaderAuto.cancel()
@@ -457,6 +478,42 @@ internal fun MainActivity.showReader(
     // 字重/斜体/字距/行距/段距/缩进一次性套上：与设置面板改值走同一个函数，
     // 两边样式不会走形。
     restyleReader(text)
+
+    // ── 拼接块：章末不足一屏时把下一章开头接在正文之后 ───────────
+    // legado 是窗口替换、邻页同屏绘制；这里一次性只装一章，章末剩三行时用户必须再戳一下。
+    // 做法：正文 tv 之后接一条分隔线 + 下一章标题 + 下一章开头，滚到底才真跳章。
+    var tvNext: TextView? = null
+    /** 实际塞进 tvNext 的字符数（按缩进后的串算，与下一章正文的偏移同一套）。 */
+    var spliceChars = 0
+    /** 本页的拼接世代号：回调里先比它，页面重建了就把旧结果丢掉。 */
+    val spliceGen = ++ReaderUi.spliceGen
+
+    /**
+     * 拼接块存在时，「本章读完」的位置是正文 tv 的底边，不是整页底边。
+     *
+     * 进度、滑条分母都用它：用整页 [scrollLimit] 算，全书进度会在章末虚高
+     * （分母里含了下一章那几百字）。可滚上限仍用 [scrollLimit]。
+     * 正文未排版时 tv.height 为 0，这里退回 0，调用方自己当「无进度」处理。
+     */
+    fun mainLimit(): Int = if (tvNext == null) scrollLimit(body)
+        else (childTopIn(body, tv) + tv.height + body.paddingBottom - body.height)
+            .coerceAtLeast(0)
+
+    /**
+     * 拼接块读完那一行在滚动内容里的 y；下一章从这一行接着显示，不重读。
+     *
+     * 两块版式相同（同一条 [styleBody]），偏移可以直接搬到新页。
+     * tvNext 还没排版时退回 0：宁可让新页落回章首（最多重读一屏），
+     * 也不按猜的行高乱定位。
+     */
+    fun spliceResume(): Int {
+        val nx = tvNext ?: return 0
+        val layout = nx.layout ?: return 0
+        val at = spliceChars.coerceIn(0, layout.text.length)
+        return childTopIn(body, nx) + nx.paddingTop +
+            layout.getLineTop(layout.getLineForOffset(at))
+    }
+
     frame.addView(body, FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
@@ -481,9 +538,9 @@ internal fun MainActivity.showReader(
         return (line / linesPerPage + 1).coerceIn(1, totalPages) to totalPages
     }
 
-    /** 章内百分比：正文滚到哪算哪，0 是章首、100 是章末。 */
+    /** 章内百分比：正文滚到哪算哪，0 是章首、100 是章末（有拼接块时按 [mainLimit] 算）。 */
     fun innerPct(): Int {
-        val limit = scrollLimit(body)
+        val limit = mainLimit()
         if (limit <= 0) return 0
         return (body.scrollY * 100 / limit).coerceIn(0, 100)
     }
@@ -609,12 +666,23 @@ internal fun MainActivity.showReader(
     // （`ReadBookMenuBarBottom`），不放在点击区。
     var pageAnim: android.animation.ValueAnimator? = null
 
+    /** 往下滚到章末：有拼接块就把「读完处」当偏移带过去，没有就整章换。 */
+    fun toNext() {
+        val resume = if (tvNext == null) 0 else spliceResume()
+        if (resume > 0) {
+            // 两块版式相同，偏移直接搬：新页从拼接块停下的那一行接上，不重读。
+            ReaderUi.restoreKey = "${info.bookId}#${index + 1}"
+            ReaderUi.restoreAt = resume
+            preview(info, index + 1)
+        } else nextChapter(info, index)
+    }
+
     /** 平滑滚一屏。步距按行算，到章末 / 章首才换章。 */
     fun scrollPage(forward: Boolean) {
         val limit = scrollLimit(body)
         val from = body.scrollY
         // 先判边界：滚不动了才换章，不在章末之前抢跑。
-        if (forward && from >= limit) { nextChapter(info, index); return }
+        if (forward && from >= limit) { toNext(); return }
         if (!forward && from <= 0) { prevChapter(info, index, atEnd = true); return }
         val vp = (body.height - body.paddingTop - body.paddingBottom).coerceAtLeast(1)
         val layout = tv.layout
@@ -631,7 +699,7 @@ internal fun MainActivity.showReader(
         }
         if (target == from) {
             // 只剩不足一行可见：当作到边界。
-            if (forward) nextChapter(info, index) else prevChapter(info, index, atEnd = true)
+            if (forward) toNext() else prevChapter(info, index, atEnd = true)
             return
         }
         // 匀速、时长按距离比例（legado 用 Animatable + LinearEasing，见
@@ -1088,14 +1156,17 @@ internal fun MainActivity.showReader(
         readerOffset = y
         // 进度滑条跟着正文走（不触发跳章：回调里只认 fromUser）。
         if (!draggingSeek) {
-            val limit = scrollLimit(body)
+            val limit = mainLimit()
             val pct = if (limit > 0) (y * 100 / limit).coerceIn(0, 100) else 0
             seek.progress = index * 100 + pct
         }
         // 页眉的屏号与页脚的进度跟着正文走。
         paintStrips()
         scrollSave?.let { body.removeCallbacks(it) }
-        val task = Runnable { saveOffset(info.bookId, index, y) }
+        val task = Runnable {
+            // 偏移只记到「本章读完」为止：存进拼接块，下次进这一章会落在下一章的字里。
+            saveOffset(info.bookId, index, y.coerceIn(0, mainLimit()))
+        }
         scrollSave = task
         body.postDelayed(task, 400)
     }
@@ -1110,11 +1181,48 @@ internal fun MainActivity.showReader(
     if (atEnd) {
         // 从上屏退上来的：落在上一章末屏，接着往上读。
         // legado 的窗口一次带四页，退一屏跨章时看到的正是上一章的末页，不是章首。
-        body.post { body.fullScroll(View.FOCUS_DOWN) }
+        body.post {
+            // 有拼接块时章末是正文底边：整页底会落进下一章的开头（读的是别人的字）。
+            if (tvNext != null) body.scrollTo(0, mainLimit()) else body.fullScroll(View.FOCUS_DOWN)
+        }
     } else if (pinned >= 0) {
-        body.post { body.scrollTo(0, pinned.coerceAtMost(scrollLimit(body))) }
+        body.post { body.scrollTo(0, pinned.coerceIn(0, mainLimit())) }
     } else if (restore != null) {
-        body.post { body.scrollTo(0, restore.coerceAtMost(scrollLimit(body))) }
+        body.post { body.scrollTo(0, restore.coerceIn(0, mainLimit())) }
+    }
+
+    // ── 下一章开头：异步取，接到正文之后 ──────────────────────
+    // 同步取会卡住这一帧（联网最多几秒），所以走与预览同一套后台任务。
+    // 取不到或拿到空正文就什么都不加，行为与以前一样（章末需再戳一下）。
+    val nextCh = info.chapters.getOrNull(index + 1)
+    if (nextCh != null && !nextCh.locked) {
+        bg(curScreen, body = { loadOpening(info, nextCh, src) }) { r ->
+            val raw = r.getOrNull().orEmpty().trim()
+            // 页面已换代（换章 / 改设置重建）：旧章的开头不能往新页上接。
+            if (raw.isEmpty() || spliceGen != ReaderUi.spliceGen) return@bg
+            // 正文已从视图树摘下（已离开阅读页）也不再接。
+            if (body.parent == null) return@bg
+            col.addView(View(this).apply { setBackgroundColor(hairline) },
+                Md3.lpDp(this, null, 1))
+            val nxTitle = Md3.text(this, nextCh.title, readerSize + ReaderUi.titleAdd,
+                readerInk, bold = ReaderUi.titleBold)
+            col.addView(nxTitle)
+            val nx = Md3.text(this, "", readerSize, readerInk)
+            nx.setPadding(Md3.dp(this, 3), Md3.dp(this, 2), Md3.dp(this, 3), Md3.dp(this, 24))
+            col.addView(nx)
+            ReaderUi.nextTitleView = nxTitle
+            ReaderUi.nextView = nx
+            ReaderUi.nextRaw = raw
+            tvNext = nx
+            // 样式与正文完全同一条路：改字号 / 行距时两块一起变。
+            styleBody(nx, raw)
+            spliceChars = nx.length()
+            // 新标题也得跟上「标题位置 / 字号」设置：它就是一个章标题。
+            restyleTitle(readerInk)
+            paintStrips()
+            // 从下一章退上来、这一页本应落在「章末」：有拼接块时章末是正文底边。
+            if (atEnd) body.post { body.scrollTo(0, mainLimit()) }
+        }
     }
 
     // 护眼：整屏暖色半透明层盖在正文上，不消费触摸，滚动照常。
@@ -1173,6 +1281,21 @@ internal fun MainActivity.showReader(
  */
 private fun MainActivity.restyleReader(raw: String) {
     val tv = ReaderUi.bodyView ?: return
+    val ink = ReaderStyle.inkOverride(readerBackground)
+        ?: if (Color.red(readerBackground) > 100) Color.rgb(28, 27, 31) else Md3.onSurface
+    styleBody(tv, raw)
+    // 拼接块里的下一章正文用同一条样式：不同步就会在翻过去时字号突换一档。
+    ReaderUi.nextView?.let { styleBody(it, ReaderUi.nextRaw) }
+    restyleTitle(ink)
+}
+
+/**
+ * 正文样式：字号 / 行距 / 字色 / 对齐 / 字重斜体 / 字距 / 段距。
+ *
+ * 正文 tv 与拼接块里的下一章正文都走这一条 —— 两块版式相同，改设置时才能一起变。
+ * [raw] 必须是**原始文本**（未缩进、未挂 span）。
+ */
+private fun MainActivity.styleBody(tv: TextView, raw: String) {
     val light = Color.red(readerBackground) > 100
     val ink = ReaderStyle.inkOverride(readerBackground)
         ?: if (light) Color.rgb(28, 27, 31) else Md3.onSurface
@@ -1194,22 +1317,25 @@ private fun MainActivity.restyleReader(raw: String) {
             android.graphics.Typeface.SANS_SERIF, ReaderStyle.weightValue(ReaderUi.weightLevel)),
         if (ReaderUi.italic) android.graphics.Typeface.ITALIC else android.graphics.Typeface.NORMAL)
     applyParaSpacing(tv, shown)
-    restyleTitle(ink)
 }
 
 /** 标题样式。位置 / 字号 / 字重 / 下间距四项都跟着设置变。 */
 private fun MainActivity.restyleTitle(ink: Int) {
     val t = ReaderUi.titleView ?: return
-    t.visibility = if (ReaderUi.titleMode == 2) View.GONE else View.VISIBLE
-    if (ReaderUi.titleMode == 2) return
-    t.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, readerSize + ReaderUi.titleAdd)
-    t.setTextColor(ink)
-    t.setTypeface(
-        android.graphics.Typeface.create(
-            android.graphics.Typeface.SANS_SERIF, if (ReaderUi.titleBold) 700 else 400))
-    t.gravity = if (ReaderUi.titleMode == 1) Gravity.CENTER else Gravity.START
-    t.setPadding(Md3.dp(this, 3), Md3.dp(this, 2), Md3.dp(this, 3),
-        Md3.dp(this, ReaderStyle.titleGapDp(ReaderUi.titleGap)))
+    val hide = ReaderUi.titleMode == 2
+    // 拼接块的下一章标题也走这一套：它就是一个章标题，样式不能比正文标题差。
+    for (v in listOfNotNull(t, ReaderUi.nextTitleView)) {
+        v.visibility = if (hide) View.GONE else View.VISIBLE
+        if (hide) continue
+        v.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, readerSize + ReaderUi.titleAdd)
+        v.setTextColor(ink)
+        v.setTypeface(
+            android.graphics.Typeface.create(
+                android.graphics.Typeface.SANS_SERIF, if (ReaderUi.titleBold) 700 else 400))
+        v.gravity = if (ReaderUi.titleMode == 1) Gravity.CENTER else Gravity.START
+        v.setPadding(Md3.dp(this, 3), Md3.dp(this, 2), Md3.dp(this, 3),
+            Md3.dp(this, ReaderStyle.titleGapDp(ReaderUi.titleGap)))
+    }
 }
 
 /**
@@ -1505,6 +1631,38 @@ private fun MainActivity.showFindResults(
     Widgets.longMenuDialog(this,
         "查找“${ReaderUi.findQuery}” · ${ReaderStyle.counterText(ReaderUi.findAt, hits.size)}",
         items).show()
+}
+
+/** 拼接块的长度：约两屏多一点，足够滚到底再跳章时不重读。 */
+private const val SPLICE_CHARS = 800
+
+/** 拼接块用的那一段：切在段落边界上，下一章正文不从半句接起。 */
+private fun spliceHead(text: String): String {
+    if (text.length <= SPLICE_CHARS) return text
+    val cut = text.lastIndexOf('\n', SPLICE_CHARS)
+    return if (cut > SPLICE_CHARS / 2) text.substring(0, cut) else text.substring(0, SPLICE_CHARS)
+}
+
+/**
+ * 取一章正文（拼接块用），与 [preview] 同一条路。
+ *
+ * 先本地缓存（jobsStore 里该章 itemId 的 content）净化转纯文本，
+ * 本地没有才联网取；任何异常一律吞掉返回空串 —— 拼接块是锦上添花，
+ * 不能因为多取一章把正文页弄挂。
+ * 注意这是阻塞调用，必须在 [bg] 的线程里跑。
+ */
+private fun MainActivity.loadOpening(
+    info: BookInfo,
+    ch: ChapterRef,
+    src: BookSource?,
+): String = try {
+    val line = jobsStore().readChapters(info.bookId)[ch.itemId]
+    val localHtml = line?.let { TinyJson.path(it, "content") }
+    val html = localHtml ?: (src ?: source).content(ch.itemId, info.bookId)
+    val raw = Downloader.htmlToText(html).ifEmpty { html.replace(Regex("<[^>]+>"), "\n").trim() }
+    spliceHead(ReplaceRuleStore.apply(raw, isTitle = false))
+} catch (e: Exception) {
+    ""
 }
 
 /**
