@@ -19,10 +19,18 @@ import java.util.Locale
  *
  * 书清单只读 `job.json`（[Downloader.restoreLight]），不碰 `chapters.jsonl` ——
  * 几十本书的正文加起来几百 MB，为了一份清单去读正文是纯浪费。
+ *
+ * **legado 没有这一页**（`ui/` 下没有书单导出屏；`BookshelfManageScreen` 里的「导出」
+ * 导出的是书籍正文与插图，不是清单）。所以本页按 legado 列表页的通用形态自查：
+ * 分组卡 + 设置行 + 主操作占屏底一格，删除类动作二次确认。
  */
 
 /** 生成的文件名前缀。判断「哪份是书单」只靠它，改名即视为用户自己的文件。 */
 private const val PREFIX = "书单-"
+
+/** 时间戳 → 「08-14 21:30」。副标题第一段，年月对「哪份是刚生成的」没帮助。 */
+private fun stamp(ms: Long): String =
+    if (ms <= 0L) "" else SimpleDateFormat("MM-dd HH:mm", Locale.US).format(Date(ms))
 
 internal fun MainActivity.showExportList() {
     setScreen(Screen.ExportList)
@@ -38,29 +46,53 @@ internal fun MainActivity.showExportList() {
         ?.sortedByDescending { it.lastModified() }
         ?: emptyList()
 
-    col.addView(Widgets.sectionLabel(this, "书架 $count 本"))
-    col.addView(Widgets.button(this, "生成书单") { generateExportList() })
-    // 最近那份单独占一行：文件列表里一屏能塞十几行，光靠排序分不出「刚生成的」。
-    files.firstOrNull { it.name.startsWith(PREFIX) }?.let {
-        col.addView(Md3.text(this, "最近生成 ${it.name} · ${humanBytes(it.length())}",
-            Md3.FS_SM, Md3.onSurfaceVariant))
-    }
+    // 状态收成一行设置行（legado `SettingItem`：标题 + 描述）。
+    // 原来这里是「段标题 + 整宽按钮 + 最近生成提示」三行，在 248 dp 高的屏上
+    // 把导出目录的第一行挤出视口；按钮移去屏底之后，一行就够说清两头。
+    val latest = files.firstOrNull { it.name.startsWith(PREFIX) }
+    col.addView(Widgets.groupCard(this, "书单") { g ->
+        g.addView(Widgets.groupItem(
+            ctx = this,
+            title = "书架 $count 本",
+            subtitle = latest?.let { "最近生成 ${it.name} · ${stamp(it.lastModified())}" }
+                ?: "还没生成过",
+            glyph = "list",
+        ))
+    })
 
-    col.addView(Widgets.sectionLabel(this, "导出目录 · ${files.size} 个"))
-    if (files.isEmpty()) {
-        col.addView(Widgets.emptyState(this, "list", "导出目录还是空的。\n生成后会出现在这里。"))
-    } else {
+    col.addView(Widgets.groupCard(this, "导出目录 · ${files.size} 个") { g ->
+        if (files.isEmpty()) {
+            g.addView(Widgets.emptyState(this, "list", "导出目录还是空的。\n生成后会出现在这里。"))
+        }
         for (f in files) {
-            col.addView(Widgets.listItem(
+            g.addView(Widgets.groupItem(
                 ctx = this,
                 title = f.name,
-                subtitle = humanBytes(f.length()),
+                subtitle = "${stamp(f.lastModified())} · ${humanBytes(f.length())}",
+                glyph = "file",
                 trailing = "✕",
                 onTrailingClick = { askDeleteExport(f) },
             ))
         }
-    }
+    })
     root.addView(body, Md3.lpWeight(1f))
+    addExportBar()
+}
+
+/**
+ * 屏底主操作：生成书单。
+ *
+ * legado 的主操作在 FAB 上，本项目 2026-11-02 拍板用屏底通栅按钮替代
+ * （FAB 会压住列表末行）。放在滚区外面，生成完重画也不会跟着滚走。
+ */
+private fun MainActivity.addExportBar() {
+    val bar = Md3.row(this).apply {
+        setPadding(Md3.dp(this@addExportBar, Md3.PAD), Md3.dp(this@addExportBar, Md3.GAP / 2),
+            Md3.dp(this@addExportBar, Md3.PAD), Md3.dp(this@addExportBar, Md3.GAP))
+    }
+    bar.addView(Widgets.button(this, "生成书单", "filled") { generateExportList() },
+        Md3.lpWeight(1f))
+    root.addView(bar)
 }
 
 /**
@@ -95,7 +127,7 @@ private fun MainActivity.generateExportList() {
             toast("生成书单失败：${r.exceptionOrNull()?.message?.take(40) ?: "未知原因"}")
         } else {
             toast("已生成 ${res.first} · ${res.third} 本")
-            showExportList()      // 重画：文件列表与「最近生成」都要跟着变
+            showExportList()      // 重画：状态行与文件列表都要跟着变
         }
     }
 }
