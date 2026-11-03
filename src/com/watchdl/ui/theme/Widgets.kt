@@ -756,11 +756,20 @@ object Widgets {
             // 交给格子的 gravity=CENTER 居中 —— 写 12/16 会把内容顶出容器。
         }
         items.forEachIndexed { i, (glyph, label, active) ->
-            val tint = if (active) Md3.onSecondaryContainer else Md3.onSurfaceVariant
+            // 两处着色分开，照 M3 `NavigationBarItemDefaults`：
+            // 图标坐在 secondaryContainer 胶囊里，所以取 onSecondaryContainer；
+            // 标签在胶囊下方、不在胶囊里，取 onSurface。
+            // 之前两者都吃 onSecondaryContainer，标签成了胶囊外挂的一行淡紫字。
+            val iconTint = if (active) Md3.onSecondaryContainer else Md3.onSurfaceVariant
+            val labelTint = if (active) Md3.onSurface else Md3.onSurfaceVariant
             val cell = Md3.column(ctx).apply {
                 gravity = Gravity.CENTER
                 background = Md3.ripple(ctx, Color.TRANSPARENT, 0f)
                 contentDescription = label
+                // TalkBack 靠 isSelected 报「已选择」。legado 在 Compose 侧是
+                // `semantics(mergeDescendants = true) { contentDescription = 标签 }`，
+                // 合并语义我们只能用「父级写描述 + 子级退出无障碍树」来等效。
+                isSelected = active
                 isClickable = onSelect != null
                 onSelect?.let { cb -> setOnClickListener { cb(i) } }
             }
@@ -773,11 +782,14 @@ object Widgets {
                 background = if (active) Md3.bg(Md3.secondaryContainer, Md3.NAV_IND_H / 2f) else null
             }
             val ico: View = if (icon != null) {
-                Icons.view(ctx, icon, tint, Md3.ICON_ACTION).apply {
+                Icons.view(ctx, icon, iconTint, Md3.ICON_ACTION).apply {
                     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 }
             } else {
-                Md3.text(ctx, glyph, Md3.FS_MD, tint).apply { gravity = Gravity.CENTER }
+                Md3.text(ctx, glyph, Md3.FS_MD, iconTint).apply {
+                    gravity = Gravity.CENTER
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                }
             }
             ind.addView(ico, FrameLayout.LayoutParams(
                 Md3.dp(ctx, Md3.ICON_ACTION), Md3.dp(ctx, Md3.ICON_ACTION), Gravity.CENTER))
@@ -788,10 +800,12 @@ object Widgets {
             cell.addView(cellInd, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(ctx, Md3.NAV_IND_H)))
             // 指示器到标签 4dp。标签也撑满格子并居中，不与图标各自的偏移叠在一起。
-            cell.addView(Md3.text(ctx, label, Md3.FS_LABEL, tint).apply {
+            cell.addView(Md3.text(ctx, label, Md3.FS_LABEL, labelTint).apply {
                 gravity = Gravity.CENTER
                 maxLines = 1
                 isSingleLine = true
+                // 文字已由 cell 的 contentDescription 承担，留在树里会被念两遍。
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             }, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                 topMargin = Md3.dp(ctx, 4)

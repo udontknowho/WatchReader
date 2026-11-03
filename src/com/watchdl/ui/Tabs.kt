@@ -1,5 +1,8 @@
 package com.watchdl.ui
 
+import android.view.View
+import android.view.ViewGroup
+import android.widget.ScrollView
 import com.watchdl.MainActivity
 import com.watchdl.ui.my.showMy
 import com.watchdl.ui.shelf.showShelf
@@ -22,9 +25,24 @@ internal fun MainActivity.attachTabs(active: Int) {
         Triple("mine", "我的", active == 2),
     )) { i ->
         when (i) {
-            0 -> if (active != 0) showShelf()
+            // 重复点当前栏：legado `handleMainDestinationClick` 只给书架做
+            // 「回到顶部」（`requestBookshelfScrollToTop`），发现 / 我的 再点无动作。
+            // 书架滚远了点底栏回顶，是这块屏上唯一一个不用转表冠就能回到开头的手势。
+            0 -> if (active == 0) scrollToTop(root) else showShelf()
             1 -> if (active != 1) showDiscover()
             else -> if (active != 2) showMy()
         }
     })
+}
+
+/** 把屏里第一个纵向滚动区拉回顶部。找不到就不动 —— 空屏也是合法状态。 */
+private fun scrollToTop(from: View) {
+    firstScrollView(from)?.smoothScrollTo(0, 0)
+}
+
+private fun firstScrollView(v: View): ScrollView? {
+    if (v is ScrollView) return v
+    if (v !is ViewGroup) return null
+    for (i in 0 until v.childCount) firstScrollView(v.getChildAt(i))?.let { return it }
+    return null
 }
