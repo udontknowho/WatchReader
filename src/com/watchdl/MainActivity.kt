@@ -264,9 +264,10 @@ class MainActivity : Activity() {
             is Screen.Market -> showMarket(s.page, s.hits)
             is Screen.Sources -> showSources()
             is Screen.Progress -> showProgress(s.info)
-            // 发现页返回时**清空旧数据**重新拉：推荐流是时效内容，
+            // 发现页返回时**清空旧数据**重新拉：榜单是时效内容，
             // 隔几分钟回来还显示旧列表，用户看不出它已过期。
-            is Screen.Discover -> showDiscover(s.site, s.gender, s.rankKey)
+            // rankKey 空串是目录页，非空是内容页 —— 重放时按同一个 key 回到那一屏。
+            is Screen.Discover -> showDiscover(s.rankKey)
             is Screen.Settings -> showSettings(s.page)
             is Screen.Marks -> showMarks(s.info)
             Screen.MarksAll -> showAllMarks()
@@ -1857,7 +1858,7 @@ class MainActivity : Activity() {
             is Screen.Progress -> showProgress(s.info)
             is Screen.Settings -> showSettings(s.page)
             // 配置变更重建**不刷新**：这里只是重画，联网会让旋转/展开后卡一下。
-            is Screen.Discover -> showDiscover(s.site, s.gender, s.rankKey)
+            is Screen.Discover -> showDiscover(s.rankKey)
             Screen.Shelf -> showShelf()
             is Screen.Marks -> showMarks(s.info)
             Screen.MarksAll -> showAllMarks()
@@ -1879,7 +1880,8 @@ class MainActivity : Activity() {
             // 书架是根栏：在这一栏按返回才退出应用。
             Screen.Shelf -> super.onBackPressed()
             // 另外两栏按返回回书架栏，不退出 —— 手势返回在手表上很容易误触。
-            is Screen.Discover -> showShelf()
+            // 榜的内容页先退回榜单目录，不一步跳到底栏。
+            is Screen.Discover -> if (s.rankKey.isBlank()) showShelf() else showDiscover()
             Screen.My -> showShelf()
             is Screen.Toc -> goBackToPrevious()
             is Screen.Hits -> goBackToPrevious()

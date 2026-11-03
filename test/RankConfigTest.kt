@@ -59,9 +59,16 @@ fun main() {
         "实际 ${fq.count { it.gender == RankConfig.Gender.MALE }}")
     check("女频 7 类", fq.count { it.gender == RankConfig.Gender.FEMALE } == 7,
         "实际 ${fq.count { it.gender == RankConfig.Gender.FEMALE }}")
-    check("起点 5 个榜",
-        RankConfig.BUILTIN.count { it.site == RankConfig.Site.QIDIAN } == 5,
+    // 2026-11-03：起点 5 个 board 各建男女两条（`qd:<board>` / `qd:female:<board>`），
+    // 共 10 条。男频老键名不变 —— 存档与云端 ranks.json 里已经有它们。
+    check("起点男女频各 5 个榜",
+        RankConfig.BUILTIN.count { it.site == RankConfig.Site.QIDIAN } == 10,
         "实际 ${RankConfig.BUILTIN.count { it.site == RankConfig.Site.QIDIAN }}")
+    check("起点男频沿用老键",
+        RankConfig.BUILTIN.any { it.key == "qd:yuepiaolist" && it.gender == RankConfig.Gender.MALE })
+    check("起点女频另立键",
+        RankConfig.BUILTIN.any { it.key == "qd:female:yuepiaolist" &&
+            it.gender == RankConfig.Gender.FEMALE })
     check("key 不重复", RankConfig.BUILTIN.map { it.key }.toSet().size == RankConfig.BUILTIN.size)
     // 新书榜已移除。这条守着「别哪天又加回来」。
     check("没有番茄新书榜", fq.none { it.rankType == 1 },

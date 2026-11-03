@@ -43,14 +43,14 @@ sealed interface Screen {
     /**
      * 发现页（榜单）。
      *
-     * `key` 标识当前看的是哪个榜，`hits` 是已拉到的条目（空表示还在拉）。
-     * 只带榜单代号与性别，重进这一屏时不缓存数据 —— 榜单本来就要新数据。
+     * 一屏两形态：`rankKey` 空串是**榜单目录**（分组列出所有榜），非空是**某个榜的内容页**。
+     * 目录页是底栏根屏，内容页自己挂返回箭头回目录。
+     *
+     * 不再带站点与频道字段：榜单条目自己带着，按 key 查一次就有。
+     * `hits` 是已拉到的条目（空表示还在拉），不缓存 —— 榜单本来就要新数据。
      */
     data class Discover(
-        /** 站点：`fq` / `qd`。 */
-        val site: String = "fq",
-        val gender: String = "male",
-        /** 选中的榜；空串表示还没选，只显示选择器。 */
+        /** 选中的榜；空串表示目录页。 */
         val rankKey: String = "",
         /** 这个榜拉到的条目。空表示正在拉或没选。 */
         val hits: List<BookHit> = emptyList(),
@@ -171,7 +171,7 @@ fun screenId(s: Screen?): String = when (s) {
     Screen.ExportList -> "exportList"
     Screen.Logs -> "logs"
     is Screen.Swap -> "swap:" + s.info.bookId.ifBlank { s.info.name + s.info.author }
-    is Screen.Discover -> "discover:${s.site}:${s.gender}:${s.rankKey}"
+    is Screen.Discover -> "discover:${s.rankKey}"
     is Screen.Market -> "market:${s.page}"
     // 只比关键词，不比结果：边扫边上屏时结果一直在变，带上结果回调永远认不出自己。
     is Screen.Find -> "find:${s.query}"

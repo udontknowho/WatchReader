@@ -642,138 +642,123 @@ private fun MainActivity.rebuildSourcesInBackground() {
  * 全站 31606 条 / 2.5 GB，全量拉要 9 小时，所以不做整库导入。
  */
 /**
- * 发现页：选站点 → 选频道 → 选分类 → 看那一个榜。
+ * 一个榜的内容页。
  *
- * 以前是一条混合流，把几个榜各取一页轮流拼起来 —— 结果「番茄更新」那种新鲜但
- * 难看的书把好榜的份额挤掉了。现在番茄有 26 个分类 × 阅读/新书两榜，起点有 5 个榜，
- * 全并行拉一次就是 52 个请求，所以改成**选中后只拉一个榜**。
- *
- * 番茄分类榜走页面 SSR，一屏 10 本、不可翻页；起点每页 20 本、可翻到第 10 页。
+ * 顶端是榜单名（带返回箭头回目录）与刷新；正文是该榜的书目。
+ * 番茄分类榜一屏 10 本、不可翻页；起点每页 20 本、可翻到第 10 页。
  * 点书名走既有的多源搜索：起点没有对应 [BookSource]，番茄榜单的书也未必能直取目录。
  */
-internal fun MainActivity.showDiscover(
-    site: String = "fq",
-    gender: String = "male",
-    rankKey: String = "",
-) {
-    setScreen(Screen.Discover(site, gender, rankKey))
+private fun MainActivity.showRankContent(rankKey: String) {
+    setScreen(Screen.Discover(rankKey))
     root.removeAllViews()
 
-    // 这个站点+频道下有哪些榜。
-    val genderEnum = if (gender == "female") RankConfig.Gender.FEMALE else RankConfig.Gender.MALE
-    val siteEnum = if (site == "qd") RankConfig.Site.QIDIAN else RankConfig.Site.FANQIE
-    val avail = discoverRanks().filter { it.site == siteEnum && it.gender == genderEnum }
-    // 没指定就选第一个。两栏布局里右栏空着等于白占一半屏。
-    val sel = avail.firstOrNull { it.key == rankKey } ?: avail.firstOrNull()
+    // 榜单条目自己带着站点与频道，按 key 查一次就够。
+    val rank = discoverRanks().firstOrNull { it.key == rankKey }
+    // 查不到（云端配置改过名、缓存被清）也得给一条退路，不能卡在这屏。
+    root.addView(Widgets.topBar(this, rank?.name ?: "榜单不存在",
+        onBack = { showDiscover() },
+        trailing = if (rank == null) emptyList()
+        else listOf("refresh" to { showDiscover(rankKey) })))
 
-    // 根屏（底栏三栏之一），不挂返回箭头，动作图标钉在标题行右端。
-    root.addView(Widgets.headerRow(this, sel?.name ?: "发现",
-        trailing = listOf("refresh" to { showDiscover(site, gender, rankKey) })))
+    val body = Widgets.scrollBody(this, crownStep, crownGlide)
+    val col = Widgets.contentColumn(body)
+    root.addView(body)
 
-    // 站点与频道合成一行。手表屏高只有 248dp，两个各带分组标题的区块
-    // 各吃掉约 69dp，两栏就没地方了。
-    val head = Md3.row(this)
-    head.setPadding(Md3.dp(this, Md3.PAD), 0, Md3.dp(this, Md3.PAD), 0)
-    for ((on, label, act) in listOf<Triple<Boolean, String, () -> Unit>>(
-        Triple(site == "fq", "番茄", { if (site != "fq") showDiscover("fq", gender, "") }),
-        Triple(site == "qd", "起点", { if (site != "qd") showDiscover("qd", gender, "") }),
-        Triple(gender == "male", "男频", { if (gender != "male") showDiscover(site, "male", "") }),
-        Triple(gender == "female", "女频", { if (gender != "female") showDiscover(site, "female", "") }),
-    )) {
-        val b = Widgets.button(this, label, if (on) "filled" else "tonal", onClick = act)
-        b.contentDescription = label
-        head.addView(b, LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f).apply {
-            if (head.childCount > 0) leftMargin = Md3.dp(this@showDiscover, Md3.GAP / 2)
-        })
-    }
-    head.layoutParams = LinearLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, Md3.BTN),
-    ).apply { bottomMargin = Md3.dp(this@showDiscover, Md3.GAP) }
-    root.addView(head)
-
-    if (avail.isEmpty()) {
-        root.addView(Widgets.emptyState(this, "list", "这个频道暂时没有榜单"), Md3.lpWeight(1f))
+    if (rank == null) {
+        col.addView(Widgets.emptyState(this, "warning", "这个榜已不在榜单清单里"))
         attachTabs(1)
         return
     }
-    val cur = sel ?: return
-
-    // 两栏：左分类（自己滚），右书目（表冠滚）。
-    val split = Md3.row(this)
-    split.layoutParams = Md3.lpWeight(1f)
-    split.setPadding(Md3.dp(this, Md3.PAD), 0, Md3.dp(this, Md3.PAD), Md3.dp(this, Md3.PAD))
-    root.addView(split)
-
-    // 侧栏宽度：手表 189dp 下给 59dp，四字分类刚好放得下。
-    val railScroll = ScrollView(this).apply {
-        isVerticalScrollBarEnabled = true
-        scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY
-        layoutParams = LinearLayout.LayoutParams(
-            Md3.dp(this@showDiscover, 59), ViewGroup.LayoutParams.MATCH_PARENT)
-    }
-    val rail = Md3.column(this)
-    railScroll.addView(rail, LinearLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-    split.addView(railScroll)
-
-    // 右侧书目用 scrollBody 是为了白拿它的表冠滚动；它自带的四周 PAD
-    // 在这里会顶出一倍的缝，所以置零，边距由 split 统一给。
-    val paneBody = Widgets.scrollBody(this, crownStep, crownGlide)
-    paneBody.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
-        .apply { leftMargin = Md3.dp(this@showDiscover, Md3.GAP) }
-    paneBody.setPadding(0, 0, 0, 0)
-    split.addView(paneBody)
-    val pane = Widgets.contentColumn(paneBody)
-
-    for (r in avail) {
-        val on = r.key == cur.key
-        // 榜单名形如「西方奇幻 · 阅读」，侧栏只放分类名。
-        val label = if (site == "qd") r.name else r.name.substringBefore(" · ")
-        val item = Md3.text(this, label, Md3.FS_SM,
-            if (on) Md3.onPrimaryContainer else Md3.onSurfaceVariant, bold = on).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            maxLines = 2
-            setPadding(Md3.dp(context, 6), Md3.dp(context, 3), Md3.dp(context, 6), Md3.dp(context, 3))
-            minimumHeight = Md3.dp(context, Md3.ITEM)
-            background = if (on) Md3.bg(Md3.primaryContainer, Md3.R_ITEM.toFloat())
-                         else Md3.ripple(context, Color.TRANSPARENT, Md3.R_ITEM.toFloat())
-            contentDescription = label
-            isClickable = true
-            setOnClickListener { if (!on) showDiscover(site, gender, r.key) }
-        }
-        rail.addView(item, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { bottomMargin = Md3.dp(this@showDiscover, 2) })
-    }
 
     val holder = Md3.column(this)
-    pane.addView(holder)
+    col.addView(holder)
     holder.addView(Md3.text(this, "正在拉取…", Md3.FS_SM, Md3.onSurfaceVariant))
 
-    // 云端配置照旧在后台刷：拉到了且列表真变了就重画一次，没变就不动。
-    refreshRanks(Screen.Discover(site, gender, rankKey)) {
-        showDiscover(site, gender, rankKey)
-    }
+    // 云端配置照旧在后台刷：拉到了且清单变了就重画一次，没变就不动。
+    refreshRanks(Screen.Discover(rankKey)) { showDiscover(rankKey) }
 
-    bg(Screen.Discover(site, gender, rankKey), { loadOneRank(cur) }) { res ->
+    bg(Screen.Discover(rankKey), { loadOneRank(rank) }) { res ->
         holder.removeAllViews()
         res.onSuccess { hits ->
             if (hits.isEmpty()) {
                 holder.addView(Md3.text(this, "这个榜暂时没有内容",
                     Md3.FS_SM, Md3.onSurfaceVariant))
             } else {
-                for (h in hits) holder.addView(discoverItem(pane, h))
+                for (h in hits) holder.addView(discoverItem(col, h))
             }
         }.onFailure { e ->
             holder.addView(Md3.text(this, "取不到：${e.message?.take(60)}",
                 Md3.FS_SM, Md3.error))
             holder.addView(Widgets.button(this, "重试", "tonal") {
-                showDiscover(site, gender, rankKey)
+                showDiscover(rankKey)
             })
         }
     }
     attachTabs(1)
 }
+
+/**
+ * 发现页：榜单目录。
+ *
+ * **以前**首屏是「番茄／起点／男频／女频」四颗等分按钮选组合，两栏里再选分类。
+ * 问题是起点 5 个榜原本没建女频条目 —— 选「起点 + 女频」直接空屏；
+ * 就算补上，四颗按钮也白占掉一行 34dp，而手表屏高只有 248dp。
+ *
+ * **现在**直接列榜：站点与频道合成分组标题，一组一张卡，点一行进那个榜。
+ * 没有能落到空屏的组合，首屏也不用先做两次选择。
+ */
+internal fun MainActivity.showDiscover(rankKey: String = "") {
+    setScreen(Screen.Discover(rankKey))
+    root.removeAllViews()
+    // 指定了榜就是内容页；目录页在下面搭。
+    if (rankKey.isNotBlank()) {
+        showRankContent(rankKey)
+        return
+    }
+
+    // 根屏（底栏三栏之一），不挂返回箭头，动作图标钉在标题行右端。
+    root.addView(Widgets.headerRow(this, "发现",
+        trailing = listOf("refresh" to { showDiscover() })))
+
+    val body = Widgets.scrollBody(this, crownStep, crownGlide)
+    val col = Widgets.contentColumn(body)
+    root.addView(body)
+
+    val all = discoverRanks()
+    // 分组顺序固定：番茄在前（榜多有分类），起点在后（各 5 个总榜）。
+    for ((site, gender, title) in listOf(
+        Triple(RankConfig.Site.FANQIE, RankConfig.Gender.MALE, "番茄 · 男频"),
+        Triple(RankConfig.Site.FANQIE, RankConfig.Gender.FEMALE, "番茄 · 女频"),
+        Triple(RankConfig.Site.QIDIAN, RankConfig.Gender.MALE, "起点 · 男频"),
+        Triple(RankConfig.Site.QIDIAN, RankConfig.Gender.FEMALE, "起点 · 女频"),
+    )) {
+        val group = all.filter { it.site == site && it.gender == gender }
+        if (group.isEmpty()) continue
+        col.addView(Widgets.groupCard(this, title) { card ->
+            for (r in group) {
+                card.addView(Widgets.groupItem(this, r.listLabel(),
+                    onClick = { showDiscover(r.key) }))
+            }
+        })
+    }
+    if (col.childCount == 0) {
+        col.addView(Widgets.emptyState(this, "list", "榜单清单是空的"))
+    }
+
+    // 云端配置照旧在后台刷：拉到了且清单变了就重画一次，没变就不动。
+    refreshRanks(Screen.Discover("")) { showDiscover() }
+    attachTabs(1)
+}
+
+/**
+ * 榜在目录里的名字。
+ *
+ * 内置名带前缀：番茄是「西方奇幻 · 阅读」，起点是「起点女频月票榜」。
+ * 分组标题已经写明站点与频道，行里只留分类名，189dp 的屏才放得下。
+ */
+private fun RankConfig.Rank.listLabel(): String =
+    if (site == RankConfig.Site.QIDIAN) name.removePrefix("起点").removePrefix("女频")
+    else name.substringBefore(" · ")
 
 /**
  * 发现页的一行。

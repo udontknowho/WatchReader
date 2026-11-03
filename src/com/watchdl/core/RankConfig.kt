@@ -106,9 +106,14 @@ object RankConfig {
         // 点进去多数取不到正文 —— 用户要求去掉。要恢复就把它加回这两个数组。
         for ((cat, name) in MALE_CATS) fq(cat, name, Gender.MALE, 2)
         for ((cat, name) in FEMALE_CATS) fq(cat, name, Gender.FEMALE, 2)
+        // 起点接口本身接受 gender=male|female，2026-11-03 实测五个 board 的女频
+        // 都能返回 20 条、且与男频书目不同。男频沿用老键 `qd:<board>`
+        // （存档与云端 ranks.json 里已有），女频另立 `qd:female:<board>`。
         for ((board, name) in QIDIAN_BOARDS) {
             add(Rank("qd:$board", "起点$name", Kind.QIDIAN, board = board, pages = 10,
                 gendered = true, site = Site.QIDIAN))
+            add(Rank("qd:female:$board", "起点女频$name", Kind.QIDIAN, board = board, pages = 10,
+                gendered = true, gender = Gender.FEMALE, site = Site.QIDIAN))
         }
     }
 
@@ -128,8 +133,12 @@ object RankConfig {
      * 它非空，于是 `local()` 永远读它、内置表永远出不来，用户看到的就是
      * 「分类榜没了」。云端 v2 又因为 jsdelivr 节点滞后一直没拉下来。
      * 加内置 19+7 个分类榜、改过一次内容就要把这个数往上加。
+     *
+     * v3（2026-11-03）：起点补女频条目。**设备上留着 v2 缓存的话，它没有
+     * 这 5 个女频榜，还会顶掉内置表** —— 所以必须同步升版本号。
+     * 代价是云端 v2 的 ranks.json 也不再被采用，要同步发一版 v3。
      */
-    const val BUILTIN_VERSION = 2
+    const val BUILTIN_VERSION = 3
 
     /**
      * 取配置的候选地址。与 [CloudSource.MIRRORS] 同一套 —— 镜像顺序只维护一处。
