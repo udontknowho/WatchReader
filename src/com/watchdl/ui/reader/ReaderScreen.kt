@@ -537,12 +537,6 @@ internal fun MainActivity.showReader(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     root.addView(frame, Md3.lpWeight(1f))
 
-    // 第一次进阅读页给一次提示：菜单默认收起，分区不说一句没人猜得到。
-    val hint = getSharedPreferences("reader", android.content.Context.MODE_PRIVATE)
-    if (!hint.getBoolean("hint_tap2", false)) {
-        hint.edit().putBoolean("hint_tap2", true).apply()
-        toast("点下屏翻一屏、点中间出菜单")
-    }
 }
 
 /**
