@@ -30,6 +30,7 @@ import com.watchdl.core.QueueItem
 import com.watchdl.core.chapterCacheStatusText
 import com.watchdl.core.detailCurrentLine
 import com.watchdl.core.detailDownloadTag
+import com.watchdl.core.detailEmptyTocHint
 import com.watchdl.core.detailIntroText
 import com.watchdl.core.detailIntroToggleLabel
 import com.watchdl.core.detailIntroToggleVisible
@@ -38,6 +39,7 @@ import com.watchdl.core.detailReadState
 import com.watchdl.core.detailRemoveMessage
 import com.watchdl.core.detailShelfAction
 import com.watchdl.core.detailStatParts
+import com.watchdl.core.detailTocFailText
 import com.watchdl.core.detailTotalText
 import com.watchdl.core.ReaderFind
 import com.watchdl.core.ReaderStyle
@@ -277,6 +279,12 @@ fun main() {
     check("章数超界 → 已读完不留负数", detailReadState(3, 50) == "已读完")
     check("空目录 → 未读", detailReadState(0, 0) == "未读")
     check("统计行三段顺序", detailStatParts(10, 4) == listOf("共 10 章", "|", "已读 5 章"))
+    check("加载目录失败照 error_load_toc 措辞", detailTocFailText() == "加载目录失败")
+    check("还没取目录 → 明说要按哪张卡",
+        detailEmptyTocHint(false) == "目录还没取，点「查看目录」开始")
+    check("取失败过 → 如实报失败，不冒充未取",
+        detailEmptyTocHint(true) == "目录加载失败，点「查看目录」重试" &&
+            !detailEmptyTocHint(true).contains("还没取"))
     check("未入架 → 放入书架 + plus",
         detailShelfAction(false).let { it.label == "放入书架" && it.glyph == "plus" })
     check("已入架 → 已在书架 + bookmark",

@@ -39,6 +39,23 @@ fun detailReadState(total: Int, readIndex: Int): String {
 fun detailStatParts(total: Int, readIndex: Int): List<String> =
     listOf(detailTotalText(total), "|", detailReadState(total, readIndex))
 
+/**
+ * 目录加载失败的提示语，照 legado `error_load_toc`「加载目录失败」。
+ *
+ * legado 把它接在统计行第三格后面（同一行，` · ` 分隔）。189 dp 一行已经装着
+ * 「共 N 章 | 已读 N 章」，再接一句就溢出，所以本版另起一行，配色仍用 error。
+ */
+fun detailTocFailText(): String = "加载目录失败"
+
+/**
+ * 目录为空时那句提示，分两种：取失败过，和还没取。
+ *
+ * 以前两种都写「目录还没取，点「查看目录」开始」—— 刷新失败之后屏上还是这句，
+ * 用户会以为按钮没生效、反复点。失败要如实说是失败。
+ */
+fun detailEmptyTocHint(failed: Boolean): String =
+    if (failed) "目录加载失败，点「查看目录」重试" else "目录还没取，点「查看目录」开始"
+
 /** 统计块第一行：「在读 · 章名」。还没有章节时 legado 用 `loading`「加载中…」占位。 */
 fun detailCurrentLine(title: String?): String =
     "在读 · " + (title?.takeIf { it.isNotBlank() } ?: "加载中…")

@@ -7,6 +7,7 @@ import android.widget.TextView
 import com.watchdl.MainActivity
 import com.watchdl.core.*
 import com.watchdl.ui.reader.preview
+import com.watchdl.ui.source.showSources
 import com.watchdl.ui.theme.Icons
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
@@ -20,6 +21,15 @@ import com.watchdl.ui.theme.Widgets
  *
  * 裁掉的是背景大图与相关书籍横排：后者是横向列表，189 dp 一排放不下；
  * 前者是材质装饰，要 Compose 的模糊。其余字段一个不留地纵向排下来，靠滚动容纳。
+ *
+ * 与 legado 的已知差异（不打算追）：
+ * - `relatedBooks`（同类推荐横排）：我们没有推荐源，也没有横滑空间。
+ * - `remark`（备注卡）：legado 有 `Book.remark` 可编辑，我们没有备注存储。
+ * - `kindLabels` / `groupNames`（分类与分组标签行）：我们没有类型/分组系统，
+ *   同一位置换成下载进度小牌。
+ * - 顶栏的「编辑 / 分享」：书籍信息就是书源返回的那份，改动无处落盘；也没有分享通道。
+ * - 简介的展开收起：legado 藏在书名长按菜单里，手表上没有长按提示，另给一枚文字按钮。
+ * - 下拉刷新目录：手表没有下拉手势，只留 ⋮ 里的「刷新目录」。
  */
 
 /**
@@ -33,6 +43,14 @@ internal object DetailUi {
     /** 简介是否展开。 */
     var introExpanded = false
 
+    /**
+     * 目录取失败过没有。照 legado `BookInfoUiState.tocLoadFailed`。
+     *
+     * legado 拿它在统计行尾巴上补一句 `error_load_toc`。我们没有 ViewModel，
+     * 状态放在这里，`showDetail` 每轮读一次；换书时复位，同一本书刷新失败后重画仍在。
+     */
+    var tocFailed = false
+
     /** 这两位状态属于哪本书。 */
     var bookId = ""
 
@@ -43,6 +61,7 @@ internal object DetailUi {
         if (bookId != id) {
             bookId = id
             introExpanded = false
+            tocFailed = false
         }
     }
 }
@@ -88,10 +107,18 @@ internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
     meta.addView(nameView)
     meta.addView(Md3.ellipsize(Md3.text(this, "作者：${info.author.ifBlank { "未知" }}",
         Md3.FS_SM, Md3.onSurfaceVariant)))
-    // legado 的书源行是 `labelMedium` + primary 色，不是次级灰 —— 它是这一屏唯一
-    // 能点开换源的入口，配色上要看得出来。我们没有单独的换源页签，点击交给动作卡。
+    // legado 的书源行是 `labelMedium` + primary 色，不是次级灰 —— 它可点，
+    // 点了进书源编辑（`onOriginClick` → `OpenBookSourceEdit`）。
+    // 我们对应的是书源管理屏；没有对应物时就不加点击，不留死链接。
     srcName(src).takeIf { it.isNotBlank() }?.let { n ->
-        meta.addView(Md3.ellipsize(Md3.text(this, "书源：$n", Md3.FS_SM, Md3.primary)))
+        val origin = Md3.ellipsize(Md3.text(this, "书源：$n", Md3.FS_SM, Md3.primary))
+        if (src is LegadoSource) {
+            origin.background = Md3.ripple(this, android.graphics.Color.TRANSPARENT, 0f)
+            origin.isClickable = true
+            origin.contentDescription = "书源：$n，点按管理书源"
+            origin.setOnClickListener { rememberReturn(); showSources() }
+        }
+        meta.addView(origin)
     }
     head.addView(meta, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
     col.addView(head, LinearLayout.LayoutParams(
@@ -178,11 +205,16 @@ internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
         })
         statRow.addView(Md3.text(this, stat[2], Md3.FS_SM, Md3.outline))
         box.addView(statRow)
+        // 目录取失败过：legado 在同一行尾巴补 `error_load_toc`；189 dp 一行装不下，另起一行。
+        if (DetailUi.tocFailed) {
+            box.addView(Md3.text(this, detailTocFailText(), Md3.FS_SM, Md3.error))
+        }
         col.addView(box)
     } else {
         // legado 目录没回来时第一行写 `loading`「加载中…」；我们停在「还没取」，
-        // 所以明说要按哪张卡，而不是让人等一个不会来的结果。
-        col.addView(Md3.text(this, "目录还没取，点「查看目录」开始", Md3.FS_SM, Md3.onSurfaceVariant)
+        // 所以明说要按哪张卡，而不是让人等一个不会来的结果。取失败过就说是失败。
+        col.addView(Md3.text(this, detailEmptyTocHint(DetailUi.tocFailed),
+            Md3.FS_SM, if (DetailUi.tocFailed) Md3.error else Md3.onSurfaceVariant)
             .apply { setPadding(0, 0, 0, Md3.dp(this@showDetail, Md3.GAP)) })
     }
 
@@ -239,7 +271,9 @@ internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
     root.addView(body, Md3.lpWeight(1f))
 
     // ── 底部「阅读」：照 legado 的 FAB，点一下直接读上次那章 ──
-    val go = Widgets.button(this, if (info.chapters.isEmpty()) "取目录并阅读" else "阅读", "filled") {
+    // 还没有目录时不写「取目录并阅读」：这条路径只到目录屏，读到第一章要等用户挑章，
+    // 写「并阅读」是承诺了没做的事。
+    val go = Widgets.button(this, if (info.chapters.isEmpty()) "取目录" else "阅读", "filled") {
         if (info.chapters.isEmpty()) detailOpenToc(info, src)
         else preview(info, if (readAt < info.chapters.size) readAt else 0)
     }
@@ -318,16 +352,23 @@ private fun MainActivity.refreshToc(info: BookInfo, src: BookSource?) {
     bg(owner, { useSrc.toc(info.bookId, info.name, info.author) }) { res ->
         res.onSuccess { got ->
             if (got.chapters.isEmpty()) {
+                DetailUi.tocFailed = true
                 toast("目录是空的，这条源可能失效了")
+                showDetail(info, src)
                 return@onSuccess
             }
+            DetailUi.tocFailed = false
             toast("目录已更新：${got.chapters.size} 章")
             showDetail(info.copy(
                 chapters = got.chapters,
                 truncated = got.truncated,
                 intro = got.intro.ifBlank { info.intro },
             ), useSrc)
-        }.onFailure { toast("目录失败：${it.message}") }
+        }.onFailure {
+            DetailUi.tocFailed = true
+            toast("目录失败：${it.message}")
+            showDetail(info, src)
+        }
     }
 }
 
