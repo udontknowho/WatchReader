@@ -45,6 +45,11 @@ internal object Icons {
             "c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z",
         "download" to "M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z",
         "list" to "M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z",
+        // 文件管理页的行首图标，照 legado `ItemFileBinding` 的 folder / file 两枚。
+        "folder" to "M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8" +
+            "c0-1.1-.9-2-2-2h-8l-2-2z",
+        "file" to "M6 2c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6H6z" +
+            "m7 7V3.5L18.5 9H13z",
         "grid" to "M3 3v8h8V3H3zm6 6H5V5h4v4zm-6 4v8h8v-8H3zm6 6H5v-4h4v4zm4-16v8h8V3h-8zm6 6h-4V5h4v4z" +
             "m-6 4v8h8v-8h-8zm6 6h-4v-4h4v4z",
         "plus" to "M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z",

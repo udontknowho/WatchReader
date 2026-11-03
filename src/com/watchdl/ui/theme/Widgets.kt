@@ -188,10 +188,13 @@ object Widgets {
         title: CharSequence,
         subtitle: CharSequence? = null,
         glyph: String? = null,
+        trailing: CharSequence? = null,
+        onTrailingClick: (() -> Unit)? = null,
         onClick: (() -> Unit)? = null,
     ): LinearLayout = listItem(
         ctx = ctx, title = title, subtitle = subtitle, twoLine = subtitle != null,
         leading = glyph?.let { Icons.view(ctx, it, Md3.onSurfaceVariant, Md3.ICON_LEAD) },
+        trailing = trailing, onTrailingClick = onTrailingClick,
         onClick = onClick,
     ).apply {
         background = Md3.ripple(ctx, Color.TRANSPARENT, Md3.R_ITEM.toFloat())
