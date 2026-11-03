@@ -365,6 +365,9 @@ internal fun MainActivity.showReader(
     val bar = Widgets.topBar(this, info.name, onBack = { showToc(info) }, subtitle = subLine)
     bar.setBackgroundColor(readerBackground)
     if (light) Widgets.tintSubtree(bar, readerInk)
+    // 顶栏副行的 TextView（widgets.topBar 在有 subtitle 时是「返回 / 两行栈 / 动作」三层）。
+    // 拖全书进度滑条时把它临时改成「第 n/N 章 · 章名」，松手再恢复。
+    val subTv = ((bar.getChildAt(1) as? LinearLayout)?.getChildAt(1) as? TextView)
     // 书签徽标：对应 legado 的 BookmarkBadgeDelegate。本章有书签时图标转主色。
     // 点一下就地加/移除，不重建页面 —— 重建会把滚动位置打回章首。
     // 「书签徽标」关掉时顶栏右侧空着，只留返回。
@@ -434,53 +437,80 @@ internal fun MainActivity.showReader(
             ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, 30)))
     }
 
-    // 底部：进度 + 上/下一章。两边的点击目标都要够大，手机上单手也能摸到。
+    // 底部进度行：‹ 上一章 / 全书进度滑条 / 下一章 ›
+    // （legado `ReadBookMenuBarBottom.kt:161-207`，进度行 36 dp）。
+    // 滑条跨全书：max = 章数 × 100，每章占 100 格，章内百分比落在余数里。
     // 底栏必须背实底色 + 一根分隔线：否则正文从按钮下面露出来，看着像排版坏了。
     val foot = Md3.row(this)
     foot.gravity = Gravity.CENTER_VERTICAL
-    foot.setPadding(Md3.dp(this, 12), 0, Md3.dp(this, 12), 0)
+    foot.setPadding(Md3.dp(this, 8), 0, Md3.dp(this, 8), 0)
     foot.setBackgroundColor(readerBackground)
 
-    val prev = Md3.text(this, "‹ 上一章", Md3.FS_MD, readerAccent, bold = true).apply {
-        gravity = Gravity.CENTER
+    /** 上一章 / 下一章：28 dp 宽，回退图标旋转 180° 就是前进，不再造第二枚路径。 */
+    fun chapterArrow(desc: String, flip: Boolean, act: () -> Unit): View {
+        val v = Icons.view(this, "back", readerAccent, 16)
+        v.minimumWidth = Md3.dp(this, 28)
+        v.minimumHeight = Md3.dp(this, 28)
+        v.contentDescription = desc
+        v.isClickable = true
+        if (flip) v.rotation = 180f
+        v.background = Md3.ripple(this, Color.TRANSPARENT, Md3.dp(this, 14).toFloat())
+        v.setOnClickListener { act() }
+        return v
     }
-    prev.isClickable = true
-    // 进度行只有 36 dp（legado 同高），子项热区不再撑到 HIT，否则把行顶高。
-    prev.minHeight = Md3.dp(this, 36)
-    prev.setPadding(Md3.dp(this, 4), 0, Md3.dp(this, 4), 0)
-    // 与「下一节」对称：本章还有没读完的节时，回头必须先回上一节。
-    prev.setOnClickListener {
-        prevChapter(info, index)
-    }
+    val total = info.chapters.size.coerceAtLeast(1)
+
+    val prev = chapterArrow("上一章", false) { prevChapter(info, index) }
     // 第一章时置灰并真的禁用：以前只调 alpha，点了还能按，弹一句「已是第一章」。
     if (index <= 0) { prev.alpha = 0.35f; prev.isClickable = false }
-    foot.addView(prev)
+    foot.addView(prev, LinearLayout.LayoutParams(Md3.dp(this, 28), Md3.dp(this, 28)))
 
-    val m = Md3.text(this, "${index + 1} / ${info.chapters.size}", Md3.FS_SM, readerMuted).apply {
-        gravity = Gravity.CENTER_VERTICAL or Gravity.CENTER_HORIZONTAL
-        // 宽度不够时会折行，把底栏撑成两行（与左右按钮不共基线）。
-        setSingleLine(true)
-        minHeight = Md3.dp(this@showReader, 36)
+    /** 章内百分比：正文滚到哪算哪，0 是章首、100 是章末。 */
+    fun innerPct(): Int {
+        val limit = scrollLimit(body)
+        if (limit <= 0) return 0
+        return (body.scrollY * 100 / limit).coerceIn(0, 100)
     }
-    foot.addView(m, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+    val atStart = index * 100 + innerPct()
+    val seek = android.widget.SeekBar(this)
+    seek.max = 100 * total
+    seek.progress = atStart.coerceIn(0, 100 * total)
+    // SeekBar 自带 48 dp 最小高，不归零会把 36 dp 的进度行顶高。
+    seek.minimumHeight = 0
+    // 拖动中正文滚动不去改滑块位置，否则正文一动就把用户手上的滑块抢回去。
+    var draggingSeek = false
+    seek.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+        // 页码不占行高：拖动时写进顶栏副行，松手恢复「章名 · 书源名」。
+        override fun onProgressChanged(sb: android.widget.SeekBar?, p: Int, fromUser: Boolean) {
+            if (!fromUser) return
+            val at = (p / 100).coerceIn(0, total - 1)
+            subTv?.text = "第 ${at + 1}/$total 章 · ${info.chapters[at].title}"
+        }
+        override fun onStartTrackingTouch(sb: android.widget.SeekBar?) { draggingSeek = true }
+        // 松手才跳章：拖的过程中每动一格就取一次正文，等于把整本书拉一遍。
+        override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {
+            draggingSeek = false
+            subTv?.text = subLine
+            var target = ((sb?.progress ?: atStart) / 100).coerceIn(0, total - 1)
+            if (info.chapters.getOrNull(target)?.locked == true) {
+                // 付费章取不到正文：前后各找一章免费的，找不到就退回原处。
+                val free = (target + 1 until total).firstOrNull { !info.chapters[it].locked }
+                    ?: (target - 1 downTo 0).firstOrNull { !info.chapters[it].locked }
+                if (free == null) {
+                    toast("该章为付费章")
+                    seek.progress = index * 100 + innerPct()
+                    return
+                }
+                target = free
+            }
+            if (target != index) preview(info, target) else seek.progress = index * 100 + innerPct()
+        }
+    })
+    foot.addView(seek, LinearLayout.LayoutParams(0, Md3.dp(this, 32), 1f))
 
-    val next = Md3.text(this, "下一章 ›", Md3.FS_MD, readerAccent, bold = true).apply {
-        gravity = Gravity.CENTER
-    }
-    next.isClickable = true
-    next.minHeight = Md3.dp(this, 36)
-    next.setPadding(Md3.dp(this, 4), 0, Md3.dp(this, 4), 0)
-    // 本章还有未读的节时，这一下必须先翻节 —— 否则读者点「下一章」，
-    // 本章后半截就再也不会被看到。
-    next.setOnClickListener {
-        nextChapter(info, index)
-    }
-    if (index >= info.chapters.size - 1) {
-        next.alpha = 0.35f
-        next.isClickable = false
-    }
-    foot.addView(next)
-    // 高度按 legado 的进度行：36 dp，不再用 HIT。
+    val next = chapterArrow("下一章", true) { nextChapter(info, index) }
+    if (index >= total - 1) { next.alpha = 0.35f; next.isClickable = false }
+    foot.addView(next, LinearLayout.LayoutParams(Md3.dp(this, 28), Md3.dp(this, 28)))
     foot.layoutParams = Md3.lpDp(this, null, 36)
 
     // 亮度行：照 legado `ReadBookMenuBarBottom.kt:138-158` 的「跟随系统按钮 + 亮度滑条」。
@@ -570,6 +600,12 @@ internal fun MainActivity.showReader(
     readerIndex = index
     body.setOnScrollChangeListener { _, _, y, _, _ ->
         readerOffset = y
+        // 进度滑条跟着正文走（不触发跳章：回调里只认 fromUser）。
+        if (!draggingSeek) {
+            val limit = scrollLimit(body)
+            val pct = if (limit > 0) (y * 100 / limit).coerceIn(0, 100) else 0
+            seek.progress = index * 100 + pct
+        }
         scrollSave?.let { body.removeCallbacks(it) }
         val task = Runnable { saveOffset(info.bookId, index, y) }
         scrollSave = task
