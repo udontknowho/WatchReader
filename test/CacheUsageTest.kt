@@ -73,9 +73,12 @@ import com.watchdl.core.searchHistoryAdd
 import com.watchdl.core.searchHistoryFormat
 import com.watchdl.core.searchHistoryKey
 import com.watchdl.core.searchHistoryParse
+import com.watchdl.core.searchHistoryRemove
 import com.watchdl.core.searchPartialHint
 import com.watchdl.core.searchPreciseHits
 import com.watchdl.core.searchPreciseKeep
+import com.watchdl.core.searchRankTier
+import com.watchdl.core.searchRanked
 import com.watchdl.core.searchSourceBadge
 import com.watchdl.core.searchSummaryText
 import com.watchdl.core.shelfBadgeText
@@ -406,6 +409,25 @@ fun main() {
     check("三者都空得空串", searchHitLine("", "", "") == "")
     check("模板没展开的源名不上屏", searchHitLine("甲", "", "@{site}") == "甲")
     check("源数只有一本不出牌", searchSourceBadge(1) == null && searchSourceBadge(3) == "3")
+    // 排序照 legado `sortedWithSearchPriority`：档位 + 档内源数降序。
+    val hitD = BookHit("4", "斗破苍穹后传", "天蚕土豆", "简介")
+    val hitE = BookHit("5", "苍穹榜", "斗破苍穹", "简介")
+    check("档位：书名就是关键词", searchRankTier(hitA, "斗破苍穹") == 0)
+    check("档位：作者就是关键词也进第一档", searchRankTier(hitE, "斗破苍穹") == 0)
+    check("档位：包含关键词进第二档", searchRankTier(hitA, "斗破") == 1 &&
+        searchRankTier(hitC, "douluo") == 1)
+    check("档位：不沾关键词垫底", searchRankTier(hitA, "诡秘") == 2)
+    check("排序：等值档在前，源数少也压得住包含档",
+        searchRanked(listOf(hitA, hitD), "斗破苍穹") { 1 }.map { it.bookId } == listOf("1", "4"))
+    check("排序：同档内源数多的在前",
+        searchRanked(listOf(hitD, hitA), "斗破") { if (it.bookId == "4") 3 else 1 }
+            .map { it.bookId } == listOf("4", "1"))
+    check("排序：同档同源数按书名定序，不随到达顺序飘",
+        searchRanked(listOf(hitD, hitA), "斗破") { 1 }.map { it.bookId } ==
+            searchRanked(listOf(hitA, hitD), "斗破") { 1 }.map { it.bookId })
+    check("排序：空关键词按书名定序",
+        searchRanked(listOf(hitB, hitA), "") { 1 }.map { it.bookId } == listOf("1", "2"))
+    check("删词按去重键比大小写", searchHistoryRemove(listOf("Abc", "乙"), "  aBC ") == listOf("乙"))
     val hisDir = File(root, "search")
     check("历史没文件时为空", SearchHistoryStore.load(hisDir).isEmpty())
     check("落盘再读回一致", run {
@@ -418,6 +440,11 @@ fun main() {
     check("重复搜同一词不涨条数", SearchHistoryStore.add(hisDir, "丙").size == 3)
     check("清空后读回为空",
         SearchHistoryStore.clear(hisDir).isEmpty() && SearchHistoryStore.load(hisDir).isEmpty())
+    check("单删一条并落盘", run {
+        SearchHistoryStore.save(hisDir, listOf("甲", "乙"))
+        SearchHistoryStore.remove(hisDir, "甲") == listOf("乙") &&
+            SearchHistoryStore.load(hisDir) == listOf("乙")
+    })
 
     // ── 阅读页排版、亮度与章内查找（ReaderStyle） ─────────
     check("亮度三档取值", ReaderStyle.brightValue(0) == 0.35f &&

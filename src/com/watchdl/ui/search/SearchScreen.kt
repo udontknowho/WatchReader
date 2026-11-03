@@ -13,11 +13,12 @@ import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
 
 /**
- * 搜索：关键词输入、多源聚合结果、换源翻页。
+ * 搜索：关键词输入、多源聚合结果、来源筛选、换源翻页。
  *
  * 照本地参考仓 `~/ref/legado-novel` 的 `ui/book/search/SearchScreen.kt` 对齐：
- * 顶栏 ⋮ 菜单（精准搜索 / 搜索历史 / 重搜）、结果统计牌、三层列表项、
- * 长按看详情、搜索中的停止出口。窗口状态（HITS_WINDOW / hitsWinStart / seenHits）留在 Activity。
+ * 顶栏 ⋮ 菜单（来源筛选 / 精准搜索 / 搜索历史 / 重搜）、搜索条 + 统计行、
+ * 结果行右侧源数牌、长按看详情、搜索中的停止出口、按匹配档与源数排序。
+ * 窗口状态（HITS_WINDOW / hitsWinStart / seenHits）留在 Activity。
  */
 
 /** 搜索屏的界面状态。放文件级是因为它要跨屏活：重放结果屏时统计数字不能丢。 */
@@ -34,6 +35,15 @@ object SearchUi {
 
     /** 最近 10 条关键词，最新在前。进屏现读一次，改完立刻回写。 */
     var history: List<String> = emptyList()
+
+    /**
+     * 来源筛选：空串 = 看全部。
+     *
+     * legado 的结果屏有「按源分节」布局（`SearchSourceSection`），189 dp 宽的屏上
+     * 一列卡片组根本放不下，这里压成「只看某一个源」的单选。
+     * 不落盘：换关键词就清，属于当轮浏览状态。
+     */
+    var sourceFilter: String = ""
 }
 
 /** 搜索历史目录：`filesDir/search`。真写文件时才建，没搜过就不留空目录。 */
@@ -69,6 +79,8 @@ internal fun MainActivity.showHits(keyword: String, allHits: List<BookHit>, stat
     // 新的一次搜索要把窗口拍回开头：不重置就会停在上次翻到的位置，
     // 用户看到的是「新搜索结果从第 61 条开始」。
     if (!replay) hitsWinStart = 0
+    // 换关键词就丢掉上一轮的来源筛选，否则新结果可能被筛成空屏。
+    if (!replay) SearchUi.sourceFilter = ""
     if (stat != null) {
         SearchUi.responded = stat.responded
         SearchUi.total = stat.total
@@ -77,8 +89,8 @@ internal fun MainActivity.showHits(keyword: String, allHits: List<BookHit>, stat
     // 每来一次就写一遍盘，既白写也会把同一词反复顶到最前。
     if (!replay) SearchUi.history = SearchHistoryStore.add(searchHistoryDir(), keyword)
     //
-    // 两层排序：先按匹配度分档，档内**同名书必须相邻** —— 列表里同一本书
-    // 现在按源各占一行，分散在各处就失去了「挑个能用的源」的意义。
+    // 排序：档位（等值 > 包含 > 其它）+ 档内源数降序，见 [searchRanked]。
+    // 合并同名书放在排序之后，保证留下的是「源数最多」的那一条。
     // 重放是「回到已经看过的那一屏」，条目必然都在 seenHits 里；
     // 再过滤一次会把整屏清空，用户看到的是「没有找到」。
     val all = allHits.asSequence()
@@ -87,15 +99,19 @@ internal fun MainActivity.showHits(keyword: String, allHits: List<BookHit>, stat
         // 精准搜索：关掉时这一句是恒等变换。开启后命中里都含关键词，
         // 分档自然落到 0–2 档，所以排序规则不必另写一套。
         .filter { !SearchUi.exact || searchPreciseKeep(it, keyword) }
-        .sortedWith(compareBy<BookHit> { MatchScore.of(it.name, keyword) }.thenBy { it.name.trim() })
         .toList()
     // 记下来，换一批时不再重复显示。
     if (!replay) all.forEach { seenHits += hitKey(it) }
-    // 同一本书多个源只出一张卡：屏上只看得见 3.5 行，四张重复卡会把别的结果挤掉。
-    // 点卡片仍是按书名重新搜索，所以合并不会丢掉「换个源」的能力。
-    val hits = all.distinctBy { "${it.name.trim()}\u0001${it.author.trim()}" }
     // 同名书共几源：必须在合并前统计，合并后每个名字只剩一条。
-    val sourceCount = all.groupingBy { "${it.name.trim()}\u0001${it.author.trim()}" }.eachCount()
+    val sourceCount = all.groupingBy { hitKey(it) }.eachCount()
+    // 来源筛选要排在合并之前：同名书在别的源的命中本来就会被合并掉。
+    val visible = if (SearchUi.sourceFilter.isEmpty()) all
+                  else all.filter { it.sourceName.trim() == SearchUi.sourceFilter }
+    // 排序照 legado `sortedWithSearchPriority`：档位（等值 > 包含 > 其它），
+    // 档内源数多的靠前 —— 多源都收了的书更可信。合并放在排序之后，
+    // 留下的才是「源数最多」的那一条。
+    val hits = searchRanked(visible, keyword) { sourceCount[hitKey(it)] ?: 1 }
+        .distinctBy { hitKey(it) }
     setScreen(Screen.Hits(keyword, hits, offset, stat?.total ?: 0, all))
     root.removeAllViews()
     // legado 顶栏三个动作（设置 / 精准搜索 / 筛选范围）。手表只挂一个 ⋮，
@@ -103,28 +119,24 @@ internal fun MainActivity.showHits(keyword: String, allHits: List<BookHit>, stat
     root.addView(Widgets.topBar(this, "搜索结果", subtitle = keyword,
         onBack = { goBackToPrevious() },
         trailing = listOf("more" to {
-            searchMenu(keyword) { showHits(keyword, allHits, stat, offset, batch, replay = true) }
+            searchMenu(keyword, allHits) {
+                // 改完筛选/精准档要重新排序，窗口也得从第一条起。
+                hitsWinStart = 0
+                showHits(keyword, allHits, stat, offset, batch, replay = true)
+            }
         })))
 
     val body = Widgets.scrollBody(this, crownStep, crownGlide)
     val col = Widgets.contentColumn(body)
 
-    // 统计牌（legado 的 `SearchResultCountCard` + `SourceProgressCard`）：
-    // 第一行「结果 N · 进度 done/total」，有源没回话时补第二行。
-    // 原来的「找到 N 本」只有条数，用户看不出「结果少」是源少还是源挂了。
-    val summary = Md3.column(this).apply {
-        background = Md3.bg(Md3.surface3, Md3.R_ITEM.toFloat())
-        setPadding(Md3.dp(this@showHits, Md3.PAD * 0.6), Md3.dp(this@showHits, 6),
-                   Md3.dp(this@showHits, Md3.PAD * 0.6), Md3.dp(this@showHits, 6))
-    }
-    summary.addView(Md3.ellipsize(Md3.text(this,
-        searchSummaryText(hits.size, SearchUi.responded, SearchUi.total),
-        Md3.FS_SM, Md3.onSurface)))
-    searchPartialHint(SearchUi.responded, SearchUi.total)?.let { hint ->
-        summary.addView(Md3.ellipsize(Md3.text(this, hint, Md3.FS_SM, Md3.onSurfaceVariant))
-            .apply { alpha = 0.8f })
-    }
-    col.addView(summary, LinearLayout.LayoutParams(
+    // 搜索条 + 统计牌合成一条（见 [searchBand]）：关键词一行、统计一行。
+    col.addView(searchBand(
+        keyword = keyword,
+        summary = searchSummaryText(hits.size, SearchUi.responded, SearchUi.total),
+        // 点条身改词，右侧 × 清空后回到搜索历史（我们的「建议面板」等价物）。
+        onEdit = { askKeyword(initial = keyword) },
+        onClear = { openHistory(keyword) },
+    ), LinearLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
     ).apply { bottomMargin = Md3.dp(this@showHits, Md3.GAP / 2) })
 
@@ -144,6 +156,9 @@ internal fun MainActivity.showHits(keyword: String, allHits: List<BookHit>, stat
         // N6：15 个源全挂（断网、DNS 挂了）时，说「换个关键词」是错的建议 ——
         // 用户会去改关键词，而问题在网络。responded 为 0 说明一条源都没回话。
         val msg = when {
+            // 筛选成空最容易误会成「这本书没有」：先说是看的哪个源。
+            SearchUi.sourceFilter.isNotEmpty() ->
+                "「$keyword」在这个来源没有命中\n点 ⋮ 换成全部来源"
             SearchUi.responded == 0 && SearchUi.total > 0 ->
                 "所有源都没有响应\n检查网络后再试"
             SearchUi.responded < SearchUi.total ->
@@ -160,6 +175,15 @@ internal fun MainActivity.showHits(keyword: String, allHits: List<BookHit>, stat
         for (h in hits.subList(winStart, winEnd)) {
             // 同一本书多个源时在书名右侧挂一枚数字小牌，否则用户以为是两本不同的书。
             col.addView(searchHitItem(h, sourceCount[hitKey(h)] ?: 1) { openHit(h) })
+        }
+        // 部分源没回话：legado 把这句放在列表尾部（`search_partial_footer`），
+        // 不占首屏。以前它压在统计牌第二行，一屏 248 dp 里白吃一行列表。
+        searchPartialHint(SearchUi.responded, SearchUi.total)?.let { hint ->
+            col.addView(Md3.ellipsize(Md3.text(this, hint, Md3.FS_SM, Md3.onSurfaceVariant))
+                .apply {
+                    alpha = 0.8f
+                    setPadding(0, Md3.dp(this@showHits, 8), 0, 0)
+                })
         }
         // 翻页条：只在结果超过一窗时才出，否则会让小屏多占两行。
         if (hits.size > HITS_WINDOW) {
@@ -186,6 +210,45 @@ internal fun MainActivity.showHits(keyword: String, allHits: List<BookHit>, stat
         }
         root.addView(next)
     }
+}
+
+/**
+ * 顶部搜索条：关键词一行，统计一行，右侧 × 清空。
+ *
+ * legado 的 `SearchScreen` 把常驻 `SearchBar` 放在顶栏下面，另有独立的浮动统计牌
+ * （`SearchFloatingSummary`）。两块加起来近 90 dp，248 dp 高的屏上列表只剩一行，
+ * 所以并成一条：点条身改关键词，点 × 回到搜索历史。
+ */
+private fun MainActivity.searchBand(
+    keyword: String,
+    summary: CharSequence,
+    onEdit: () -> Unit,
+    onClear: () -> Unit,
+): LinearLayout {
+    val band = Md3.row(this)
+    band.background = Md3.ripple(this, Md3.surface3, Md3.R_ITEM.toFloat())
+    band.setPadding(Md3.dp(this, Md3.PAD * 0.6), Md3.dp(this, 4),
+                    Md3.dp(this, 2), Md3.dp(this, 4))
+    band.isClickable = true
+    band.setOnClickListener { onEdit() }
+    band.contentDescription = "当前关键词 $keyword，点按改词"
+
+    val col = Md3.column(this)
+    col.addView(Md3.ellipsize(Md3.text(this, keyword, Md3.FS_MD, Md3.onSurface)))
+    col.addView(Md3.ellipsize(Md3.text(this, summary, Md3.FS_SM, Md3.onSurfaceVariant))
+        .apply { alpha = 0.8f })
+    band.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+    // × 只有 32 dp 宽：搜索条本身才 40 多 dp 高，再给 48 dp 触控槽就把关键词挤没了。
+    // 纵向 36 dp 仍高于条高，手指能点到。
+    val clear = Icons.view(this, "close", Md3.onSurfaceVariant, 18).apply {
+        background = Md3.ripple(this@searchBand, android.graphics.Color.TRANSPARENT, Md3.TAP / 2f)
+        isClickable = true
+        contentDescription = "清除关键词，从搜索历史另选"
+        setOnClickListener { onClear() }
+    }
+    band.addView(clear, LinearLayout.LayoutParams(Md3.dp(this, 32), Md3.dp(this, 36)))
+    return band
 }
 
 /**
@@ -258,10 +321,23 @@ private fun MainActivity.searchHitItem(h: BookHit, sourceCount: Int, onClick: ()
 /**
  * 顶栏 ⋮ 菜单。搜索结果屏与搜索中屏共用。
  *
+ * 对应 legado 顶栏的三个动作（设置 / 精准搜索 / 筛选范围）：
+ * 189 dp 宽的栏放三个图标，标题就只剩四个字，所以全部压进这个整屏菜单。
+ *
+ * [hits] 是这一轮的全部命中（合并前），用来列「来源」筛选的条数；
  * [redraw] 在改完状态后重画这一屏：结果屏是重放，搜索中屏什么都不做。
  */
-private fun MainActivity.searchMenu(keyword: String, redraw: () -> Unit) {
+private fun MainActivity.searchMenu(
+    keyword: String,
+    hits: List<BookHit> = emptyList(),
+    redraw: () -> Unit,
+) {
     val items = mutableListOf<Pair<CharSequence, () -> Unit>>()
+    // 搜中屏没结果可筛，就不出这一项（否则点进去是个空菜单）。
+    if (hits.isNotEmpty()) {
+        val scope = SearchUi.sourceFilter.ifEmpty { "全部来源" }
+        items += "来源：$scope" to { openSourceFilter(hits) { redraw() } }
+    }
     items += "精准搜索：${if (SearchUi.exact) "开" else "关"}" to {
         SearchUi.exact = !SearchUi.exact
         toast(if (SearchUi.exact) "只留书名或作者命中" else "恢复按匹配度排序")
@@ -269,12 +345,37 @@ private fun MainActivity.searchMenu(keyword: String, redraw: () -> Unit) {
     }
     items += "搜索历史" to { openHistory(keyword) }
     items += "重新搜索当前词" to { doSearch(keyword) }
-    // 不做「来源分组布局」「内容质量检测」「类型筛选」：189dp 宽上三项都要
-    // 额外一层导航或一列筛选条，落地就是把结果列表挤成半屏。见提交说明。
+    // 不做「内容质量检测」「类型筛选（有声/小说）」：两者都要再拉一遍正文或
+    // 新增类型字段，189 dp 上还各要一层筛选条。见提交说明。
     Widgets.longMenuDialog(this, "搜索", items).show()
 }
 
-/** 最近 8 条关键词，点一条就重搜；末项清空历史要二次确认。 */
+/**
+ * 来源筛选：legado 的「按源分节」布局在手表上压成单选。
+ *
+ * legado 的节头写「源名 + 命中数」（`SearchSourceSection`），这里直接把
+ * 命中数写进选项里，选中后只看这一条源的命中。
+ */
+private fun MainActivity.openSourceFilter(hits: List<BookHit>, apply: () -> Unit) {
+    val counts = hits.groupingBy { it.sourceName.trim().ifEmpty { "未标注来源" } }
+        .eachCount()
+    val items = mutableListOf<Pair<CharSequence, () -> Unit>>()
+    items += "全部来源（${hits.size} 条）" to {
+        SearchUi.sourceFilter = ""
+        apply()
+    }
+    for ((name, n) in counts.entries.sortedWith(
+        compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key })) {
+        items += "$name（$n 条）" to {
+            SearchUi.sourceFilter = name
+            toast("只看「$name」")
+            apply()
+        }
+    }
+    Widgets.longMenuDialog(this, "按来源看", items).show()
+}
+
+/** 最近 8 条关键词，点一条就重搜；末项可单删或清空（都要能反悔）。 */
 private fun MainActivity.openHistory(currentKeyword: String) {
     val words = SearchUi.history.take(SEARCH_HISTORY_SHOWN)
     val items = mutableListOf<Pair<CharSequence, () -> Unit>>()
@@ -284,9 +385,23 @@ private fun MainActivity.openHistory(currentKeyword: String) {
         // 屏上只剩标题和关闭键，看着像坏了。
         items += "还没有搜索记录" to { toast("搜过的词会出现在这里") }
     } else {
+        // legado 的历史行右侧有 × 单删。整屏菜单的行没有尾部按钮位，
+        // 拆成二级菜单：再列一遍，点谁删谁。
+        items += "删除记录…" to { openHistoryDelete() }
         items += "清空历史" to { confirmClearHistory() }
     }
     Widgets.longMenuDialog(this, "搜索历史", items).show()
+}
+
+/** 单删一条历史。删完回不到这一屏（菜单已关），再点一次就再删一条。 */
+private fun MainActivity.openHistoryDelete() {
+    val words = SearchUi.history.take(SEARCH_HISTORY_MAX)
+    val items = mutableListOf<Pair<CharSequence, () -> Unit>>()
+    for (w in words) items += "删除「$w」" to {
+        SearchUi.history = SearchHistoryStore.remove(searchHistoryDir(), w)
+        toast("已删除「$w」")
+    }
+    Widgets.longMenuDialog(this, "删除记录", items).show()
 }
 
 /** 清空历史：legado 也是二次确认，误点一次就没了太亏。 */
@@ -322,9 +437,9 @@ private fun MainActivity.openDetailOnly(h: BookHit) {
     showDetail(BookInfo(h.bookId, h.name, h.author, emptyList(), intro = h.abstractText), src)
 }
 
-/** 用手表上的输入对话框要关键词。 */
-internal fun MainActivity.askKeyword() {
-    askText("搜索小说", "书名或作者", "请先输入书名") { doSearch(it) }
+/** 用手表上的输入对话框要关键词。[initial] 是带进来的旧词，结果屏改词时用。 */
+internal fun MainActivity.askKeyword(initial: String = "") {
+    askText("搜索小说", "书名或作者", "请先输入书名", initial = initial) { doSearch(it) }
 }
 
 /** 目录过滤：按章名找。空关键词等于清空过滤。 */
@@ -345,6 +460,8 @@ internal fun MainActivity.askText(
     title: String,
     hintText: String,
     emptyHint: String?,
+    /** 预填内容，光标落在末尾。改词时用户多半只改一两个字。 */
+    initial: String = "",
     onOk: (String) -> Unit,
 ) {
     // 空关键词要留在窗里（P1-1）。md3Dialog 的确认键是「先关窗再回调」，
@@ -357,6 +474,10 @@ internal fun MainActivity.askText(
         val field = EditText(this).apply {
             hint = hintText
             setSingleLine()
+            if (initial.isNotEmpty()) {
+                setText(initial)
+                setSelection(initial.length)
+            }
             setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, Md3.FS_MD)
             setHintTextColor(Md3.onSurfaceVariant)
             setTextColor(Md3.onSurface)

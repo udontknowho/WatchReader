@@ -76,6 +76,51 @@ fun searchPreciseKeep(hit: BookHit, keyword: String): Boolean {
 fun searchPreciseHits(hits: List<BookHit>, keyword: String): List<BookHit> =
     hits.filter { searchPreciseKeep(it, keyword) }
 
+/**
+ * 结果排序档：0 等值、1 包含、2 其它。
+ *
+ * 照 legado `SearchResultOrdering.sortedWithSearchPriority`：
+ * `name` 或 `author` 等于关键词进 0 档，包含关键词进 1 档，剩下的垫底。
+ * legado 中间还有一档「类型/标签含关键词」，我们的 [BookHit] 没有 kind 字段，
+ * 那一档不存在 —— 少一档只影响「类型命中」的书，其余相对顺序与 legado 一致。
+ */
+fun searchRankTier(hit: BookHit, keyword: String): Int {
+    val k = keyword.trim()
+    if (k.isEmpty()) return 0
+    val author = hit.author.trim()
+    // 先看作者等值：MatchScore 只认书名，作者命中会被压到最后一档。
+    if (author.isNotEmpty() && author.equals(k, ignoreCase = true)) return 0
+    // MatchScore 分大小写，英文书名各源写法不一（Douluo Dalu / douluo），
+    // 先两边都转小写再比 —— legado 那边也是 `ignoreCase = true`。
+    return when (MatchScore.of(hit.name.trim().lowercase(), k.lowercase())) {
+        0 -> 0                    // 书名就是关键词
+        1, 2 -> 1                 // 前缀 / 包含
+        else -> if (author.contains(k, ignoreCase = true)) 1 else 2
+    }
+}
+
+/**
+ * 按 legado 的显示顺序排：档位升序，档内**源数降序**（多源都有的书更可信）。
+ *
+ * 末尾用书名兜底，与 legado 的「稳定排序 = 先到先得」有意不同：
+ * 边跑边上屏时每个源回来的顺序不一样，不留兜底键的话列表会在几秒里反复重排。
+ */
+fun searchRanked(
+    hits: List<BookHit>,
+    keyword: String,
+    sourceCount: (BookHit) -> Int,
+): List<BookHit> = hits.sortedWith(
+    compareBy<BookHit> { searchRankTier(it, keyword) }
+        .thenByDescending { sourceCount(it) }
+        .thenBy { it.name.trim() },
+)
+
+/** 删掉一条词，返回新列表。键按 [searchHistoryKey] 比，大小写与空白不同也算同一条。 */
+fun searchHistoryRemove(existing: List<String>, word: String): List<String> {
+    val k = searchHistoryKey(word)
+    return existing.filter { searchHistoryKey(it) != k }
+}
+
 /** 统计牌第一行。`total` 为 0（重放时没记过）只留条数，别写「进度 0/0」。 */
 fun searchSummaryText(count: Int, responded: Int, total: Int): String =
     if (total <= 0) "结果 $count" else "结果 $count · 进度 $responded/$total"
@@ -140,6 +185,13 @@ object SearchHistoryStore {
     /** 记一条并落盘，返回更新后的列表。 */
     fun add(dir: File?, keyword: String, limit: Int = SEARCH_HISTORY_MAX): List<String> {
         val next = searchHistoryAdd(load(dir, limit), keyword, limit)
+        save(dir, next)
+        return next
+    }
+
+    /** 删一条并落盘。legado 的历史行右侧有 ×，我们走二级菜单（[searchHistoryRemove]）。 */
+    fun remove(dir: File?, word: String, limit: Int = SEARCH_HISTORY_MAX): List<String> {
+        val next = searchHistoryRemove(load(dir, limit), word)
         save(dir, next)
         return next
     }
