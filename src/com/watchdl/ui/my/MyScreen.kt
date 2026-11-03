@@ -23,6 +23,10 @@ import com.watchdl.ui.theme.Widgets
  *
  * 已经能跳的 4 项接上了，其余 8 项照 legado 的排位保留，点了说一句还没做。
  * shortcut: 8 项是占位行，等 P4/P5 落地再逐项接上。
+ *
+ * 2026-11-04 用户判词：「规则那里只留书源管理和替换净化」。TXT 目录规则、
+ * 字典规则、标签规则三行移除 —— 它们各自依附一套本应用没有的体系
+ * （本地 TXT 导入 / 正文选中查词 / 书籍标签），留着只是三条点了就说「用不上」的行。
  */
 internal fun MainActivity.showMy() {
     setScreen(Screen.My)
@@ -33,7 +37,7 @@ internal fun MainActivity.showMy() {
     val body = Widgets.scrollBody(this, crownStep, crownGlide)
     val col = Widgets.contentColumn(body)
 
-    // 图标集里没有的（替换净化/字典规则/标签规则等）先不给图标，
+    // 图标集里没有的（如替换净化）先不给图标，
     // 有对应图标的（书源 cloud、设置 settings、书签 bookmark、记录 history、
     // 缓存 download、关于 more）照 legado 的 Material 图标补上。
     col.addView(Widgets.groupCard(this, "规则") { g ->
@@ -55,18 +59,9 @@ internal fun MainActivity.showMy() {
         }
         // 替换净化（#28）：正文的广告尾巴/求票行靠它对掉，可逐条关。
         e("替换净化", "refresh") { showReplace() }
-        // 剩下三项在 legado 里各自依附一套本应用没有的体系：TXT 目录规则需要本地 TXT 导入、
-        // 字典规则需要选中正文词语、标签规则需要书籍标签。留排位但写明原因 ——
-        // 点了只弹「还没做」会让用户以为在排队实现。
-        e("TXT 目录规则", "list", "需本地 TXT 导入") {
-            toast("本应用没有本地 TXT 导入，这一项用不上")
-        }
-        e("字典规则", "shelf", "需选中正文词语") {
-            toast("手表上没有文字选中，字典查不了词")
-        }
-        e("标签规则", "bookmark", "需书籍标签体系") {
-            toast("本应用没有书籍标签，规则无处可挂")
-        }
+        // 规则只留这两项（用户判词 2026-11-04）。TXT 目录规则 / 字典规则 /
+        // 标签规则已移除：本应用没有本地 TXT 导入、没有正文选中查词、没有书籍标签，
+        // 三项都无处可挂。legado 里它们是规则体系的分支，我们没有那套体系。
     })
 
     col.addView(Widgets.groupCard(this, "其它") { g ->
