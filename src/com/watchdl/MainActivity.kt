@@ -21,6 +21,7 @@ import com.watchdl.ui.my.showExportList
 import com.watchdl.ui.my.showFiles
 import com.watchdl.ui.my.showLogs
 import com.watchdl.ui.my.showReplace
+import com.watchdl.ui.my.showSettings
 import com.watchdl.ui.reader.*
 import com.watchdl.ui.search.*
 import com.watchdl.ui.shelf.*
@@ -420,7 +421,7 @@ class MainActivity : Activity() {
             .putFloat("size", size).putFloat("spacing", spacing).putInt("bg", bg).apply()
     }
 
-    private fun saveCrownPrefs() {
+    internal fun saveCrownPrefs() {
         getSharedPreferences("reader", MODE_PRIVATE).edit()
             .putFloat("crownStep", crownStep).putInt("crownGlide", crownGlide).apply()
     }
@@ -1181,254 +1182,9 @@ class MainActivity : Activity() {
         dialog.show()
     }
 
-    /** 设置子页代号。字符串进 [Screen.Settings]，进程重建后能回到同一子页。 */
-    internal val PAGE_MAIN = "main"
-    internal val PAGE_THEME = "theme"
-    internal val PAGE_READ = "read"
-    internal val PAGE_CROWN = "crown"
-    internal val PAGE_OTHER = "other"
-
-    /**
-     * 设置页（从单页拆成首屏导航 + 子页，照 legado `ui/config/ConfigNavScreen`）。
-     *
-     * 原来 7 组挤在一页，189 × 248 dp 上要滚三屏，找一项得靠记忆滑。
-     * legado 的首屏是一张导航列表，具体项进子页。
-     * 阅读设置**改完立即落盘**（不用点「确定」），预览实时跟着变。
-     *
-     * [page] 取 [PAGE_MAIN] / [PAGE_THEME] / [PAGE_READ] / [PAGE_CROWN] / [PAGE_OTHER]。
-     */
-    internal fun showSettings(page: String = PAGE_MAIN) {
-        setScreen(Screen.Settings(page))
-        root.removeAllViews()
-        val title = when (page) {
-            PAGE_THEME -> "主题设置"
-            PAGE_READ -> "阅读设置"
-            PAGE_CROWN -> "表冠"
-            PAGE_OTHER -> "其他设置"
-            else -> "设置"
-        }
-        root.addView(Widgets.topBar(this, title, onBack = { goBackToPrevious() }))
-
-        val body = Widgets.scrollBody(this, crownStep, crownGlide)
-        val col = Widgets.contentColumn(body)
-        when (page) {
-            PAGE_THEME -> settingsTheme(col)
-            PAGE_READ -> settingsRead(col)
-            PAGE_CROWN -> settingsCrown(col)
-            PAGE_OTHER -> settingsOther(col)
-            else -> settingsMain(col)
-        }
-        root.addView(body)
-    }
-
-    /** 设置首屏：四个入口，一项一行。子页里返回回到这里（[rememberReturn] 记着）。 */
-    private fun settingsMain(col: LinearLayout) {
-        col.addView(Widgets.groupCard(this, null) { g ->
-            fun e(title: String, sub: String, page: String) {
-                g.addView(Widgets.groupItem(ctx = this, title = title, subtitle = sub) {
-                    rememberReturn()
-                    showSettings(page)
-                })
-            }
-            e("主题设置", "六套配色", PAGE_THEME)
-            e("阅读设置", "字号 · 行距 · 背景", PAGE_READ)
-            e("表冠", "每格位移 · 跟手时长", PAGE_CROWN)
-            e("其他设置", "导出 · 书源 · 版本 · 开发者", PAGE_OTHER)
-        })
-    }
-
-    private fun settingsTheme(col: LinearLayout) {
-        themeChips(col)
-    }
-
-    /** 阅读显示：预览 + 三行档位 + 两个滑杆。档位和滑杆改的是同一组值。 */
-    private fun settingsRead(col: LinearLayout) {
-        // 预览块：字号、行距、背景一起看，比三个独立选项直观。
-        val preview = Md3.text(this, "示例正文，看看效果。\n第二行。", Md3.FS_READ, Md3.onSurface).apply {
-            setPadding(Md3.dp(this@MainActivity, 10), Md3.dp(this@MainActivity, 8),
-                       Md3.dp(this@MainActivity, 10), Md3.dp(this@MainActivity, 8))
-        }
-        col.addView(preview, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { bottomMargin = Md3.dp(this@MainActivity, Md3.GAP) })
-
-        fun paintPreview() {
-            preview.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, readerSize)
-            preview.setLineSpacing(Md3.dp(this, 1).toFloat(), readerSpacing)
-            preview.setTextColor(if (Color.red(readerBackground) > 100) Color.rgb(28, 27, 31) else Md3.onSurface)
-            preview.background = Md3.bg(readerBackground, Md3.dp(this, 10).toFloat())
-        }
-
-        /** 一行「标签 + 多段」。选中后立即存盘并重画预览。 */
-        fun segmentRow(label: String, options: List<Pair<String, Any>>, get: () -> Any, set: (Any) -> Unit) {
-            val row = Md3.row(this).apply { setPadding(0, 0, 0, Md3.dp(this@MainActivity, 4)) }
-            row.addView(Md3.text(this, label, Md3.FS_SM, Md3.onSurfaceVariant),
-                LinearLayout.LayoutParams(Md3.dp(this, 34), ViewGroup.LayoutParams.WRAP_CONTENT))
-            val chips = mutableListOf<Pair<TextView, Any>>()
-            options.forEachIndexed { i, opt ->
-                val chip = Md3.text(this, opt.first, Md3.FS_SM, Md3.onSurfaceVariant).apply {
-                    gravity = Gravity.CENTER
-                    isClickable = true
-                    setOnClickListener {
-                        set(opt.second)
-                        saveReaderPrefs(readerSize, readerSpacing, readerBackground)
-                        // 只重画选中态与预览，不重建整页（重建会丢滚动位置）。
-                        chips.forEach { (v, val2) ->
-                            val sel = val2 == get()
-                            v.setTypeface(null, if (sel) android.graphics.Typeface.BOLD
-                                                    else android.graphics.Typeface.NORMAL)
-                            v.setTextColor(if (sel) Md3.onPrimary else Md3.onSurfaceVariant)
-                            v.background = Md3.ripple(this@MainActivity,
-                                if (sel) Md3.primary else Color.TRANSPARENT,
-                                Md3.dp(this@MainActivity, 13).toFloat(),
-                                if (sel) null else Md3.outlineVariant)
-                        }
-                        paintPreview()
-                    }
-                }
-                chips.add(chip to opt.second)
-                row.addView(chip, LinearLayout.LayoutParams(0, Md3.dp(this, 30), 1f).apply {
-                    leftMargin = if (i == 0) 0 else Md3.dp(this@MainActivity, 4)
-                })
-            }
-            // 初始选中态直接按当前值涂色，省一次额外刷。
-            chips.forEach { (v, val2) ->
-                val sel = val2 == get()
-                v.setTypeface(null, if (sel) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
-                v.setTextColor(if (sel) Md3.onPrimary else Md3.onSurfaceVariant)
-                v.background = Md3.ripple(this@MainActivity,
-                    if (sel) Md3.primary else Color.TRANSPARENT,
-                    Md3.dp(this@MainActivity, 13).toFloat(),
-                    if (sel) null else Md3.outlineVariant)
-            }
-            col.addView(row)
-        }
-
-        segmentRow("字号", listOf("小" to (Md3.FS_MD as Any), "中" to (Md3.FS_READ as Any), "大" to (Md3.FS_XL as Any)),
-            { readerSize as Any }) { readerSize = it as Float }
-        segmentRow("行距", listOf("紧" to (1.35f as Any), "标准" to (1.75f as Any), "松" to (1.9f as Any)),
-            { readerSpacing as Any }) { readerSpacing = it as Float }
-        val bgs = listOf(
-            "深" to Color.rgb(20, 18, 24),
-            "浅" to Color.WHITE,
-            "暖" to Color.rgb(255, 248, 230),
-        )
-        segmentRow("背景", bgs.map { it.first to (it.second as Any) },
-            { readerBackground as Any }) { readerBackground = it as Int }
-
-        // 字号/行距改为滑杆：三档粒度太粗，字号差一档就过大。
-        // 滑杆下面的档位行保留作为快捷选择，两者同步。
-        col.addView(Widgets.sliderRow(this, "字号", 11f, 26f, readerSize, 0,
-            { "%.1f sp".format(it) }) { v ->
-            readerSize = v
-            saveReaderPrefs(readerSize, readerSpacing, readerBackground)
-            paintPreview()
-        }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = Md3.dp(this@MainActivity, Md3.GAP) })
-
-        col.addView(Widgets.sliderRow(this, "行距", 1.1f, 2.4f, readerSpacing, 0,
-            { "%.2f 倍".format(it) }) { v ->
-            readerSpacing = v
-            saveReaderPrefs(readerSize, readerSpacing, readerBackground)
-            paintPreview()
-        }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = Md3.dp(this@MainActivity, Md3.GAP) })
-
-        paintPreview()
-    }
-
-    /** 表冠灵敏度：刚改完平滑滚动后这两个常数直接决定手感，不同人差异很大。 */
-    private fun settingsCrown(col: LinearLayout) {
-        col.addView(Widgets.sliderRow(this, "每格位移", 20f, 200f, crownStep, 0,
-            { "%d px".format(it.toInt()) }) { v ->
-            crownStep = v
-            saveCrownPrefs()
-        }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = Md3.dp(this@MainActivity, Md3.GAP) })
-
-        col.addView(Widgets.sliderRow(this, "跟手时长", 0f, 200f, crownGlide.toFloat(), 0,
-            { if (it < 1f) "立即" else "%d ms".format(it.toInt()) }) { v ->
-            crownGlide = v.toInt()
-            saveCrownPrefs()
-        }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = Md3.dp(this@MainActivity, Md3.GAP) })
-
-        // body 早在进页时就建好了，改参数后要下次进页面才生效。
-        col.addView(Md3.text(this, "表冠参数在下次进入页面时生效", Md3.FS_SM, Md3.onSurfaceVariant).apply {
-            setPadding(0, Md3.dp(this@MainActivity, 4), 0, 0)
-        })
-    }
-
-    /** 其他设置：导出说明、书源管理、版本、开发者。 */
-    private fun settingsOther(col: LinearLayout) {
-        col.addView(Widgets.sectionLabel(this, "导出"))
-        val dirHint = Md3.text(this, "文件名：书名 - 作者.txt（重名自动加 (2)）\n编码：UTF-8 带 BOM",
-            Md3.FS_SM, Md3.onSurfaceVariant).apply {
-            setPadding(0, Md3.dp(this@MainActivity, 4), 0, Md3.dp(this@MainActivity, Md3.GAP))
-        }
-        col.addView(dirHint)
-
-        col.addView(Widgets.sectionLabel(this, "书源"))
-        col.addView(Widgets.listItem(this, "管理书源", "启用/禁用与导入", twoLine = true) {
-            rememberReturn(); showSources()
-        })
-
-        col.addView(Widgets.sectionLabel(this, "关于"))
-        col.addView(Widgets.listItem(this, "版本", appVersion(), twoLine = false, highlight = false) { })
-
-        // 开发者模式：默认关闭，关着时只有普通 logcat，不占内存不写盘。
-        col.addView(Widgets.sectionLabel(this, "开发者"))
-        val devRow = Widgets.listItem(this, "开发者模式", devLogHint(), twoLine = true,
-            trailing = if (devLogOn()) "开" else "关") { toggleDevLog() }
-        col.addView(devRow)
-        if (devLogOn()) {
-            col.addView(Widgets.listItem(this, "导出日志", "写入文件后系统分享", twoLine = true) { exportDevLog() })
-            col.addView(Widgets.listItem(this, "清空日志", null, twoLine = false) {
-                DevLog.clear(); toast("日志已清空")
-            })
-        }
-    }
-
-    /**
-     * 主题选择：六套两行三列。
-     *
-     * 用芯片而不是一行下拉：换主题后颜色立刻变，得看得见才选得动。
-     * 选中态沿用全局段式风格（浅色填充 + 深字）。
-     */
-    private fun themeChips(col: LinearLayout) {
-        Palette.all.chunked(3).forEach { group ->
-            val row = Md3.row(this)
-            group.forEachIndexed { i, p ->
-                val on = p.id == Md3.palette.id
-                val chip = Md3.text(this, p.name, Md3.FS_SM,
-                    if (on) Md3.onPrimary else Md3.onSurfaceVariant, bold = on).apply {
-                    gravity = Gravity.CENTER
-                    isClickable = true
-                    background = Md3.ripple(this@MainActivity,
-                        if (on) Md3.primary else Color.TRANSPARENT,
-                        Md3.dp(this@MainActivity, 13).toFloat(),
-                        if (on) null else Md3.outlineVariant)
-                    setOnClickListener { pickTheme(p.id) }
-                    contentDescription = "主题 ${p.name}" + if (on) "，当前" else ""
-                }
-                row.addView(chip, LinearLayout.LayoutParams(0, Md3.dp(this, 30), 1f).apply {
-                    leftMargin = if (i == 0) 0 else Md3.dp(this@MainActivity, 4)
-                })
-            }
-            col.addView(row, Md3.lp().apply { bottomMargin = Md3.dp(this@MainActivity, 2) })
-        }
-        // 下一节标题紧跟其后，给一点呼吸。
-        col.addView(Md3.text(this, "", Md3.FS_SM, Md3.onSurfaceVariant),
-            Md3.lpDp(this, null, 2))
-    }
-
     internal fun devLogOn() = getSharedPreferences("reader", MODE_PRIVATE).getBoolean("devlog", false)
 
-    private fun devLogHint(): String {
+    internal fun devLogHint(): String {
         val f = File(filesDir, "dev.log")
         val kb = if (f.exists()) (f.length() / 1024).coerceAtLeast(0) else 0
         return if (devLogOn()) "已开启 · 落盘 ${kb} KB · 只记本 App" else "关闭：仅打 logcat，不存不写盘"
@@ -1525,7 +1281,7 @@ class MainActivity : Activity() {
     }
 
     /** 版本号从 PackageManager 读，避免在代码里再写一份与 build.sh 不同步的常量。 */
-    private fun appVersion(): String = runCatching {
+    internal fun appVersion(): String = runCatching {
         packageManager.getPackageInfo(packageName, 0).versionName ?: ""
     }.getOrDefault("")
 

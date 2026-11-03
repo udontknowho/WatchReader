@@ -81,7 +81,7 @@ internal object ReaderMenu {
 private const val FIND_MAX = 20
 
 /** 从 SharedPreferences("reader") 读扩展设置。重复调用无副作用。 */
-private fun MainActivity.loadReaderExtras() {
+internal fun MainActivity.loadReaderExtras() {
     val p = getSharedPreferences("reader", android.content.Context.MODE_PRIVATE)
     ReaderUi.brightTier = ReaderStyle.brightTier(p.getFloat("bright", ReaderStyle.BRIGHT_MID))
     ReaderUi.eyeCare = p.getBoolean("eye", false)
@@ -90,7 +90,7 @@ private fun MainActivity.loadReaderExtras() {
 }
 
 /** 扩展设置落盘，与字号/行距/背景同一处，键名各占一个。 */
-private fun MainActivity.saveReaderExtras() {
+internal fun MainActivity.saveReaderExtras() {
     getSharedPreferences("reader", android.content.Context.MODE_PRIVATE).edit()
         .putFloat("bright", ReaderStyle.brightValue(ReaderUi.brightTier))
         .putBoolean("eye", ReaderUi.eyeCare)
