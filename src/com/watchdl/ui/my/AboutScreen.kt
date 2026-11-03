@@ -15,11 +15,17 @@ import com.watchdl.ui.theme.Widgets
  * 头部块（应用名 / 版本 / 一句说明）→ 列表组 → 点开是文本的条目。
  * 原来这里只有一句 toast（版本号 + 一句标语），看完就散，什么也留不下。
  *
- * legado 关于页上有五项手表上不适用，这里逐项交代去处，不留点了没反应的行：
- * - 检查更新 / 项目主页 / GitHub / 贡献者：本机没有浏览器，也没有对外发布渠道
- *   （APK 由 build.sh 手搓，装机靠 adb），四项都没有可跳的目标。
- * - 隐私政策：本应用不联网收数据，也没有法务主体，写了只是编一段免责套话。
- * 留下的是有实物可看的四项：许可证、免责声明、崩溃日志、保存日志。
+ * 条目照 `AboutCatalog` 的三段走，顺序与标题都对齐中文串：
+ * 用户隐私与协议 / 开源许可 / 免责声明，然后是崩溃日志 / 保存日志。
+ * 行上写「开源许可」、点开的标题才是「许可证」—— legado 也是两个 key
+ * （`license` 与 `about_license_title`），不是同一句话印两遍。
+ *
+ * legado 关于页上有四项手表上不适用，这里逐项交代去处，不留点了没反应的行：
+ * - 检查更新 / 项目主页 / GitHub：本机没有浏览器，也没有对外发布渠道
+ *   （APK 由 build.sh 手搓，装机靠 adb），三项都没有可跳的目标。
+ * - 开发人员：单人项目，没有名单可列，行尾的 GitHub 也点不开。
+ * - 创建堆转储：`Debug.dumpHwHeap` 只对 debuggable 包有效，.hprof 动辄几十 MB，
+ *   手表存储放不下也导不出来。
  */
 internal fun MainActivity.showAbout() {
     setScreen(Screen.About)
@@ -30,9 +36,14 @@ internal fun MainActivity.showAbout() {
     val col = Widgets.contentColumn(body)
     col.addView(aboutHeader())
 
-    // 组「项目」：legado 的 documents 组（隐私政策 / 许可证 / 免责声明）里删掉隐私政策。
-    col.addView(Widgets.groupCard(this, "项目") { g ->
-        g.addView(Widgets.groupItem(ctx = this, title = "许可证",
+    // 组「文档」：legado `AboutCatalog.documents`（用户隐私与协议 / 开源许可 / 免责声明）。
+    // 组标题是我们加的：legado 在手机上整串列表不带标题（`SplicedColumnGroup(title = "")`），
+    // 但 189×248 的屏上一屏只放得下三行，没有组名就分不清「文档」与「诊断」。
+    col.addView(Widgets.groupCard(this, "文档") { g ->
+        g.addView(Widgets.groupItem(ctx = this, title = "用户隐私与协议",
+            subtitle = "数据只在本机，不上传", glyph = "check",
+            onClick = { showPrivacy() }))
+        g.addView(Widgets.groupItem(ctx = this, title = "开源许可",
             subtitle = "Apache 2.0 · 脚本引擎 MPL 2.0", glyph = "list",
             onClick = { showLicense() }))
         g.addView(Widgets.groupItem(ctx = this, title = "免责声明",
@@ -40,18 +51,18 @@ internal fun MainActivity.showAbout() {
             onClick = { showDisclaimer() }))
     })
 
-    // 组「日志」：对应 legado 的 diagnostics 组。
+    // 组「诊断」：legado `AboutCatalog.diagnostics`（崩溃日志 / 保存日志 / 创建堆转储）。
     // 「崩溃日志」链到日志页而不是在本页再摊一份尾巴：日志页已有开关、体积、
     // 最后 40 行与空态，本页再读一次文件是第二份实现，两处必然走样。
-    // legado 的「生成堆转储」不做：Debug.dumpHwHeap 只对 debuggable 包有效，
-    // 而且 .hprof 动辄几十 MB，手表存储放不下也导不出来。
-    col.addView(Widgets.groupCard(this, "日志") { g ->
+    // legado 那边是 `CrashLogSheet`（文件列表 + 顶栏清除）→ 点开 `LogDetailSheet`；
+    // 我们只有一个 dev.log，一次点击换不来什么，直接进日志页。
+    col.addView(Widgets.groupCard(this, "诊断") { g ->
         g.addView(Widgets.groupItem(ctx = this, title = "崩溃日志",
-            subtitle = "看 dev.log 的开头与尾部", glyph = "history",
+            subtitle = "开关、体积与最后 40 行", glyph = "history",
             onClick = { showLogs() }))
         g.addView(Widgets.groupItem(ctx = this, title = "保存日志",
             subtitle = "写文件并存到文档", glyph = "save",
-            onClick = { exportDevLog() }))
+            onClick = { saveLog() }))
     })
 
     root.addView(body, Md3.lpWeight(1f))
@@ -100,6 +111,38 @@ private fun MainActivity.aboutHeader(): LinearLayout {
         ).apply { topMargin = Md3.dp(this@aboutHeader, Md3.GAP / 2) })
 
     return box
+}
+
+/**
+ * 保存日志。
+ *
+ * legado `AboutViewModel.saveLog` 先看「记录日志」开关：没开就提示
+ * `about_log_recording_disabled`（未开启日志记录，请去其他设置里打开记录日志），
+ * 再照旧拷文件。手表上「导出一个几乎空的文件」同样说不清，所以这里照它的提示走，
+ * 但提示完就停 —— 省掉一次白写盘与一次「已存到文档」的假成功。
+ */
+private fun MainActivity.saveLog() {
+    if (!devLogOn()) {
+        toast("未开启日志记录，先到日志页打开「记录日志」")
+        return
+    }
+    exportDevLog()
+}
+
+/**
+ * 用户隐私与协议。legado 读 assets 里的 `PRIVACY_POLICY.md`（Markdown sheet），
+ * 我们没有那份材料，就把实际成立的三条写死在对话框里：
+ * 数据落在哪、什么时候联网、卸载会发生什么。清单里除 INTERNET 与
+ * 网络状态、通知、前台服务、唤醒锁、导出用的存储权限之外没有别的权限。
+ */
+private fun MainActivity.showPrivacy() {
+    Widgets.md3Dialog(this,
+        title = "隐私政策",
+        body = "书源、书单、正文缓存与阅读进度只写在应用私有目录，不上传，也不做统计上报。\n" +
+            "只有取书源数据时会访问你配置的站点；日志只写本机的 dev.log。\n" +
+            "卸载会连同私有目录一起删掉，要留档先导出。",
+        dismiss = "关闭",
+    ).show()
 }
 
 /**

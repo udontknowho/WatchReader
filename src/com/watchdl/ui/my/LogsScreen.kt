@@ -1,5 +1,7 @@
 package com.watchdl.ui.my
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.widget.LinearLayout
 import com.watchdl.MainActivity
 import com.watchdl.core.DevLog
@@ -28,12 +30,22 @@ private const val LOG_NAME = "dev.log"
 /** 一次读取的结果。[bytes] 取文件实际长度（不是已显示部分），[lines] 是全文行数。 */
 private class LogTail(val bytes: Long, val lines: Int, val tail: List<String>)
 
+/**
+ * 屏上那一次读到的尾巴。
+ *
+ * ⋮ 里的「复制」直接用它，不再读一次盘：日志文件上限 2 MB，
+ * 为一次点击在主线程重读一遍就是掉帧。它只活在本次绘制之后，
+ * 换屏也不清 —— 反正每次进日志页都会重写一次。
+ */
+private var lastTail: LogTail? = null
+
 internal fun MainActivity.showLogs() {
     setScreen(Screen.Logs)
     root.removeAllViews()
-    // 导出与清空收进 ⋮：两者都是次要动作，平铺成两个整宽按钮会吃掉 ~80dp，
-    // 而这一页的全部价值是下面的日志尾巴。legado 里「清空」也在
-    // `CrashLogSheet` 的 endAction 位置上，不是列表里的一行按钮。
+    // 导出与清空收进 ⋮：都是次要动作，平铺成整宽按钮会吃掉 ~80dp，
+    // 而这一页的全部价值是下面的日志尾巴。legado 里「清除」在 `CrashLogSheet`
+    // 的 endAction（DeleteSweep 图标）上，「拷贝」在 `CrashReportScreen` 的按钮行里，
+    // 都不是列表项。手表上一行放不下两个图标按钮，三条合一进长菜单，与全站一致。
     root.addView(Widgets.topBar(
         ctx = this,
         title = "日志",
@@ -55,17 +67,42 @@ internal fun MainActivity.showLogs() {
 }
 
 /**
- * 顶栏 ⋮：导出日志 / 清空日志。
+ * 顶栏 ⋮：导出日志 / 复制日志 / 清除日志。
  *
- * legado 的两条对应物都在别处：导出在关于页的 `SaveLog`（点了直接导），
- * 清空在 `CrashLogSheet` 标题右侧的图标按钮。手表上顶栏放不下第二个动作，
- * 所以两条合一进长菜单，与全站其它页的 ⋮ 一致。
+ * 三条对应物在 legado 分散在三处：导出是关于页的 `SaveLog`，复制是
+ * `CrashReportScreen` 的 `copy_text`（拷贝内容），清除是 `CrashLogSheet`
+ * 顶栏的 DeleteSweep。手表上顶栏只放得下一个 ⋮，三条都收进长菜单。
  */
 private fun MainActivity.logMenu() {
     Widgets.longMenuDialog(this, "日志", listOf(
         "导出日志" to { exportDevLog() },
-        "清空日志" to { askClearLog() },
+        "复制日志" to { copyLogTail() },
+        "清除日志" to { askClearLog() },
     )).show()
+}
+
+/**
+ * 把屏上这段尾巴拷进剪贴板。
+ *
+ * 手表没有能看大段文字的编辑器，复制只在「传给手机 / 发给别人看」时有意义；
+ * 但报问题的时候，恰恰就需要把最后几十行原样贴出去 —— legado 的
+ * 崩溃报告页也是同一理由才摆了个复制按钮。
+ */
+private fun MainActivity.copyLogTail() {
+    val lines = lastTail?.tail.orEmpty()
+    if (lines.isEmpty()) {
+        toast("没有可复制的日志")
+        return
+    }
+    val cm = runCatching {
+        getSystemService(ClipboardManager::class.java)
+    }.getOrNull()
+    if (cm == null) {
+        toast("这块表不支持剪贴板")
+        return
+    }
+    cm.setPrimaryClip(ClipData.newPlainText(LOG_NAME, lines.joinToString("\n")))
+    toast("已复制最后 ${lines.size} 行")
 }
 
 /**
@@ -97,6 +134,8 @@ private fun MainActivity.readLogTail(): LogTail? {
 
 private fun MainActivity.renderLogs(col: LinearLayout, tail: LogTail?) {
     col.removeAllViews()
+    // ⋮ 里的「复制」读的是这一份，不再读盘。
+    lastTail = tail
     val on = devLogOn()
 
     // 开关是一行带 description 的设置行（legado `SwitchSettingItem`：
@@ -120,27 +159,56 @@ private fun MainActivity.renderLogs(col: LinearLayout, tail: LogTail?) {
     })
 
     if (tail == null) {
-        // 空态照 legado `EmptyMessage`：图标 + 一句话，且点明先看开关。
+        // 空态照 legado `EmptyMessage`：图标 + 一句「暂无日志」，
+        // 再跟一句指向开关的话 —— 这一页的空屏十有八九是开关没开。
         col.addView(Widgets.emptyState(this, "history",
-            "还没有日志文件。\n上方开关打开后产生的日志会显示在这里。"))
+            "暂无日志\n上方开关打开后产生的日志会显示在这里"))
         return
     }
 
     col.addView(Widgets.sectionLabel(this, "$LOG_NAME · ${humanBytes(tail.bytes)} · ${tail.lines} 行"))
     if (tail.tail.isEmpty()) {
         col.addView(Widgets.emptyState(this, "history",
-            "日志文件是空的。\n开关打开后产生的日志会显示在这里。"))
+            "暂无日志\ndev.log 是空的，开关打开后产生的日志会显示在这里"))
     } else {
         // legado 的日志先列文件名、点开才看正文（CrashLogSheet → LogDetailSheet）。
         // 我们只有一个 dev.log，正文直接摊在页里：手表上多一次点击换不来什么，
         // 而「点了没反应」正是要当场看见的那件事。
         col.addView(Widgets.sectionLabel(this, "最后 ${tail.tail.size} 行"))
-        for (line in tail.tail) {
-            // 一行一条 TextView：日志是逐行读的，拼成一大段会丢掉行首的换行。
-            // 单条最长可到几百字，189dp 宽放不下，截尾比横向滚动好用。
-            col.addView(Md3.ellipsize(Md3.text(this, line, Md3.FS_SM, Md3.onSurfaceVariant)))
-        }
+        col.addView(logBlock(tail.tail))
     }
+}
+
+/**
+ * 日志正文：等宽字体装在一枚圆角容器里。
+ *
+ * 形态照 legado `CrashReportScreen` 的正文区（`surfaceContainerLow` + 12dp 圆角 +
+ * `FontFamily.Monospace` + bodySmall）。等宽不是怀旧：时间戳与屏名对齐之后，
+ * 一眼能扫出「连续掉帧」还是「一条一条零散」，变宽字体下这个信息就没了。
+ *
+ * 整段一次画完，而不是一行一个 TextView：40 行就是 40 个 View，
+ * 而 TextView 自己就按 `\n` 断行，行首的换行一个也不会丢。
+ */
+private fun MainActivity.logBlock(lines: List<String>): LinearLayout {
+    val card = Md3.column(this)
+    card.background = Md3.bg(Md3.surface2, Md3.R_CARD.toFloat())
+    val pad = Md3.dp(this, Md3.PAD * 0.6)
+    card.setPadding(pad, pad, pad, pad)
+    card.addView(
+        // 单行最长可到几百字，189dp 宽放不下：整段自动换行比横向滚动好读，
+        // 真要看原文有 ⋮ 里的「复制日志」。
+        Md3.text(this, lines.joinToString("\n"), Md3.FS_SM, Md3.onSurfaceVariant, mono = true)
+            .apply { setLineSpacing(Md3.dp(this@logBlock, 2).toFloat(), 1f) },
+        LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ),
+    )
+    card.layoutParams = LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+    ).apply { bottomMargin = Md3.dp(this@logBlock, Md3.GAP) }
+    return card
 }
 
 /** 清空不可撤销，且会连带清掉内存环（崩溃前那点上下文就没了），所以要问一次。 */
