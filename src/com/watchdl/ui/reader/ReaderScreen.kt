@@ -114,6 +114,10 @@ private fun shownText(text: String): String =
 /** ⑥ 阅读器。 */
 internal fun MainActivity.showReader(info: BookInfo, index: Int, text: String, src: BookSource? = null) {
     setScreen(Screen.Reader(info, index, text, src))
+    // setScreen 只切状态、撤后台任务，**不碰视图树**。preview() 先铺了顶栏 +「正在取正文…」，
+    // 这里不清干净，正文那一帧会与加载页各占 root 的一半（两个 weight=1）：
+    // 上半屏卡着加载提示、下半屏才是正文，每次换章重画一次就是一闪一闪。
+    root.removeAllViews()
     saveProgress(info.bookId, index)
     // 浅色底时整套前景色都要换：正文、顶栏、底栏按钮、进度。
     // 以前只换了正文，白底上顶栏还是黑块，上下章还是浅紫，几乎看不见。
