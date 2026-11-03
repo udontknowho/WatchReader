@@ -187,7 +187,14 @@ private fun eyeActive(): Boolean = ReaderUi.eyeCare ||
 private fun shownText(text: String): String = ReaderStyle.indent(text, ReaderUi.indentLevel)
 
 /** ⑥ 阅读器。 */
-internal fun MainActivity.showReader(info: BookInfo, index: Int, text: String, src: BookSource? = null) {
+internal fun MainActivity.showReader(
+    info: BookInfo,
+    index: Int,
+    text: String,
+    src: BookSource? = null,
+    /** 直接把正文落在章末（从上一屏退上来的跨章）。 */
+    atEnd: Boolean = false,
+) {
     setScreen(Screen.Reader(info, index, text, src))
     // setScreen 只切状态、撤后台任务，**不碰视图树**。preview() 先铺了顶栏 +「正在取正文…」，
     // 这里不清干净，正文那一帧会与加载页各占 root 的一半（两个 weight=1）：
@@ -248,17 +255,65 @@ internal fun MainActivity.showReader(info: BookInfo, index: Int, text: String, s
     frame.addView(body, FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
-    // 点屏幕中列 = 菜单显隐（legado 的九宫格里中间格是菜单）。
-    // 左右两列沿用「上一章 / 下一章」：legado 那里是翻页，手表是滚动阅读，没有页可翻。
-    // 用 OnTouchListener 旁听而不消费事件，竖滑仍由 ScrollView 接管，滚动手感不变。
+    // ── 点击分区：上屏回滚一屏 / 中段出菜单 / 下屏前进一屏 ─────────────
+    // 分区边界照 legado 九宫格的**行**分界（33% / 66%，`feature/reader/core/gesture/
+    // ReaderTapAction.kt:44-48`）。手表屏只有 189 dp 宽，三列各 63 dp，窄于一个
+    // 触摸目标，而竖滑又归 ScrollView，横向分列只会误触 —— 所以这里只分纵轴三段。
+    //
+    // 动作语义照 legado 的滚动模式：九宫格的「下一页」在滚动模式下被改调
+    // tapScrollPage（`feature/reader/ReaderCanvasSurface.kt:718-729`），即平滑滚一屏，
+    // 滚到章末才换章；「上一页」同理，退到章首才回上一章。以前左右三列直接
+    // nextChapter / prevChapter，点一下就把整章读丢了，手感全错。
+    //
+    // 跳章没丢：底栏还有「上一章 / 下一章」。legado 也把跳章放底栏进度行
+    // （`ReadBookMenuBarBottom`），不放在点击区。
+    var pageAnim: android.animation.ValueAnimator? = null
+
+    /** 平滑滚一屏。步距按行算，到章末 / 章首才换章。 */
+    fun scrollPage(forward: Boolean) {
+        val limit = scrollLimit(body)
+        val from = body.scrollY
+        // 先判边界：滚不动了才换章，不在章末之前抢跑。
+        if (forward && from >= limit) { nextChapter(info, index); return }
+        if (!forward && from <= 0) { prevChapter(info, index, atEnd = true); return }
+        val vp = (body.height - body.paddingTop - body.paddingBottom).coerceAtLeast(1)
+        val layout = tv.layout
+        val target = if (layout == null) {
+            // 刚换章那一帧还没排版：退回整屏，至少这一下是动的。
+            (if (forward) from + vp else from - vp).coerceIn(0, limit)
+        } else {
+            // 正文行顶 = 正文控件在滚动内容里的顶边 + 自身 paddingTop，与章内查找同一套算法。
+            val textTop = childTopIn(body, tv) + tv.paddingTop
+            val perPage = (vp / tv.lineHeight.coerceAtLeast(1)).coerceAtLeast(2)
+            val first = layout.getLineForVertical((from - textTop).coerceAtLeast(0))
+            val line = ReaderStyle.pageFirstLine(first, perPage, layout.lineCount, forward)
+            (textTop + layout.getLineTop(line)).coerceIn(0, limit)
+        }
+        if (target == from) {
+            // 只剩不足一行可见：当作到边界。
+            if (forward) nextChapter(info, index) else prevChapter(info, index, atEnd = true)
+            return
+        }
+        // 匀速、时长按距离比例（legado 用 Animatable + LinearEasing，见
+        // `ReaderCanvasSurface.kt:689-692`）。不用 smoothScrollTo：减速曲线前快后慢，
+        // 一屏一屏读时看着像文字在滑走。
+        pageAnim?.cancel()
+        pageAnim = android.animation.ValueAnimator.ofInt(from, target).apply {
+            duration = ReaderStyle.pageDuration(target - from, vp)
+            interpolator = android.view.animation.LinearInterpolator()
+            addUpdateListener { a -> body.scrollTo(0, a.animatedValue as Int) }
+            start()
+        }
+    }
+
     val taps = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent): Boolean = true
         override fun onSingleTapUp(e: MotionEvent): Boolean {
-            val w = body.width
-            if (w > 0) {
+            val h = body.height
+            if (h > 0) {
                 when {
-                    e.x < w / 3f -> prevChapter(info, index)
-                    e.x > w * 2 / 3f -> nextChapter(info, index)
+                    e.y < h / 3f -> scrollPage(false)
+                    e.y > h * 2 / 3f -> scrollPage(true)
                     else -> setMenu(!ReaderMenu.open)
                 }
             }
@@ -270,7 +325,6 @@ internal fun MainActivity.showReader(info: BookInfo, index: Int, text: String, s
         // 返回 false：事件继续交给 ScrollView，滚动、表冠、长按都不受影响。
         false
     }
-
     // ── 菜单浮层 ──────────────────────────────────────
     // 关闭层全屏可点、不压暗：legado 的 ReaderMenuDismissLayer 就是一层透明可点区域。
     val menu = FrameLayout(this)
@@ -459,13 +513,12 @@ internal fun MainActivity.showReader(info: BookInfo, index: Int, text: String, s
     }
     // 恢复上次读到的地方。等布局完成再滚，否则拿不到 maxScroll。
     val restore = readOffset(info.bookId).takeIf { it > 0 }
-    if (restore != null) {
-        body.post {
-            val child = body.getChildAt(0)
-            val limit = ((child?.height ?: 0) - body.height +
-                body.paddingTop + body.paddingBottom).coerceAtLeast(0)
-            body.scrollTo(0, restore.coerceAtMost(limit))
-        }
+    if (atEnd) {
+        // 从上屏退上来的：落在上一章末屏，接着往上读。
+        // legado 的窗口一次带四页，退一屏跨章时看到的正是上一章的末页，不是章首。
+        body.post { body.fullScroll(View.FOCUS_DOWN) }
+    } else if (restore != null) {
+        body.post { body.scrollTo(0, restore.coerceAtMost(scrollLimit(body))) }
     }
 
     // 护眼：整屏暖色半透明层盖在正文上，不消费触摸，滚动照常。
@@ -484,11 +537,11 @@ internal fun MainActivity.showReader(info: BookInfo, index: Int, text: String, s
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     root.addView(frame, Md3.lpWeight(1f))
 
-    // 第一次进阅读页给一次提示：菜单默认收起，不说一句没人知道点中间。
+    // 第一次进阅读页给一次提示：菜单默认收起，分区不说一句没人猜得到。
     val hint = getSharedPreferences("reader", android.content.Context.MODE_PRIVATE)
-    if (!hint.getBoolean("hint_tap", false)) {
-        hint.edit().putBoolean("hint_tap", true).apply()
-        toast("点屏幕中间出菜单")
+    if (!hint.getBoolean("hint_tap2", false)) {
+        hint.edit().putBoolean("hint_tap2", true).apply()
+        toast("点下屏翻一屏、点中间出菜单")
     }
 }
 
@@ -644,6 +697,33 @@ private fun MainActivity.showFindResults(
 }
 
 /**
+ * 滚动内容里能滚多远。
+ *
+ * ScrollView 的滚动范围是「子控件高 + 上下内边距 − 视口高」（clipToPadding=false 时
+ * 内边距也算在内容里），不是简单的「子控件高 − 视口高」。
+ */
+private fun scrollLimit(body: ScrollView): Int {
+    val child = body.getChildAt(0) ?: return 0
+    return (child.height - body.height + body.paddingTop + body.paddingBottom).coerceAtLeast(0)
+}
+
+/**
+ * [v] 顶边在 [body] 滚动内容坐标系里的 y。
+ *
+ * ScrollView 把子控件排在 `paddingTop` 处，所以正文的行顶不能只拿 `tv.top`：
+ * 少算一层内边距，定位会偏上一小截（页边距档越大偏得越多）。
+ */
+private fun childTopIn(body: ScrollView, v: View): Int {
+    var y = 0
+    var cur: View = v
+    while (cur !== body) {
+        y += cur.top
+        cur = cur.parent as? View ?: return y
+    }
+    return y
+}
+
+/**
  * 把正文滚到命中处。
  *
  * 正文是自动折行的 TextView，没有“行号”：用 getLineForOffset(字符偏移) 取行顶，
@@ -661,24 +741,23 @@ private fun MainActivity.scrollToHit(hit: ReaderFind.Hit) {
         return
     }
     val line = layout.getLineForOffset(hit.start.coerceIn(0, layout.text.length))
-    val child = body.getChildAt(0)
-    val maxY = ((child?.height ?: 0) - body.height +
-        body.paddingTop + body.paddingBottom).coerceAtLeast(0)
-    body.smoothScrollTo(0, ReaderStyle.scrollTarget(tv.top, tv.paddingTop, layout.getLineTop(line), maxY))
+    val maxY = scrollLimit(body)
+    body.smoothScrollTo(0,
+        ReaderStyle.scrollTarget(childTopIn(body, tv), tv.paddingTop, layout.getLineTop(line), maxY))
 }
 
 /** 上一章。跳过连续的锁定章（付费章取不到正文）。 */
-private fun MainActivity.prevChapter(info: BookInfo, index: Int) {
+private fun MainActivity.prevChapter(info: BookInfo, index: Int, atEnd: Boolean = false) {
     val prev = index - 1
     if (prev < 0) { toast("已是第一章"); return }
     if (info.chapters[prev].locked) {
         val free = (prev downTo 0).firstOrNull { !info.chapters[it].locked }
         if (free == null) { toast("前面都是付费章"); return }
-        preview(info, free)
-    } else preview(info, prev)
+        preview(info, free, atEnd)
+    } else preview(info, prev, atEnd)
 }
-/** 从记录的位置续读：章号 + 章内节号。 */
-internal fun MainActivity.preview(info: BookInfo, index: Int) {
+/** 从记录的位置续读：章号 + 章内节号。[atEnd] 为真时直接落在章末。 */
+internal fun MainActivity.preview(info: BookInfo, index: Int, atEnd: Boolean = false) {
     val ch = info.chapters[index]
     // 先读本地正文，只有缺章时才在线程中初始化源并联网。
     val src = (curScreen as? Screen.Toc)?.src
@@ -706,7 +785,7 @@ internal fun MainActivity.preview(info: BookInfo, index: Int) {
             // 这个代价比「标题里的广告尾巴没去掉」大得多。所以在 preview 这一处做，
             // 不在目录、不在 showReader。
             val text = ReplaceRuleStore.apply(raw, isTitle = false)
-            postAlive(owner) { showReader(info, index, text, actualSrc) }
+            postAlive(owner) { showReader(info, index, text, actualSrc, atEnd) }
         } catch (e: Exception) {
             postAlive(owner) { toast("正文失败：${e.message}"); showToc(info, src) }
         }

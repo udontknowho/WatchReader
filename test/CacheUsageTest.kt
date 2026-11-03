@@ -447,6 +447,16 @@ fun main() {
     check("滚动定位夹在内容范围", ReaderStyle.scrollTarget(0, 0, 9999, 700) == 700 &&
         ReaderStyle.scrollTarget(0, 0, -50, 700) == 0)
     check("内容比屏短就滚到顶", ReaderStyle.scrollTarget(0, 0, 30, -20) == 0)
+    check("翻一屏保留一行重叠", ReaderStyle.pageFirstLine(0, 10, 100, true) == 9 &&
+        ReaderStyle.pageFirstLine(20, 10, 100, false) == 11)
+    check("回滚到章首停在第一行", ReaderStyle.pageFirstLine(3, 10, 100, false) == 0)
+    check("不足一屏时就到末尾行", ReaderStyle.pageFirstLine(0, 10, 5, true) == 4)
+    check("一屏只有一行也要走一行", ReaderStyle.pageFirstLine(0, 1, 100, true) == 1)
+    check("没有行就不动", ReaderStyle.pageFirstLine(0, 10, 0, true) == 0)
+    check("翻屏时长按距离比例", ReaderStyle.pageDuration(1000, 1000) == 360L &&
+        ReaderStyle.pageDuration(500, 1000) == 180L)
+    check("零距离与零视口都给 1 ms", ReaderStyle.pageDuration(0, 1000) == 1L &&
+        ReaderStyle.pageDuration(300, 0) == 1L)
     check("下一处首尾循环", ReaderStyle.step(2, 1, 3) == 0)
     check("上一处从末尾回绕", ReaderStyle.step(0, -1, 3) == 2)
     check("还没有位置时前后都对", ReaderStyle.step(-1, 1, 3) == 0 &&

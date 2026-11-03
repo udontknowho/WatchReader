@@ -118,6 +118,34 @@ object ReaderStyle {
     fun scrollTarget(textTop: Int, padTop: Int, lineTop: Int, maxScroll: Int): Int =
         (textTop + padTop + lineTop).coerceIn(0, maxScroll.coerceAtLeast(0))
 
+    // ── 点击翻屏：一屏步进 ─────────────────────────────────
+    /**
+     * 「下一屏」该把正文的第几行顶到屏首。
+     *
+     * legado 的滚动模式按行分页，步距取「下一屏首行的 top」，落在上一屏最后一行
+     * 的下一行（`feature/reader/core/transition/ReaderScrollState.kt:64-69`），
+     * 效果是新一屏从上一屏最后一行开始，保留一行重叠，读者不丢行。
+     * 直接「滚一屏高」不行：屏高通常不是行高的整数倍，会把一行切成两半顶在最上面。
+     */
+    fun pageFirstLine(first: Int, linesPerPage: Int, lineCount: Int, forward: Boolean): Int {
+        if (lineCount <= 0) return 0
+        val keep = (linesPerPage - 1).coerceAtLeast(1)
+        val raw = if (forward) first + keep else first - keep
+        return raw.coerceIn(0, lineCount - 1)
+    }
+
+    /**
+     * 一屏滚动要花多少毫秒。
+     *
+     * 照 legado 的「360 × 距离 / 视口」（`ReaderScrollState.kt:83-91`，基准常量
+     * `BASE_DURATION_MILLIS = 360`，见 `core/transition/ReaderPageTurnSpeed.kt:41`）。
+     * 下限 1 ms：距离为 0 时不能让动画库收到 0 时长。
+     */
+    fun pageDuration(distancePx: Int, viewportPx: Int): Long {
+        if (viewportPx <= 0) return 1L
+        return (360L * kotlin.math.abs(distancePx) / viewportPx).coerceIn(1L, 360L)
+    }
+
     /**
      * “上一处 / 下一处”的目标下标，首尾循环。
      *
