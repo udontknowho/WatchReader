@@ -81,6 +81,21 @@ internal object ReaderUi {
     var badgeOn = true
 
     /**
+     * 阅读锚点（legado 的「返回原阅读位置」）：(书号, 章号, 滚动偏移)。
+     *
+     * 从目录 / 进度滑条 / 章内查找跳到别的章之前记下，新章底就会出「返回刚才那章」。
+     * 不落盘：重启后旧位置已无意义，留着只会在下次开书时弹一个过期胶囊。
+     */
+    var anchor: Triple<String, Int, Int>? = null
+
+    /** 主题提醒（legado 的「切换到深色 / 浅色模式」胶囊）：刚换了深浅，新页提示一句。 */
+    var themeHint = false
+
+    /** 下一次重建时要钉住的滚动位置：键是「书号#章号」，-1 表示按记录位置恢复。 */
+    var restoreKey = ""
+    var restoreAt = -1
+
+    /**
      * 正在显示的正文与标题。
      *
      * 设置面板要“改一项、正文立刻变”，重建视图树会把滚动位置打回章首，
@@ -191,6 +206,19 @@ internal object ReaderAuto {
 
 /** 章内查找的结果条数上限。20 条刚好一屏滚两三下，再多就是噪音。 */
 private const val FIND_MAX = 20
+
+/** 深色底（legado 默认背景）。主题胶囊与阅读设置里的「深」共用同一个值。 */
+private val DARK_BG = Color.rgb(20, 18, 24)
+
+/**
+ * 记下「刚才读到哪」（legado 的阅读锚点）。
+ *
+ * 目录 / 进度滑条 / 章内查找都可能把人带到别的章，跳之前存一份
+ * (书号, 章号, 滚动偏移)，新章底就会出「返回刚才那章」。只放进程内，不落盘。
+ */
+private fun MainActivity.markAnchor(info: BookInfo, index: Int) {
+    ReaderUi.anchor = Triple(info.bookId, index, readerBody?.scrollY ?: 0)
+}
 
 /** 工具格能放的按钮 id（legado 的 `ReadBookButtonIds` 里手表认得的那些）。 */
 private val READER_TOOLS = listOf(
@@ -489,7 +517,11 @@ internal fun MainActivity.showReader(
     ).joinToString(" · ")
     // 右侧只留一枚 ⋮（= legado 的 `titleBarCompact=true`）：189 dp 宽放不下「返回 + 两个动作 + 书名」。
     // legado 默认顶栏是 下载 / 刷新 / 换源 / 更多四个动作，收成一枚后全进「更多操作」Sheet。
-    val bar = Widgets.topBar(this, info.name, onBack = { showToc(info) }, subtitle = subLine)
+    val bar = Widgets.topBar(this, info.name, onBack = {
+        // 去目录挑章之前先记下当前位置，回来时才有「返回刚才那章」。
+        markAnchor(info, index)
+        showToc(info)
+    }, subtitle = subLine)
     bar.setBackgroundColor(readerBackground)
     if (light) Widgets.tintSubtree(bar, readerInk)
     // 顶栏副行的 TextView（widgets.topBar 在有 subtitle 时是「返回 / 两行栈 / 动作」三层）。
@@ -564,7 +596,7 @@ internal fun MainActivity.showReader(
     /** 一格的动作。换源 / 缓存 / 书签 / 更多默认不在工具格上，但配了就能回来。 */
     fun runTool(id: String) {
         when (id) {
-            "catalog" -> showToc(info, src)
+            "catalog" -> { markAnchor(info, index); showToc(info, src) }
             "setting" -> showReaderSettings(info, index, text, src)
             "change_source" -> { rememberReturn(); showSwap(info, src) }
             "cache" -> startDownload(info)
@@ -671,7 +703,11 @@ internal fun MainActivity.showReader(
                 }
                 target = free
             }
-            if (target != index) preview(info, target) else seek.progress = index * 100 + innerPct()
+            if (target != index) {
+                // 拖滑条跨章之前记下当前位置（legado 的阅读锚点）。
+                markAnchor(info, index)
+                preview(info, target)
+            } else seek.progress = index * 100 + innerPct()
         }
     })
     foot.addView(seek, LinearLayout.LayoutParams(0, Md3.dp(this, 32), 1f))
@@ -738,11 +774,59 @@ internal fun MainActivity.showReader(
     menu.addView(bottom, FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
 
+    // ── 浮动胶囊（legado 的 ReadBookFloatingActionBar）─────────────
+    // 底部居中的一条圆角胶囊，到点自己消失；菜单一展开就立刻撤掉（legado 的 !menuVisible 条件）。
+    // 必须先声明后给 setMenu 引用，所以摆在 setMenu 赋值之前。
+    val pillHost = FrameLayout(this)
+    val pillLive = mutableListOf<View>()
+    val pillTimer = Handler(Looper.getMainLooper())
+    fun clearPills() {
+        pillHost.removeAllViews()
+        pillLive.clear()
+    }
+    /**
+     * 出一条浮动胶囊。
+     *
+     * [seconds] 秒后自己消失；点一下先收胶囊再跑 [act]（legado 两个胶囊都是点击即走）。
+     * 只留一条：锚点与主题提醒同时到时不叠两层，后到的把前一条顶掉。
+     */
+    fun pill(glyph: String, label: String, seconds: Int = 5, act: (() -> Unit)? = null) {
+        clearPills()
+        val cap = Md3.row(this)
+        cap.gravity = Gravity.CENTER_VERTICAL
+        cap.setPadding(Md3.dp(this, 10), 0, Md3.dp(this, 12), 0)
+        cap.minimumHeight = Md3.dp(this, 30)
+        cap.background = Md3.ripple(this, Md3.surface3, 20f)
+        cap.contentDescription = label
+        cap.isClickable = true
+        cap.addView(Icons.view(this, glyph, readerAccent, 14),
+            LinearLayout.LayoutParams(Md3.dp(this, 14), Md3.dp(this, 14)).apply {
+                rightMargin = Md3.dp(this@showReader, 6)
+            })
+        cap.addView(Md3.text(this, label, Md3.FS_SM, Md3.onSurface))
+        cap.setOnClickListener { clearPills(); act?.invoke() }
+        val lp = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
+        lp.bottomMargin = Md3.dp(this, 12)
+        pillHost.addView(cap, lp)
+        pillLive.add(cap)
+        // 到点自己消失。已经被点掉或被菜单撤掉时 parent 为空，这里什么都不做。
+        pillTimer.postDelayed({
+            if (cap.parent === pillHost) {
+                pillHost.removeView(cap)
+                pillLive.remove(cap)
+            }
+        }, seconds * 1000L)
+    }
+
     setMenu = { on ->
         ReaderMenu.open = on
         // 自动翻页在菜单展开时暂停、收起后继续（legado 浮动胶囊的 `!menuVisible` 条件同义）：
         // 一边看菜单一边被滑走，改设置就改不成了。只取消待跑的回调，不动用户开关。
-        if (on) ReaderAuto.cancel() else if (ReaderAuto.on) scheduleAuto()
+        // 胶囊同理：菜单一开就撤掉，否则压在工具格上。
+        if (on) { clearPills(); ReaderAuto.cancel() } else if (ReaderAuto.on) scheduleAuto()
         menu.animate().cancel()
         topStack.animate().cancel()
         bottom.animate().cancel()
@@ -783,11 +867,19 @@ internal fun MainActivity.showReader(
         body.postDelayed(task, 400)
     }
     // 恢复上次读到的地方。等布局完成再滚，否则拿不到 maxScroll。
+    // 「返回刚才那章」胶囊回跳时位置是钉死的：落回当时那一屏，不是那一章上次读到的位置。
+    val pinned = if (ReaderUi.restoreKey == findKey) ReaderUi.restoreAt else -1
+    if (pinned >= 0) {
+        ReaderUi.restoreKey = ""
+        ReaderUi.restoreAt = -1
+    }
     val restore = readOffset(info.bookId).takeIf { it > 0 }
     if (atEnd) {
         // 从上屏退上来的：落在上一章末屏，接着往上读。
         // legado 的窗口一次带四页，退一屏跨章时看到的正是上一章的末页，不是章首。
         body.post { body.fullScroll(View.FOCUS_DOWN) }
+    } else if (pinned >= 0) {
+        body.post { body.scrollTo(0, pinned.coerceAtMost(scrollLimit(body))) }
     } else if (restore != null) {
         body.post { body.scrollTo(0, restore.coerceAtMost(scrollLimit(body))) }
     }
@@ -803,10 +895,33 @@ internal fun MainActivity.showReader(
         }, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     }
-    // 菜单最后加：z 序在正文与护眼层之上。
+    // 菜单最后加：z 序在正文与护眼层之上；胶囊层在菜单之下。
+    frame.addView(pillHost, FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     frame.addView(menu, FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     root.addView(frame, Md3.lpWeight(1f))
+
+    // ① 阅读锚点：从目录 / 进度滑条 / 章内查找跳到了别的章，底出一条「返回刚才那章」。
+    val anchor = ReaderUi.anchor
+    if (anchor != null && anchor.first == info.bookId && anchor.second != index) {
+        pill("back", "返回刚才那章") {
+            // 先钉住位置再跳：这一章的滚动位置会被新页覆盖，不先记下就回不到原屏。
+            ReaderUi.restoreKey = "${info.bookId}#${anchor.second}"
+            ReaderUi.restoreAt = anchor.third
+            preview(info, anchor.second)
+        }
+    }
+    // ② 主题提醒：刚在阅读设置里换了深浅，新页底出「切换到深色 / 浅色模式」。
+    if (ReaderUi.themeHint) {
+        ReaderUi.themeHint = false
+        pill("brightness", if (light) "切换到深色模式" else "切换到浅色模式") {
+            // 只换底色，字号行距不动；重建页是因为整套前景色都得跟着换。
+            saveReaderPrefs(readerSize, readerSpacing, if (light) DARK_BG else Color.WHITE)
+            showReader(info, index, text, src)
+        }
+    }
+
     // 换章会走 preview → ReaderMenu.reset（取消回调）→ 重建这一屏，
     // 所以自动翻页的排程必须在最后重新挂上，否则读一章就停。
     scheduleAuto()
@@ -936,7 +1051,7 @@ private fun MainActivity.showReaderMenu(
     }
 
     val marked = BookmarkStore.has(info.bookId, index)
-    row("目录", "menu") { showToc(info, src) }
+    row("目录", "menu") { markAnchor(info, index); showToc(info, src) }
     row("章内查找", "search") { showFind(info, index, text, src) }
     // 自动翻页：标题带当前开着还是关着。开的时候顺手收菜单，直接回正文看它滚。
     row("自动翻页 · ${if (ReaderAuto.on) "开" else "关"}", "play") {
@@ -1054,6 +1169,8 @@ private fun MainActivity.showToolsDialog(
 private fun MainActivity.showFind(
     info: BookInfo, index: Int, text: String, src: BookSource?,
 ) {
+    // 查找会把人滚到命中处，跳之前先记下位置（legado 把查找也算进阅读锚点的入口）。
+    markAnchor(info, index)
     askText("章内查找", "输入关键词", "请输入关键词") { kw ->
         val hits = ReaderFind.inText(shownText(text), kw, limit = FIND_MAX)
         ReaderUi.findQuery = kw
@@ -1148,6 +1265,8 @@ private fun MainActivity.scrollToHit(hit: ReaderFind.Hit) {
 
 /** 上一章。跳过连续的锁定章（付费章取不到正文）。 */
 private fun MainActivity.prevChapter(info: BookInfo, index: Int, atEnd: Boolean = false) {
+    // 已经顺着读下去了，「刚才那章」不再有意义，锚点作废。
+    ReaderUi.anchor = null
     val prev = index - 1
     if (prev < 0) { toast("已是第一章"); return }
     if (info.chapters[prev].locked) {
@@ -1207,6 +1326,8 @@ internal fun MainActivity.preview(info: BookInfo, index: Int, atEnd: Boolean = f
 }
 
 private fun MainActivity.nextChapter(info: BookInfo, index: Int) {
+    // 已经顺着读下去了，「刚才那章」不再有意义，锚点作废。
+    ReaderUi.anchor = null
     val next = index + 1
     if (next >= info.chapters.size) { toast("已是最后一章"); return }
     if (info.chapters[next].locked) {
@@ -1337,13 +1458,16 @@ private fun MainActivity.showReaderSettings(info: BookInfo, index: Int, text: St
     fun buildTheme(): View {
         val col = Md3.column(this)
         val bgs = listOf(
-            "深" to Color.rgb(20, 18, 24),
+            "深" to DARK_BG,
             "浅" to Color.WHITE,
             "暖" to Color.rgb(255, 248, 230),
             "米" to Color.rgb(232, 225, 210),
         )
         seg(col, "背景", bgs.map { it.first to (it.second as Any) }, { readerBackground as Any }) {
+            val wasLight = Color.red(readerBackground) > 100
             readerBackground = it as Int
+            // 深浅互换时，在新页底留一条「切换到深色 / 浅色模式」的浮动胶囊（legado 的主题提醒）。
+            if (wasLight != (Color.red(readerBackground) > 100)) ReaderUi.themeHint = true
             // 底色一变，整套前景色（顶栏、按钮、进度）都要跟着换，只能重建页面。
             // 其余项都只重排正文，所以这一个开关允许重建。
             save()
