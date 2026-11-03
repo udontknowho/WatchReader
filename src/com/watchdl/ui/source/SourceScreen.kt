@@ -658,7 +658,11 @@ private fun MainActivity.showRankContent(rankKey: String) {
     root.addView(Widgets.topBar(this, rank?.name ?: "榜单不存在",
         onBack = { showDiscover() },
         trailing = if (rank == null) emptyList()
-        else listOf("refresh" to { showDiscover(rankKey) })))
+        else listOf(
+            // legado 内容页顶栏有「分类选择」：在榜里就能换到另一个榜，不用退回目录。
+            "more" to { showRankSwitchMenu(rankKey) },
+            "refresh" to { showDiscover(rankKey) },
+        )))
 
     val body = Widgets.scrollBody(this, crownStep, crownGlide)
     val col = Widgets.contentColumn(body)
@@ -672,7 +676,7 @@ private fun MainActivity.showRankContent(rankKey: String) {
 
     val holder = Md3.column(this)
     col.addView(holder)
-    holder.addView(Md3.text(this, "正在拉取…", Md3.FS_SM, Md3.onSurfaceVariant))
+    holder.addView(Md3.text(this, "正在加载…", Md3.FS_SM, Md3.onSurfaceVariant))
 
     // 云端配置照旧在后台刷：拉到了且清单变了就重画一次，没变就不动。
     refreshRanks(Screen.Discover(rankKey)) { showDiscover(rankKey) }
@@ -681,14 +685,16 @@ private fun MainActivity.showRankContent(rankKey: String) {
         holder.removeAllViews()
         res.onSuccess { hits ->
             if (hits.isEmpty()) {
-                holder.addView(Md3.text(this, "这个榜暂时没有内容",
-                    Md3.FS_SM, Md3.onSurfaceVariant))
+                holder.addView(Widgets.emptyState(this, "explore", "这个榜暂时没有内容"))
             } else {
                 for (h in hits) holder.addView(discoverItem(col, h))
+                // legado 的 ExploreShow 在列表末尾挂 LoadMoreFooter，到底写「没有下一页」。
+                // 我们一次把该榜的页数全拉完，没有「加载更多」可点，只留这句说明到底了。
+                holder.addView(endOfListNote())
             }
         }.onFailure { e ->
-            holder.addView(Md3.text(this, "取不到：${e.message?.take(60)}",
-                Md3.FS_SM, Md3.error))
+            holder.addView(Widgets.emptyState(this, "warning",
+                "加载失败：${e.message?.take(60) ?: "网络不可用"}"))
             holder.addView(Widgets.button(this, "重试", "tonal") {
                 showDiscover(rankKey)
             })
@@ -718,7 +724,10 @@ internal fun MainActivity.showDiscover(rankKey: String = "") {
 
     // 根屏（底栏三栏之一），不挂返回箭头，动作图标钉在标题行右端。
     root.addView(Widgets.headerRow(this, "发现",
-        trailing = listOf("refresh" to { showDiscover() })))
+        trailing = listOf(
+            "more" to { showDiscoverMenu() },
+            "refresh" to { showDiscover() },
+        )))
 
     val body = Widgets.scrollBody(this, crownStep, crownGlide)
     val col = Widgets.contentColumn(body)
@@ -726,15 +735,12 @@ internal fun MainActivity.showDiscover(rankKey: String = "") {
 
     val all = discoverRanks()
     // 分组顺序固定：番茄在前（榜多有分类），起点在后（各 5 个总榜）。
-    for ((site, gender, title) in listOf(
-        Triple(RankConfig.Site.FANQIE, RankConfig.Gender.MALE, "番茄 · 男频"),
-        Triple(RankConfig.Site.FANQIE, RankConfig.Gender.FEMALE, "番茄 · 女频"),
-        Triple(RankConfig.Site.QIDIAN, RankConfig.Gender.MALE, "起点 · 男频"),
-        Triple(RankConfig.Site.QIDIAN, RankConfig.Gender.FEMALE, "起点 · 女频"),
-    )) {
-        val group = all.filter { it.site == site && it.gender == gender }
+    // 选了某一组就只画那一组，与 legado 顶栏的「分组」下拉同一个意思。
+    val groups = DISCOVER_GROUPS.filter { DiscoverUi.group.isEmpty() || it.key == DiscoverUi.group }
+    for (g in groups) {
+        val group = all.filter { it.site == g.site && it.gender == g.gender }
         if (group.isEmpty()) continue
-        col.addView(Widgets.groupCard(this, title) { card ->
+        col.addView(Widgets.groupCard(this, g.title) { card ->
             for (r in group) {
                 card.addView(Widgets.groupItem(this, r.listLabel(),
                     onClick = { showDiscover(r.key) }))
@@ -742,13 +748,96 @@ internal fun MainActivity.showDiscover(rankKey: String = "") {
         })
     }
     if (col.childCount == 0) {
-        col.addView(Widgets.emptyState(this, "list", "榜单清单是空的"))
+        // legado `explore_empty`：「当前没有发现源！」。我们没有发现源，只有榜。
+        col.addView(Widgets.emptyState(this, "explore", "当前没有发现榜单！"))
     }
 
     // 云端配置照旧在后台刷：拉到了且清单变了就重画一次，没变就不动。
     refreshRanks(Screen.Discover("")) { showDiscover() }
     attachTabs(1)
 }
+
+/**
+ * 发现页的四个分组。
+ *
+ * [key] 用站点与频道的枚举名拼，不用列表下标 —— 将来插一组，下标全串味。
+ */
+private data class DiscoverGroup(
+    val site: RankConfig.Site,
+    val gender: RankConfig.Gender,
+    val title: String,
+) {
+    val key: String get() = "${site.name}|${gender.name}"
+}
+
+private val DISCOVER_GROUPS = listOf(
+    DiscoverGroup(RankConfig.Site.FANQIE, RankConfig.Gender.MALE, "番茄 · 男频"),
+    DiscoverGroup(RankConfig.Site.FANQIE, RankConfig.Gender.FEMALE, "番茄 · 女频"),
+    DiscoverGroup(RankConfig.Site.QIDIAN, RankConfig.Gender.MALE, "起点 · 男频"),
+    DiscoverGroup(RankConfig.Site.QIDIAN, RankConfig.Gender.FEMALE, "起点 · 女频"),
+)
+
+/**
+ * 发现页的分组筛选。空串表示全部。
+ *
+ * 放文件级 object 而不是 Activity 字段：它只属于这一屏，离开发现页就重来，不落盘。
+ */
+internal object DiscoverUi {
+    var group: String = ""
+}
+
+/**
+ * 发现页顶栏 ⋮。
+ *
+ * legado 的发现页顶栏有「分组」下拉加刷新，这里同构：先选组，再单独给一条
+ * 「重新拉取榜单配置」—— 云端榜单改过之后，用户不必杀进程等它自己拉。
+ */
+private fun MainActivity.showDiscoverMenu() {
+    val items = mutableListOf<Pair<CharSequence, () -> Unit>>()
+    items += ("全部" + if (DiscoverUi.group.isEmpty()) " ✓" else "") to {
+        DiscoverUi.group = ""
+        showDiscover()
+    }
+    for (g in DISCOVER_GROUPS) {
+        items += (g.title + if (g.key == DiscoverUi.group) " ✓" else "") to {
+            DiscoverUi.group = g.key
+            showDiscover()
+        }
+    }
+    items += "重新拉取榜单配置" to {
+        // rankRefreshed 是一次性开关，手动刷新要显式复位，否则 refreshRanks 直接返回。
+        rankRefreshed = false
+        refreshRanks(Screen.Discover("")) { showDiscover() }
+        toast("正在刷新榜单配置")
+    }
+    Widgets.longMenuDialog(this, "发现", items).show()
+}
+
+/**
+ * 内容页的换榜菜单。
+ *
+ * legado `ExploreShowScreen` 顶栏有「分类选择」sheet：在某个分类里就能换到另一个分类。
+ * 189dp 屏放不下分类网格，退成长菜单 —— 一屏四行，可按组滚。
+ */
+private fun MainActivity.showRankSwitchMenu(currentKey: String) {
+    val all = discoverRanks()
+    val items = mutableListOf<Pair<CharSequence, () -> Unit>>()
+    for (g in DISCOVER_GROUPS) {
+        for (r in all.filter { it.site == g.site && it.gender == g.gender }) {
+            val mark = if (r.key == currentKey) " ✓" else ""
+            items += ("${g.title} · ${r.listLabel()}$mark") to { showDiscover(r.key) }
+        }
+    }
+    Widgets.longMenuDialog(this, "换榜", items).show()
+}
+
+/** 列表末尾的「没有下一页」，照 legado `no_next_page`。 */
+private fun MainActivity.endOfListNote(): TextView =
+    Md3.text(this, "没有下一页", Md3.FS_SM, Md3.onSurfaceVariant).apply {
+        gravity = Gravity.CENTER
+        setPadding(0, Md3.dp(this@endOfListNote, Md3.GAP),
+            0, Md3.dp(this@endOfListNote, Md3.GAP))
+    }
 
 /**
  * 榜在目录里的名字。
@@ -840,31 +929,42 @@ private fun MainActivity.refreshRanks(owner: Screen, rerender: () -> Unit) {
         if (got != before) rerender()
     }
 }
+
+/** 市场一页多少条。取数与分段显示共用，改一处两边一起走。 */
+private const val MARKET_PAGE_SIZE = 30
+
 internal fun MainActivity.showMarket(page: Int, accumulated: List<YioveSource.Item>) {
     setScreen(Screen.Market(accumulated, 0, page))
     root.removeAllViews()
-    root.addView(Widgets.topBar(this, "书源市场", onBack = { showSources() }))
+    // 刷新从头拉：legado 的列表刷新都是「回到第一页」，不是就地重拉当前页。
+    root.addView(Widgets.topBar(this, "书源市场",
+        onBack = { showSources() },
+        trailing = listOf("refresh" to { showMarket(1, emptyList()) })))
 
     val body = Widgets.scrollBody(this, crownStep, crownGlide)
     val col = Widgets.contentColumn(body)
     root.addView(body)
 
     if (accumulated.isEmpty()) {
-        col.addView(Widgets.emptyState(this, "cloud", "正在拉取第 $page 页…"))
+        col.addView(Widgets.emptyState(this, "cloud", "正在加载第 $page 页…"))
     } else {
         renderMarket(col, accumulated, page)
     }
 
     val owner: Screen = Screen.Market(accumulated, 0, page)
-    bg(owner, { YioveSource.list(page = page, pageSize = 30) }) { res ->
+    bg(owner, { YioveSource.list(page = page, pageSize = MARKET_PAGE_SIZE) }) { res ->
         res.onSuccess { p ->
-            val all = accumulated + p.items
+            // 导入一条后会带着旧清单再跑一遍本函数，同一页会被重复拉回。
+            // 按 id 去重，否则第 N 页在屏上出现两次。
+            val seen = accumulated.mapTo(HashSet()) { it.id }
+            val all = accumulated + p.items.filter { seen.add(it.id) }
             setScreen(Screen.Market(all, p.total, page))
             col.removeAllViews()
             renderMarket(col, all, page, p.total, p.pages)
         }.onFailure { e ->
             col.removeAllViews()
-            col.addView(Widgets.emptyState(this, "warning", "拉取失败：${e.message?.take(60)}"))
+            col.addView(Widgets.emptyState(this, "warning",
+                "加载失败：${e.message?.take(60) ?: "网络不可用"}"))
             col.addView(Widgets.button(this, "重试", "tonal") { showMarket(page, accumulated) })
         }
     }
@@ -883,35 +983,43 @@ private fun MainActivity.renderMarket(
 
     if (total > 0) {
         val card = Widgets.card(this, outlined = true)
-        card.addView(Md3.text(this, "共 $total 条 · 第 $page/$pages 页", Md3.FS_MD, Md3.onSurface))
+        card.addView(Md3.text(this, "共 $total 条 · 已看 $page/$pages 页", Md3.FS_MD, Md3.onSurface))
         card.addView(Md3.text(this,
-            "点选一条即拉取并导入；全量太大，只按需拉", Md3.FS_SM, Md3.onSurfaceVariant))
+            "点一条即拉取并导入。全量太大，只按需拉", Md3.FS_SM, Md3.onSurfaceVariant))
         col.addView(card)
     }
 
-    col.addView(Widgets.sectionLabel(this, "第 $page 页"))
-    val startIdx = if (total > 0) items.size - 30 else 0
-    items.drop(startIdx).forEach { it0 ->
-        val has = installed.any { it.startsWith(it0.id.take(8)) }
-        col.addView(Widgets.listItem(
-            this, it0.name,
-            if (has) "已导入" else "热度 ${it0.views}",
-            twoLine = true, highlight = false,
-            leading = Icons.view(this, if (has) "check" else "download",
-                if (has) Md3.ok else Md3.onSurfaceVariant, 18),
-        ) { if (!has) installFromMarket(it0.name, it0.id, page, items) })
+    // legado 的列表是「加载更多」往下接，不换页：前面几页留在屏上，滚回去还能点。
+    // 这里按 MARKET_PAGE_SIZE 分段，每段前挂一条页码，翻页后旧条目不会跳走。
+    items.chunked(MARKET_PAGE_SIZE).forEachIndexed { i, chunk ->
+        col.addView(Widgets.sectionLabel(this, "第 ${i + 1} 页"))
+        for (it0 in chunk) {
+            val has = installed.any { it.startsWith(it0.id.take(8)) }
+            col.addView(Widgets.listItem(
+                this, it0.name,
+                if (has) "已导入" else "热度 ${it0.views}",
+                twoLine = true, highlight = false,
+                leading = Icons.view(this, if (has) "check" else "download",
+                    if (has) Md3.ok else Md3.onSurfaceVariant, 18),
+            ) { if (!has) installFromMarket(it0.name, it0.id, page, items) })
+        }
     }
 
-    val more = Widgets.button(this, "下一页", "tonal") { showMarket(page + 1, items) }
-    more.layoutParams = Md3.lpDp(this, null, Md3.BTN).apply {
-        topMargin = Md3.dp(this@renderMarket, Md3.GAP)
+    // pages 未知（首屏还没拿到响应）时不能把「下一页」藏掉，否则第 1 页就没出路。
+    if (pages <= 0 || page < pages) {
+        val more = Widgets.button(this, "下一页", "tonal") { showMarket(page + 1, items) }
+        more.layoutParams = Md3.lpDp(this, null, Md3.BTN).apply {
+            topMargin = Md3.dp(this@renderMarket, Md3.GAP)
+        }
+        col.addView(more)
+    } else {
+        col.addView(endOfListNote())
     }
-    col.addView(more)
 }
 
 /** 拉单条规则并导入（约 1 秒），成功后回列表把该条标成已导入。 */
 private fun MainActivity.installFromMarket(name: String, id: String, page: Int, shown: List<YioveSource.Item>) {
-    toast("正在拉取「$name」…")
+    toast("正在导入「$name」…")
     val owner: Screen = Screen.Market(shown, 0, page)
     bg(owner, { YioveSource.install(sourcesDir(), YioveSource.Item(id, name, "", 0)) }) { res ->
         res.onSuccess { r ->
