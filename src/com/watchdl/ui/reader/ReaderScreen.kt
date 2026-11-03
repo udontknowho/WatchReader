@@ -1,5 +1,7 @@
 package com.watchdl.ui.reader
 
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
@@ -65,6 +67,8 @@ internal object ReaderUi {
     var italic = false
     /** 两端对齐（legado 的「文字两端对齐」）。 */
     var justify = true
+    /** 翻页动画（legado 的 pageAnim）：0 滚一屏 / 1 覆盖。 */
+    var pageAnim = 0
     /** 标题位置：0 居左 / 1 居中 / 2 不显示。 */
     var titleMode = 0
     /** 标题字号相对正文的增量（sp）。 */
@@ -343,6 +347,7 @@ internal fun MainActivity.loadReaderExtras() {
     ReaderUi.weightLevel = p.getInt("weight", 0).coerceIn(0, 2)
     ReaderUi.italic = p.getBoolean("italic", false)
     ReaderUi.justify = p.getBoolean("justify", true)
+    ReaderUi.pageAnim = p.getInt("anim", 0).coerceIn(0, 1)
     ReaderUi.titleMode = p.getInt("titleMode", 0).coerceIn(0, 2)
     ReaderUi.titleAdd = p.getInt("titleAdd", 2).coerceIn(0, 8)
     ReaderUi.titleBold = p.getBoolean("titleBold", true)
@@ -373,6 +378,7 @@ internal fun MainActivity.saveReaderExtras() {
         .putInt("weight", ReaderUi.weightLevel)
         .putBoolean("italic", ReaderUi.italic)
         .putBoolean("justify", ReaderUi.justify)
+        .putInt("anim", ReaderUi.pageAnim)
         .putInt("titleMode", ReaderUi.titleMode)
         .putInt("titleAdd", ReaderUi.titleAdd)
         .putBoolean("titleBold", ReaderUi.titleBold)
@@ -665,6 +671,13 @@ internal fun MainActivity.showReader(
     // 跳章没丢：底栏还有「上一章 / 下一章」。legado 也把跳章放底栏进度行
     // （`ReadBookMenuBarBottom`），不放在点击区。
     var pageAnim: android.animation.ValueAnimator? = null
+    /**
+     * 覆盖动画在跑。
+     *
+     * 一屏 220 ms 里连点两下会叠出两层定格位图（且第一层的 withEndAction 会把第二层的层摘掉）。
+     * 动画期间不再叠层，直接到位；动画结束复位。
+     */
+    var coverBusy = false
 
     /** 往下滚到章末：有拼接块就把「读完处」当偏移带过去，没有就整章换。 */
     fun toNext() {
@@ -700,6 +713,41 @@ internal fun MainActivity.showReader(
         if (target == from) {
             // 只剩不足一行可见：当作到边界。
             if (forward) toNext() else prevChapter(info, index, atEnd = true)
+            return
+        }
+        // 覆盖：先把当前屏定格成位图，正文瞬间滚到目标，再让定格的旧屏整体滑出，
+        // 露出下面的新屏 —— 就是 legado 的「新一屏从下往上盖住旧的」。
+        // 只影响章内翻屏；跳章（上面两个 return）不经过这里。
+        if (ReaderUi.pageAnim == 1 && body.width > 0 && body.height > 0) {
+            pageAnim?.cancel()
+            if (coverBusy) {
+                // 上一次覆盖还没走完：直接到位，不叠层。
+                body.scrollTo(0, target)
+                return
+            }
+            val vh = body.height
+            val snap = Bitmap.createBitmap(body.width, vh, Bitmap.Config.ARGB_8888)
+            body.draw(Canvas(snap))
+            body.scrollTo(0, target)
+            val iv = ImageView(this).apply {
+                setImageBitmap(snap)
+                scaleType = ImageView.ScaleType.FIT_XY
+                isClickable = false
+            }
+            // 压进页眉之下：页眉页脚不能被这层盖住。header 是帧内第一层浮条，
+            // 插在它前面就位于 body 之上、页眉与页脚之下。
+            frame.addView(iv, frame.indexOfChild(header),
+                FrameLayout.LayoutParams(body.width, vh, Gravity.TOP))
+            coverBusy = true
+            iv.animate().translationY((if (forward) -vh else vh).toFloat())
+                .setDuration(COVER_MS)
+                .setInterpolator(android.view.animation.LinearInterpolator())
+                .withEndAction {
+                    // 连点或换页可能已经把它摘了：判空再摘，不重复回收位图。
+                    (iv.parent as? ViewGroup)?.removeView(iv)
+                    snap.recycle()
+                    coverBusy = false
+                }.start()
             return
         }
         // 匀速、时长按距离比例（legado 用 Animatable + LinearEasing，见
@@ -1633,6 +1681,9 @@ private fun MainActivity.showFindResults(
         items).show()
 }
 
+/** 覆盖动画时长：比滚动略快（一屏滚到底约 260 ms），覆盖感才利落。 */
+private const val COVER_MS = 220L
+
 /** 拼接块的长度：约两屏多一点，足够滚到底再跳章时不重读。 */
 private const val SPLICE_CHARS = 800
 
@@ -1889,6 +1940,10 @@ private fun MainActivity.showReaderSettings(info: BookInfo, index: Int, text: St
             { ReaderUi.italic as Any }) { ReaderUi.italic = it as Boolean }
         seg(col, "两端", listOf("关" to false as Any, "开" to true),
             { ReaderUi.justify as Any }) { ReaderUi.justify = it as Boolean }
+        // 翻页动画：legado pageAnim 的两档（滚一屏 / 覆盖；仿真在手表上不必）。
+        // 只影响章内翻屏，跳章仍是瞬间换页。
+        seg(col, "翻页", listOf("滚一屏" to 0 as Any, "覆盖" to 1),
+            { ReaderUi.pageAnim as Any }) { ReaderUi.pageAnim = it as Int }
         return col
     }
 
