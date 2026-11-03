@@ -182,6 +182,44 @@ object ReaderStyle {
     fun counterText(current: Int, count: Int): String =
         if (count <= 0) "共 0 处" else "第 ${current.coerceIn(0, count - 1) + 1} / 共 $count 处"
 
+    /**
+     * 按章标题找回原章下标。先全等，再忽略空白与标点，最后双向包含；找不到返回 -1。
+     *
+     * 换源之后同一个故事在不同站的章名常带差异（`第12章 风起` / `第 12 章 风起（上）`），
+     * 全等对不上就一路放宽，宁可在原章附近也不要退回目录页。
+     *
+     * 三级顺序固定：全等优先，所以同名的多章取第一条；包含级取长度最接近的一条，
+     * 免得 `第一章` 撞上 `第一千章`。
+     */
+    fun chapterIndex(titles: List<String>, want: String): Int {
+        val w = want.trim()
+        if (w.isEmpty() || titles.isEmpty()) return -1
+        // 一级：全等（只去首尾空白）
+        val exact = titles.indexOfFirst { it.trim() == w }
+        if (exact >= 0) return exact
+        // 二级：归一化后全等（滤掉空白与标点，`第 12 章 风起` 对得上 `第12章风起`）
+        val kw = normTitle(w)
+        if (kw.isNotEmpty()) {
+            val loose = titles.indexOfFirst { normTitle(it) == kw }
+            if (loose >= 0) return loose
+        }
+        if (kw.isEmpty()) return -1
+        // 三级：双向包含。取归一化长度最接近的那条，同距取前面那条。
+        var bestAt = -1
+        var bestGap = Int.MAX_VALUE
+        titles.forEachIndexed { i, t ->
+            val k = normTitle(t)
+            if (k.isEmpty()) return@forEachIndexed
+            if (!k.contains(kw) && !kw.contains(k)) return@forEachIndexed
+            val gap = kotlin.math.abs(k.length - kw.length)
+            if (gap < bestGap) { bestGap = gap; bestAt = i }
+        }
+        return bestAt
+    }
+
+    /** 标题归一化：只留字母与数字。CJK 也是字母，标点与空白自然被滤掉。 */
+    private fun normTitle(s: String): String = s.filter { it.isLetterOrDigit() }
+
     // ── 护眼：整屏暖色遮罩 ─────────────────────────────────
     const val EYE_ALPHA = 28
 

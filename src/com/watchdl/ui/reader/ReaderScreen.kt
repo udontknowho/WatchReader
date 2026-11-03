@@ -91,6 +91,9 @@ internal object ReaderUi {
     /** 主题提醒（legado 的「切换到深色 / 浅色模式」胶囊）：刚换了深浅，新页提示一句。 */
     var themeHint = false
 
+    /** 换源前正在读的章标题；换源成功后由 showToc 消费掉，用来回到原章。进程内，不落盘。 */
+    var swapReturnTitle = ""
+
     /** 下一次重建时要钉住的滚动位置：键是「书号#章号」，-1 表示按记录位置恢复。 */
     var restoreKey = ""
     var restoreAt = -1
@@ -632,7 +635,10 @@ internal fun MainActivity.showReader(
     swapBtn.isClickable = true
     swapBtn.background = Md3.ripple(this, Color.TRANSPARENT, Md3.dp(this, 14).toFloat())
     swapBtn.contentDescription = "换源"
-    swapBtn.setOnClickListener { rememberReturn(); showSwap(info, src) }
+    swapBtn.setOnClickListener {
+        ReaderUi.swapReturnTitle = info.chapters.getOrNull(index)?.title.orEmpty()
+        rememberReturn(); showSwap(info, src)
+    }
     bar.addView(swapBtn, LinearLayout.LayoutParams(
         Md3.dp(this, 28), Md3.dp(this, Md3.TOP_BAR)))
     val more = Icons.view(this, "more",
@@ -700,7 +706,10 @@ internal fun MainActivity.showReader(
         when (id) {
             "catalog" -> { markAnchor(info, index); showToc(info, src) }
             "setting" -> showReaderSettings(info, index, text, src)
-            "change_source" -> { rememberReturn(); showSwap(info, src) }
+            "change_source" -> {
+                ReaderUi.swapReturnTitle = info.chapters.getOrNull(index)?.title.orEmpty()
+                rememberReturn(); showSwap(info, src)
+            }
             "cache" -> startDownload(info)
             "bookmark" -> if (BookmarkStore.has(info.bookId, index)) {
                 BookmarkStore.remove(info.bookId, index); toast("已移除本章书签")
@@ -1222,7 +1231,10 @@ private fun MainActivity.showReaderMenu(
     // 行序照 legado 的 ReadMenuActionDefs：换源与刷新在前（读不下去时最常按的两个），
     // 目录与章内查找其次，工具与书签类收在后面。
     val marked = BookmarkStore.has(info.bookId, index)
-    row("换源", "swap") { rememberReturn(); showSwap(info, src) }
+    row("换源", "swap") {
+        ReaderUi.swapReturnTitle = info.chapters.getOrNull(index)?.title.orEmpty()
+        rememberReturn(); showSwap(info, src)
+    }
     // legado 顶栏的刷新：重跑一次取正文，复用 preview 的本地缓存 + 在线兜底。
     row("刷新本章", "refresh") { preview(info, index) }
     row("离线缓存", "download") { startDownload(info) }

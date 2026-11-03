@@ -90,10 +90,40 @@ class MultiSource(
          */
         onPartial: ((hits: List<BookHit>, done: Int, total: Int) -> Unit)? = null,
     ): Result {
+        // 先存一个局部变量：rotation 每次调用都可能给不同结果，两处各调一次就错位了。
         val sources = rotation(offset)
+        return runOn(sources, keyword, page, onProgress, onPartial,
+            minOf(concurrency, sources.size), timeoutMs)
+    }
+
+    /**
+     * 跨**全部**源并发搜一遍（含不参与常规搜索的那批）。
+     *
+     * 换源宁可等十几秒也要把每个源都问一遍，所以道数提到 [SWAP_LANES]、预算放到 [SWAP_BUDGET_MS]。
+     * 去重、清洗、边跑边报全部沿用 [runOn]，与常规搜索同一套规则。
+     */
+    fun searchAll(
+        keyword: String,
+        page: Int = 1,
+        onProgress: ((done: Int, total: Int) -> Unit)? = null,
+        onPartial: ((hits: List<BookHit>, done: Int, total: Int) -> Unit)? = null,
+    ): Result = runOn(pool, keyword, page, onProgress, onPartial,
+        minOf(SWAP_LANES, pool.size), SWAP_BUDGET_MS)
+
+    /**
+     * 搜索主体：给定源集合、并发道数与预算，跑一遍并汇总。
+     *
+     * 从 [searchDetailed] 原样抽出，只把「源集合、道数、预算」变成参数，
+     * 去重 / 清洗 / 进度 / 边跑边报的行为一字未改。
+     */
+    private fun runOn(
+        sources: List<NamedSource>, keyword: String, page: Int,
+        onProgress: ((done: Int, total: Int) -> Unit)?,
+        onPartial: ((hits: List<BookHit>, done: Int, total: Int) -> Unit)?,
+        lanes: Int, budgetMs: Long,
+    ): Result {
         if (sources.isEmpty()) return Result(emptyList(), 0, 0, emptyList())
-        val lanes = minOf(concurrency, sources.size)
-        DevLog.log("SRC", "搜索「$keyword」第 $page 页开始：${sources.size} 源，并发 $lanes，预算 ${timeoutMs}ms")
+        DevLog.log("SRC", "搜索「$keyword」第 $page 页开始：${sources.size} 源，并发 $lanes，预算 ${budgetMs}ms")
 
         val runner = Executors.newFixedThreadPool(lanes)
         val finished = java.util.concurrent.atomic.AtomicInteger(0)
@@ -133,7 +163,7 @@ class MultiSource(
             // 用单调时钟算预算：手表上 wall clock 会被网络校时前后跳，
             // 往回跳一下 poll 就可能多等几秒（实测一次 8 秒）。
             val startNs = System.nanoTime()
-            val budgetNs = timeoutMs * 1_000_000L
+            val budgetNs = budgetMs * 1_000_000L
             var remaining = sources.size
             while (remaining > 0) {
                 val leftNs = budgetNs - (System.nanoTime() - startNs)
@@ -319,6 +349,19 @@ class MultiSource(
 
 
     companion object {
+        /**
+         * 换源全量搜索的并发道数。12 道是手表能扛住的上限：再高会把网络栈与线程调度压死。
+         */
+        private const val SWAP_LANES = 12
+
+        /**
+         * 换源全量搜索的预算。
+         *
+         * 25 s 是用户可接受的换源等待上限；超时源仍按既有逻辑记失败名，
+         * 界面照实报「失败 f 条」，不假装全部都问到了。
+         */
+        private const val SWAP_BUDGET_MS = 25_000L
+
         /**
          * 源名清洗。
          *

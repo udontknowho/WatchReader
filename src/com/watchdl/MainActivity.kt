@@ -604,6 +604,14 @@ class MainActivity : Activity() {
             tocWinStart = (readProgress(info.bookId) - TOC_WINDOW / 2).coerceAtLeast(0)
         }
         setScreen(Screen.Toc(info, useSrc))
+        // 换源成功后回到原来那一章：loadToc → showToc 两步都拿不到章号，只能靠标题找回。
+        val wantTitle = ReaderUi.swapReturnTitle
+        if (wantTitle.isNotBlank()) {
+            ReaderUi.swapReturnTitle = ""
+            val at = ReaderStyle.chapterIndex(info.chapters.map { it.title }, wantTitle)
+            if (at >= 0 && !info.chapters[at].locked) { preview(info, at); return }
+            toast("没找到原章节，从目录挑一章")
+        }
         root.removeAllViews()
         root.addView(Widgets.topBar(this, info.name, onBack = { goBackToPrevious() },
             trailing = listOf(
@@ -1009,6 +1017,8 @@ class MainActivity : Activity() {
      * 返回键自己会回到搜索结果。
      */
     private fun showTocFailed(name: String, candidates: List<BookHit>) {
+        // 换源全失败：把「回原章」的残值清掉，否则下一次正常进目录会被它劫持。
+        ReaderUi.swapReturnTitle = ""
         val count = candidates.size
         root.removeAllViews()
         root.addView(Widgets.topBar(this, name, onBack = { goBackToPrevious() }))
