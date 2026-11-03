@@ -20,13 +20,20 @@ import java.util.Locale
  * 书清单只读 `job.json`（[Downloader.restoreLight]），不碰 `chapters.jsonl` ——
  * 几十本书的正文加起来几百 MB，为了一份清单去读正文是纯浪费。
  *
- * **legado 没有这一页**（`ui/` 下没有书单导出屏；`BookshelfManageScreen` 里的「导出」
- * 导出的是书籍正文与插图，不是清单）。所以本页按 legado 列表页的通用形态自查：
- * 分组卡 + 设置行 + 主操作占屏底一格，删除类动作二次确认。
+ * **legado 没有这一页**（`ui/` 下没有书单导出屏；`BookshelfManageScreen` 的导出 sheet 导出的是
+ * 书籍正文与插图，不是清单）。所以本页照 legado 导出流程的三段结构自查：
+ * 「本次导出（N 本）」清单 →「导出」主操作 → 结果可打开核对。legado 导出后能点开文件查看，
+ * 这里点文件行就是屏内预览，用同一枚 [renderTextPreview]。
+ *
+ * legado 导出 sheet 里那一堆开关（格式 / 编码 / 自定义字符集 / WebDav / 插图 / 并行）
+ * 是给正文导出用的，一份书名清单没有格式可配，这里一个都不摆假开关。
  */
 
 /** 生成的文件名前缀。判断「哪份是书单」只靠它，改名即视为用户自己的文件。 */
 private const val PREFIX = "书单-"
+
+/** 正在预览哪份书单；null 表示看列表。 */
+private var previewFile: File? = null
 
 /** 时间戳 → 「08-14 21:30」。副标题第一段，年月对「哪份是刚生成的」没帮助。 */
 private fun stamp(ms: Long): String =
@@ -34,9 +41,16 @@ private fun stamp(ms: Long): String =
 
 internal fun MainActivity.showExportList() {
     setScreen(Screen.ExportList)
+    val pv = previewFile
+    if (pv != null) {
+        renderTextPreview(pv) {
+            previewFile = null
+            showExportList()
+        }
+        return
+    }
     root.removeAllViews()
     root.addView(Widgets.topBar(this, "导出书单", onBack = { showMy() }))
-
     val body = Widgets.scrollBody(this, crownStep, crownGlide)
     val col = Widgets.contentColumn(body)
     val count = jobsStore().listBooks().size
@@ -55,14 +69,14 @@ internal fun MainActivity.showExportList() {
             ctx = this,
             title = "书架 $count 本",
             subtitle = latest?.let { "最近生成 ${it.name} · ${stamp(it.lastModified())}" }
-                ?: "还没生成过",
+                ?: "还没导出过",
             glyph = "list",
         ))
     })
 
     col.addView(Widgets.groupCard(this, "导出目录 · ${files.size} 个") { g ->
         if (files.isEmpty()) {
-            g.addView(Widgets.emptyState(this, "list", "导出目录还是空的。\n生成后会出现在这里。"))
+            g.addView(Widgets.emptyState(this, "list", "导出目录还是空的。\n导出后会出现在这里。"))
         }
         for (f in files) {
             g.addView(Widgets.groupItem(
@@ -72,6 +86,11 @@ internal fun MainActivity.showExportList() {
                 glyph = "file",
                 trailing = "✕",
                 onTrailingClick = { askDeleteExport(f) },
+                // 点开核对内容：导出完最想确认的就是「书都在里面」。
+                onClick = {
+                    previewFile = f
+                    showExportList()
+                },
             ))
         }
     })
@@ -80,17 +99,19 @@ internal fun MainActivity.showExportList() {
 }
 
 /**
- * 屏底主操作：生成书单。
+ * 屏底主操作：导出书单。
  *
  * legado 的主操作在 FAB 上，本项目 2026-11-02 拍板用屏底通栅按钮替代
  * （FAB 会压住列表末行）。放在滚区外面，生成完重画也不会跟着滚走。
+ * 按钮文案照 legado 的动词（`export`「导出」）：屏名已经叫「导出书单」，
+ * 同一件事在同一屏用两个词（生成 / 导出）会让人以为按钮干的是另一回事。
  */
 private fun MainActivity.addExportBar() {
     val bar = Md3.row(this).apply {
         setPadding(Md3.dp(this@addExportBar, Md3.PAD), Md3.dp(this@addExportBar, Md3.GAP / 2),
             Md3.dp(this@addExportBar, Md3.PAD), Md3.dp(this@addExportBar, Md3.GAP))
     }
-    bar.addView(Widgets.button(this, "生成书单", "filled") { generateExportList() },
+    bar.addView(Widgets.button(this, "导出书单", "filled") { generateExportList() },
         Md3.lpWeight(1f))
     root.addView(bar)
 }
@@ -102,6 +123,12 @@ private fun MainActivity.addExportBar() {
 private fun MainActivity.generateExportList() {
     val store = jobsStore()
     val dir = exportDir()
+    // 书架空着时照样能写出一份 0 行的文件，看着像导出成功了其实里面什么都没有。
+    // legado 对空清单也是明确拒绝（`no_bookmarks_to_export`「没有可导出的书签」）。
+    if (store.listBooks().isEmpty()) {
+        toast("书架是空的，没有可导出的书")
+        return
+    }
     bg(Screen.ExportList, body = {
         val ids = store.listBooks()
         val lines = ArrayList<String>(ids.size)
@@ -124,9 +151,10 @@ private fun MainActivity.generateExportList() {
     }) { r ->
         val res = r.getOrNull()
         if (res == null) {
-            toast("生成书单失败：${r.exceptionOrNull()?.message?.take(40) ?: "未知原因"}")
+            // 文案照 legado `book_source_export_failed`「导出失败：%1$s」。
+            toast("导出失败：${r.exceptionOrNull()?.message?.take(40) ?: "未知原因"}")
         } else {
-            toast("已生成 ${res.first} · ${res.third} 本")
+            toast("已导出 ${res.first} · ${res.third} 本")
             showExportList()      // 重画：状态行与文件列表都要跟着变
         }
     }
