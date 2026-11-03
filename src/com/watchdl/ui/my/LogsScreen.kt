@@ -1,19 +1,15 @@
 package com.watchdl.ui.my
 
-import android.graphics.Color
-import android.view.Gravity
-import android.view.ViewGroup
 import android.widget.LinearLayout
 import com.watchdl.MainActivity
 import com.watchdl.core.DevLog
 import com.watchdl.core.Screen
-import com.watchdl.ui.theme.Icons
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
 import java.io.File
 
 /**
- * 日志（#30）：开发者日志的开关、体积、尾巴，以及导出与清空。
+ * 日志：开发者日志的开关、体积、尾巴，导出与清空在顶栏 ⋮ 里。
  *
  * 原来这些只在设置页里有一个「开/关」和一个「导出」，看不到日志本身 ——
  * 用户报「刚才点了没反应」时，人得先插线导文件才能判断，而手表插线本身很麻烦。
@@ -35,7 +31,15 @@ private class LogTail(val bytes: Long, val lines: Int, val tail: List<String>)
 internal fun MainActivity.showLogs() {
     setScreen(Screen.Logs)
     root.removeAllViews()
-    root.addView(Widgets.topBar(this, "日志", onBack = { showMy() }))
+    // 导出与清空收进 ⋮：两者都是次要动作，平铺成两个整宽按钮会吃掉 ~80dp，
+    // 而这一页的全部价值是下面的日志尾巴。legado 里「清空」也在
+    // `CrashLogSheet` 的 endAction 位置上，不是列表里的一行按钮。
+    root.addView(Widgets.topBar(
+        ctx = this,
+        title = "日志",
+        onBack = { showMy() },
+        trailing = listOf("more" to { logMenu() }),
+    ))
 
     val body = Widgets.scrollBody(this, crownStep, crownGlide)
     val col = Widgets.contentColumn(body)
@@ -48,6 +52,20 @@ internal fun MainActivity.showLogs() {
     bg(Screen.Logs, body = { readLogTail() }) { r ->
         renderLogs(col, r.getOrNull())
     }
+}
+
+/**
+ * 顶栏 ⋮：导出日志 / 清空日志。
+ *
+ * legado 的两条对应物都在别处：导出在关于页的 `SaveLog`（点了直接导），
+ * 清空在 `CrashLogSheet` 标题右侧的图标按钮。手表上顶栏放不下第二个动作，
+ * 所以两条合一进长菜单，与全站其它页的 ⋮ 一致。
+ */
+private fun MainActivity.logMenu() {
+    Widgets.longMenuDialog(this, "日志", listOf(
+        "导出日志" to { exportDevLog() },
+        "清空日志" to { askClearLog() },
+    )).show()
 }
 
 /**
@@ -80,29 +98,49 @@ private fun MainActivity.readLogTail(): LogTail? {
 private fun MainActivity.renderLogs(col: LinearLayout, tail: LogTail?) {
     col.removeAllViews()
     val on = devLogOn()
-    // 开关状态必须常驻屏上：这一页最容易出现「怎么什么都没有」，
+
+    // 开关是一行带 description 的设置行（legado `SwitchSettingItem`：
+    // 标题 + 描述 + 右侧开关），描述固定不随状态变，开关态只放 trailing。
+    // 原来是自己拿 30dp 勾拼的行，标题写着「日志：开 / 日志：关」——
+    // 标题跟着状态变，读起来像换了一个条目。
+    // 开关必须常驻屏上：这一页最容易出现「怎么什么都没有」，
     // 而原因通常就是开关没开，不是没产生日志。
-    col.addView(logToggleRow(on))
+    col.addView(Widgets.groupCard(this, "记录") { g ->
+        g.addView(Widgets.listItem(
+            ctx = this,
+            title = "记录日志",
+            subtitle = devLogHint(),
+            twoLine = true,
+            trailing = if (on) "开" else "关",
+            onClick = { toggleDevLog() },
+        ))
+        // legado 这里还有一条 record_heap_dump（生成堆转储）开关，不做：
+        // Debug.dumpHwHeap 只对 debuggable 包有效，而 .hprof 动辄几十 MB，
+        // 手表存储放不下，导到文档也没法看。
+    })
 
     if (tail == null) {
-        col.addView(Widgets.emptyState(this, "history", "还没有日志文件。\n开关打开后产生的日志会显示在这里。"))
-    } else {
-        col.addView(Widgets.sectionLabel(this, "$LOG_NAME · ${humanBytes(tail.bytes)} · ${tail.lines} 行"))
-        if (tail.tail.isEmpty()) {
-            col.addView(Widgets.emptyState(this, "history", "日志文件是空的。\n开关打开后产生的日志会显示在这里。"))
-        } else {
-            col.addView(Widgets.sectionLabel(this, "最后 ${tail.tail.size} 行"))
-            for (line in tail.tail) {
-                // 一行一条 TextView：日志是逐行读的，拼成一大段会丢掉行首的换行。
-                // 单条最长可到几百字，189dp 宽放不下，截尾比横向滚动好用。
-                col.addView(Md3.ellipsize(Md3.text(this, line, Md3.FS_SM, Md3.onSurfaceVariant)))
-            }
-        }
+        // 空态照 legado `EmptyMessage`：图标 + 一句话，且点明先看开关。
+        col.addView(Widgets.emptyState(this, "history",
+            "还没有日志文件。\n上方开关打开后产生的日志会显示在这里。"))
+        return
     }
 
-    // 两个按钮竖着放：189dp 宽的行并排放两个会把标签挤成半个字。
-    col.addView(Widgets.button(this, "导出日志", "outline") { exportDevLog() })
-    col.addView(Widgets.button(this, "清空日志", "outline") { askClearLog() })
+    col.addView(Widgets.sectionLabel(this, "$LOG_NAME · ${humanBytes(tail.bytes)} · ${tail.lines} 行"))
+    if (tail.tail.isEmpty()) {
+        col.addView(Widgets.emptyState(this, "history",
+            "日志文件是空的。\n开关打开后产生的日志会显示在这里。"))
+    } else {
+        // legado 的日志先列文件名、点开才看正文（CrashLogSheet → LogDetailSheet）。
+        // 我们只有一个 dev.log，正文直接摊在页里：手表上多一次点击换不来什么，
+        // 而「点了没反应」正是要当场看见的那件事。
+        col.addView(Widgets.sectionLabel(this, "最后 ${tail.tail.size} 行"))
+        for (line in tail.tail) {
+            // 一行一条 TextView：日志是逐行读的，拼成一大段会丢掉行首的换行。
+            // 单条最长可到几百字，189dp 宽放不下，截尾比横向滚动好用。
+            col.addView(Md3.ellipsize(Md3.text(this, line, Md3.FS_SM, Md3.onSurfaceVariant)))
+        }
+    }
 }
 
 /** 清空不可撤销，且会连带清掉内存环（崩溃前那点上下文就没了），所以要问一次。 */
@@ -117,39 +155,4 @@ private fun MainActivity.askClearLog() {
             showLogs()
         },
     ).show()
-}
-
-/**
- * 日志开关行：一行内的勾，点整行切开关。
- *
- * 原来是「一行 listItem 说状态」加「一个整宽按钮切开关」两件套，
- * 首屏先被这 96 dp 吃掉，而这一页的全部价值是下面的日志尾巴。
- * 写法照书源屏 `sourceRow` 的 30 dp 勾：开=主色，关=压到 0.3 透明。
- * 勾只做显示，点击交给整行 —— 18 dp 的图形当唯一可点区太难戳中。
- */
-private fun MainActivity.logToggleRow(on: Boolean): LinearLayout {
-    val row = Md3.row(this)
-    row.minimumHeight = Md3.dp(this, Md3.ITEM)
-    row.setPadding(Md3.dp(this, Md3.PAD * 3 / 4), 0, Md3.dp(this, Md3.PAD / 2), 0)
-    row.background = Md3.ripple(this, Color.TRANSPARENT, Md3.R_ITEM.toFloat())
-
-    val col = Md3.column(this)
-    col.addView(Md3.ellipsize(Md3.text(this, if (on) "日志：开" else "日志：关",
-        Md3.FS_MD, Md3.onSurface)).apply { alpha = if (on) 1f else 0.45f })
-    col.addView(Md3.ellipsize(Md3.text(this,
-        if (on) "只记本 App，不读系统日志" else "关闭时只打 logcat，不存盘",
-        Md3.FS_SM, Md3.onSurfaceVariant)).apply { alpha = if (on) 0.7f else 0.3f })
-    row.addView(col, LinearLayout.LayoutParams(
-        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-
-    val mark = Icons.view(this, "check", if (on) Md3.primary else Md3.onSurfaceVariant, 16)
-    mark.alpha = if (on) 1f else 0.3f
-    mark.contentDescription = if (on) "已开启" else "已关闭"
-    row.addView(mark, LinearLayout.LayoutParams(
-        Md3.dp(this, 30), Md3.dp(this, Md3.ITEM)).apply { gravity = Gravity.CENTER_VERTICAL })
-
-    row.isClickable = true
-    // toggleDevLog 自己会重画当前屏（日志页 / 设置页各画各的），这里不必再调 showLogs。
-    row.setOnClickListener { toggleDevLog() }
-    return row
 }
