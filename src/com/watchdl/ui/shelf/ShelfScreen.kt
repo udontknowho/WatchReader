@@ -529,7 +529,8 @@ internal fun MainActivity.showShelfMenu() {
         // legado 的「书架管理」是书架自身的批量管理页；我们对应的是缓存管理。
         "书架管理" to { showCache() },
         "导出书单" to { showExportList() },
-        "导入书单" to { showSources() },
+        // 与「我的」页同一处规矩：书源页返回靠返回栈，进来前要压一条。
+        "导入书单" to { rememberReturn(); showSources() },
         "日志" to { showLogs() },
     )).show()
 }

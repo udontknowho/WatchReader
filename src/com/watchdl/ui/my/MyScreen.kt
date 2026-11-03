@@ -47,7 +47,12 @@ internal fun MainActivity.showMy() {
                 glyph = glyph, onClick = action ?: { toast("$title 还没做") }))
         }
         // legado 这一项带副标题「新建 · 导入 · 编辑或管理书源」。
-        e("书源管理", "cloud", "新建 · 导入 · 编辑或管理书源") { showSources() }
+        // 书源页的返回键走 goBackToPrevious()，所以进来之前必须先压栈；
+        // 少这一句，返回会弹掉更早的一条记录，直接落到书架。
+        e("书源管理", "cloud", "新建 · 导入 · 编辑或管理书源") {
+            rememberReturn()
+            showSources()
+        }
         // 替换净化（#28）：正文的广告尾巴/求票行靠它对掉，可逐条关。
         e("替换净化", "refresh") { showReplace() }
         // 剩下三项在 legado 里各自依附一套本应用没有的体系：TXT 目录规则需要本地 TXT 导入、
@@ -69,7 +74,11 @@ internal fun MainActivity.showMy() {
             g.addView(Widgets.groupItem(ctx = this@showMy, title = title, glyph = glyph,
                 onClick = action ?: { toast("$title 还没做") }))
         }
-        e("设置", "settings") { showSettings() }
+        // 设置页顶栏同样走 goBackToPrevious()：不压栈，返回会落到书架。
+        e("设置", "settings") {
+            rememberReturn()
+            showSettings()
+        }
         // 全文搜索（#23）：搜已下载正文，离线可用，与「搜索」栏的联网找书是两回事。
         e("全文搜索", "search") { askFind() }
         e("书签", "bookmark") { showAllMarks() }
