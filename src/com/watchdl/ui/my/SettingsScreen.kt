@@ -259,11 +259,15 @@ private fun MainActivity.settingsCrown(col: LinearLayout) {
 }
 
 /**
- * 其他设置：导出、书源、关于、开发者四组，组与行都照 legado `OtherConfigScreen`。
+ * 其他设置：导出、书源、开发者三组，组与行都照 legado `OtherConfigScreen`。
  *
  * legado 的分组是「语言 / 更新 / 主界面 / 阅读 / 其他」，每项都带 description。
- * 我们没有语言、更新、主界面，留下四组，每行补一句 description ——
+ * 我们没有语言、更新、主界面，留下三组，每行补一句 description ——
  * 一句话说清点了会发生什么，比只写「版本」两字强。
+ *
+ * 原来第四组「关于」只剩一个只读的版本行，已整组删掉：版本信息归独立「关于」页
+ * （`ui/my/AboutScreen.kt`，从「我的」进）。legado 的 OtherConfigScreen 也没有
+ * 关于分组 —— 它只在 `ui/main/my/MyScreen` 里有一个 `about` 入口。
  */
 private fun MainActivity.settingsOther(col: LinearLayout) {
     col.addView(Widgets.groupCard(this, "导出") { g ->
@@ -279,12 +283,6 @@ private fun MainActivity.settingsOther(col: LinearLayout) {
         g.addView(Widgets.listItem(this, "管理书源", "启用/禁用、分组与导入", twoLine = true) {
             rememberReturn(); showSources()
         })
-    })
-
-    col.addView(Widgets.groupCard(this, "关于") { g ->
-        // 版本号从清单读，不在这里再写一份常量（会与 build.sh 不同步）。
-        // 独立「关于」页是下一步的事，本轮只把版本挪到副标题位。
-        g.addView(Widgets.listItem(this, "版本", appVersion(), twoLine = true, highlight = false) { })
     })
 
     // 开发者模式：默认关闭，关着时只有普通 logcat，不占内存不写盘。

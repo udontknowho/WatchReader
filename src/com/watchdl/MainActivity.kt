@@ -16,6 +16,7 @@ import com.watchdl.core.*
 import com.watchdl.ui.book.showDetail
 import com.watchdl.ui.book.showSwap
 import com.watchdl.ui.my.showMy
+import com.watchdl.ui.my.showAbout
 import com.watchdl.ui.my.showCache
 import com.watchdl.ui.my.showExportList
 import com.watchdl.ui.my.showFiles
@@ -278,6 +279,7 @@ class MainActivity : Activity() {
             Screen.Replace -> showReplace()
             Screen.ExportList -> showExportList()
             Screen.Logs -> showLogs()
+            Screen.About -> showAbout()
             is Screen.Swap -> showSwap(s.info, s.src)
             is Screen.Find -> showFind(s.query, s.hits, s.scanned, s.done, s.useRegex)
             Screen.Shelf -> showShelf()
@@ -1624,6 +1626,7 @@ class MainActivity : Activity() {
             Screen.Replace -> showReplace()
             Screen.ExportList -> showExportList()
             Screen.Logs -> showLogs()
+            Screen.About -> showAbout()
             is Screen.Swap -> showSwap(s.info, s.src)
             is Screen.Find -> showFind(s.query, s.hits, s.scanned, s.done, s.useRegex)
             Screen.My -> showMy()
@@ -1655,6 +1658,7 @@ class MainActivity : Activity() {
             Screen.Replace -> showMy()
             Screen.ExportList -> showMy()
             Screen.Logs -> showMy()
+            Screen.About -> showMy()
             is Screen.Swap -> goBackToPrevious()
             is Screen.Find -> showMy()
             is Screen.Detail -> goBackToPrevious()

@@ -87,6 +87,7 @@ internal fun MainActivity.showMy() {
         e("导出书单", "list") { showExportList() }
         // 日志（#30）：开发者日志的开关、体积、尾巴，导出与清空都在这。
         e("日志", "history") { showLogs() }
+        // 关于：独立成屏，结构照 legado `ui/about/AboutScreen`（头部块 + 项目组 + 日志组）。
         e("关于", "more") { showAbout() }
         // 不再放「退出」：手表上直接划掉就结束进程，单独一个按钮反而含义含糊
         // （点了退，后台下载线程还在跑）。要真停下载去作业菜单逐本停。
@@ -94,12 +95,4 @@ internal fun MainActivity.showMy() {
 
     root.addView(body, Md3.lpWeight(1f))
     attachTabs(2)
-}
-
-/** 关于：版本号从 BuildConfig 拿不到（手搓流水线不生成），直接读清单里的值。 */
-private fun MainActivity.showAbout() {
-    val v = packageManager.getPackageInfo(packageName, 0)
-    val name = v.versionName ?: "?"
-    val code = if (android.os.Build.VERSION.SDK_INT >= 28) v.longVersionCode else 0L
-    toast("WatchDownloader $name（$code）\n手表版 legado · 方向 A")
 }

@@ -132,6 +132,12 @@ sealed interface Screen {
      * 不带数据 —— 日志每时每刻在长，缓存一次就会看到过期的尾巴。
      */
     object Logs : Screen
+    /**
+     * 关于（#31）：从「我的」进来。结构照 legado `ui/about/AboutScreen`。
+     *
+     * 不带数据 —— 版本号每次进屏从清单现读，不缓存：重装后版本变了屏上要跟着变。
+     */
+    object About : Screen
     /** 「我的」页：规则与其它两组入口，照 legado `ui/main/my`。不带数据，每次进屏现读。 */
     object My : Screen
     /**
@@ -170,6 +176,7 @@ fun screenId(s: Screen?): String = when (s) {
     Screen.Replace -> "replace"
     Screen.ExportList -> "exportList"
     Screen.Logs -> "logs"
+    Screen.About -> "about"
     is Screen.Swap -> "swap:" + s.info.bookId.ifBlank { s.info.name + s.info.author }
     is Screen.Discover -> "discover:${s.rankKey}"
     is Screen.Market -> "market:${s.page}"
