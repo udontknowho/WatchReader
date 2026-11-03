@@ -574,6 +574,13 @@ class MainActivity : Activity() {
     /** 目录过滤词。空串 = 不过滤。存在 Activity 而不是 Screen 里：它只是屏内状态。 */
     internal var tocQuery = ""
     /**
+     * 目录是否倒序显示（legado 的「反转目录」）。
+     *
+     * 只改渲染顺序：章号、窗口下标、跳章仍按原序。不落盘 —— 我们没有目录级配置项，
+     * 重进目录恢复正序，代价比新造一套存储小。
+     */
+    internal var tocReversed = false
+    /**
      * 下一次进阅读页要补做的滚动。
      *
      * 书签记的是像素、正文搜索给的是字符偏移，两者都要等正文布局完成才能定位，
@@ -601,7 +608,8 @@ class MainActivity : Activity() {
         // 翻页时调用方会自己设好 tocWinStart 再进来，这里只在换书或从别处进来时重置。
         val entering = (screen as? Screen.Toc)?.info?.bookId != info.bookId
         if (entering) {
-            tocWinStart = (readProgress(info.bookId) - TOC_WINDOW / 2).coerceAtLeast(0)
+            // 倒序时同一个章号在显示顺序里的位置是镜像的，不能直接拿章号当滑动位置。
+            tocWinStart = (tocPos(info, readProgress(info.bookId)) - TOC_WINDOW / 2).coerceAtLeast(0)
         }
         setScreen(Screen.Toc(info, useSrc))
         // 换源成功后回到原来那一章：loadToc → showToc 两步都拿不到章号，只能靠标题找回。
@@ -622,13 +630,23 @@ class MainActivity : Activity() {
         root.addView(Widgets.topBar(this, info.name, onBack = { goBackToPrevious() },
             trailing = listOf(
                 "search" to { askTocQuery(info, useSrc) },
-                "more" to { showTocMenu(info) },
+                "more" to { showTocMenu(info, useSrc) },
             ),
             // legado 目录顶栏副标题就是「当前章 / 总章数」，一眼知道读到哪。
-            subtitle = "${readProgress(info.bookId) + 1} / ${info.chapters.size}"))
+            subtitle = if (info.chapters.isEmpty()) "还没有章节"
+                       else "${readProgress(info.bookId) + 1} / ${info.chapters.size}"))
 
         val body = Widgets.scrollBody(this, crownStep, crownGlide)
         val col = Widgets.contentColumn(body)
+
+        // 空目录：legado 用 EmptyMessage 收在这一屏，但手表上别处进不来 ——
+        // 只画一句「目录是空的」等于把人锁死，所以下面接一枚「更新目录」。
+        if (info.chapters.isEmpty()) {
+            col.addView(Widgets.emptyState(this, "list", "目录是空的"))
+            col.addView(Widgets.button(this, "更新目录", "tonal") { refreshTocHere(info, useSrc) })
+            root.addView(body)
+            return
+        }
 
         val free = info.chapters.count { !it.locked }
         val job = Downloader.restore(jobsStore(), info.bookId)
@@ -660,6 +678,12 @@ class MainActivity : Activity() {
         val tocMeta = listOf(info.author, "${info.chapters.size} 章", "免费 $free")
             .filter { it.isNotBlank() }.joinToString(" · ")
         card.addView(Md3.text(this, tocMeta, Md3.FS_SM, Md3.onSurfaceVariant))
+        // 目录被超时或翻页预算截断时，进度卡必须先说破：否则「下完了」的书少几十章，
+        // 用户只会当成下载漏了（legado 同样把 truncated 报在目录页）。
+        if (info.truncated) {
+            card.addView(Md3.text(this, "目录不完整，只取到 ${info.chapters.size} 章",
+                Md3.FS_SM, Md3.error))
+        }
         card.addView(Widgets.progressBar(this, if (info.total() > 0) done.toFloat() / info.total() else 0f))
         card.addView(Md3.text(this, "已下载 $done 章 · 失败 $failed 章", Md3.FS_SM, Md3.onSurfaceVariant))
         // 上次读到哪一章。不记的话，读完关掉 App 再进来只能从第一章重新找 ——
@@ -723,14 +747,23 @@ class MainActivity : Activity() {
         // 现在只渲染一个以 [tocWinStart] 为起点的窗口，两端给「往前/往后」按钮，
         // 点了换窗口重绘整个列表 —— 不做增量插入，索引不会错。
         val winStart = tocWinStart.coerceIn(0, (info.chapters.size - 1).coerceAtLeast(0))
-        val winEnd = (winStart + TOC_WINDOW - 1).coerceAtMost(info.chapters.lastIndex)
+        // 显示顺序：legado 的「反转目录」只换渲染顺序，章号、窗口下标、跳章仍按原序。
+        // 倒序时窗口从末尾算，所以基准位置也倒过来。
+        val filterHits = if (tocQuery.isBlank()) null
+                         else ReaderFind.titles(info.chapters.map { it.title }, tocQuery)
         // 过滤时不走窗口：命中数已被 ReaderFind 截住，直接给前 TOC_WINDOW 条。
         // 过滤态下不提供「前后还有 N 章」—— 那是窗口概念，和搜索结果是两回事。
-        val found = if (tocQuery.isBlank()) null
-                    else ReaderFind.titles(info.chapters.map { it.title }, tocQuery)
-        if (found != null) {
+        val seq: List<Int> = when {
+            filterHits != null -> if (tocReversed) filterHits.reversed() else filterHits
+            tocReversed -> info.chapters.indices.reversed().toList()
+            else -> info.chapters.indices.toList()
+        }
+        val base = (if (filterHits != null) 0 else winStart)
+            .coerceIn(0, (seq.size - 1).coerceAtLeast(0))
+        val shown = seq.subList(base, (base + TOC_WINDOW).coerceAtMost(seq.size))
+        if (filterHits != null) {
             val head = Md3.row(this)
-            head.addView(Md3.ellipsize(Md3.text(this, "「$tocQuery」命中 ${found.size} 章",
+            head.addView(Md3.ellipsize(Md3.text(this, "命中 ${seq.size} 章 · “$tocQuery”",
                 Md3.FS_SM, Md3.onSurfaceVariant)),
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             head.addView(Md3.text(this, "清空", Md3.FS_SM, Md3.primary, bold = true).apply {
@@ -743,14 +776,11 @@ class MainActivity : Activity() {
         }
         // 列表锚点必须在过滤头之后取：前面每加一个子项，下标就往后错一位。
         val listAnchor = col.childCount
-        val shown = (found ?: (winStart..winEnd).toList()).take(TOC_WINDOW)
-        if (found == null) {
-            if (winStart > 0) {
-                col.addView(Widgets.button(this, "↑ 前面还有 $winStart 章", "text") {
-                    tocWinStart = (winStart - TOC_WINDOW).coerceAtLeast(0)
-                    showToc(info, src)
-                })
-            }
+        if (filterHits == null && base > 0) {
+            col.addView(Widgets.button(this, "↑ 上面还有 $base 章", "text") {
+                tocWinStart = (base - TOC_WINDOW).coerceAtLeast(0)
+                showToc(info, src)
+            })
         }
         for (i in shown) {
             val ch = info.chapters[i]
@@ -761,20 +791,26 @@ class MainActivity : Activity() {
                 st == ChapterStatus.FAILED -> "✗" to Md3.error
                 else -> null to Md3.onSurfaceVariant
             }
-            col.addView(Widgets.chapterItem(this, i + 1, ch.title, mark, color,
+            val item = Widgets.chapterItem(this, i + 1, ch.title, mark, color,
                 highlight = i == lastRead) {
                 if (ch.locked) toast("这是付费章，取不到正文") else preview(info, i)
-            })
+            }
+            // 长按 = 单章动作菜单（legado 是长按进多选，这里压成一页，理由见 showChapterMenu）。
+            item.setOnLongClickListener {
+                showChapterMenu(info, useSrc, i, st == ChapterStatus.DONE)
+                true
+            }
+            col.addView(item)
         }
-        if (found != null) {
+        if (filterHits != null) {
             if (shown.isEmpty()) {
-                col.addView(Widgets.emptyState(this, "search", "没有标题含「$tocQuery」的章"))
+                col.addView(Widgets.emptyState(this, "search", "没找到含“$tocQuery”的章节"))
             }
         } else {
-            val rest = info.chapters.size - 1 - winEnd
+            val rest = seq.size - base - shown.size
             if (rest > 0) {
-                col.addView(Widgets.button(this, "↓ 后面还有 $rest 章", "text") {
-                    tocWinStart = winEnd + 1
+                col.addView(Widgets.button(this, "↓ 下面还有 $rest 章", "text") {
+                    tocWinStart = base + shown.size
                     showToc(info, src)
                 })
             }
@@ -1094,13 +1130,86 @@ class MainActivity : Activity() {
         DownloadService.start(this, info, freeOnly = true)
     }
 
-    private fun showTocMenu(info: BookInfo) {
+    /**
+     * 目录页 ⋮。项目顺序照 legado 的目录菜单：先排序与刷新，再定位与跳转，最后书签/导出。
+     *
+     * 六项在 248 dp 上一屏放不下（46 dp 一行，加标题与关闭已经过界），
+     * 所以走整屏长菜单 —— 与书源、书架、搜索的 ⋮ 同一套骨架。
+     */
+    private fun showTocMenu(info: BookInfo, src: BookSource?) {
         val marks = BookmarkStore.forBook(info.bookId).size
-        Widgets.menuDialog(this, null, listOf(
-            "跳章" to { showJumpDialog(info, tocSrc) },
+        val lastRead = readProgress(info.bookId)
+        Widgets.longMenuDialog(this, "目录", listOf(
+            (if (tocReversed) "取消倒序" else "目录倒序") to {
+                tocReversed = !tocReversed
+                // 换序后把窗口重新对准正在读的章：否则同一个位置换成镜像后是另一章。
+                tocWinStart = (tocPos(info, readProgress(info.bookId)) - TOC_WINDOW / 2)
+                    .coerceAtLeast(0)
+                showToc(info, src)
+            },
+            "更新目录" to { refreshTocHere(info, src) },
+            "回到第 ${lastRead + 1} 章" to {
+                tocWinStart = (tocPos(info, lastRead) - TOC_WINDOW / 2).coerceAtLeast(0)
+                showToc(info, src)
+            },
+            "跳到第几章" to { showJumpDialog(info, src) },
             "书签（$marks）" to { showMarks(info) },
             "导出 TXT" to { exportTxt(info) },
         )).show()
+    }
+
+    /** 章号 → 当前显示顺序里的位置（倒序时镜像）。窗口与「回到当前章」都靠它换算。 */
+    private fun tocPos(info: BookInfo, index: Int): Int =
+        if (tocReversed) info.chapters.size - 1 - index else index
+
+    /**
+     * 目录行长按：单章菜单。
+     *
+     * legado 长按是进多选，再批量下载或加书签。248 dp 高的屏放不下选择底栏（需要 48 dp），
+     * 而服务端下载本来就只吃一串下标（见 [DownloadService.start] 的 indexes），
+     * 所以把「多选」压成一页：单章与「从这章起」两种粒度已覆盖多选要干的事。
+     */
+    private fun showChapterMenu(info: BookInfo, src: BookSource?, index: Int, done: Boolean) {
+        val ch = info.chapters.getOrNull(index) ?: return
+        if (ch.locked) { toast("第 ${index + 1} 章是付费章，取不到正文"); return }
+        val items = mutableListOf<Pair<CharSequence, () -> Unit>>()
+        if (!done) items.add("下载这一章" to { downloadTocFrom(info, index, fromHere = false) })
+        items.add("从这一章起下载" to { downloadTocFrom(info, index, fromHere = true) })
+        Widgets.menuDialog(this, "第 ${index + 1} 章", items).show()
+    }
+
+    /**
+     * 只交下标，不拼章节表：目录已落在 job.json 里，服务自己会读。
+     * 这样单章下载也不会撞 Binder 的 1 MB 限（同缓存页的补一章）。
+     */
+    private fun downloadTocFrom(info: BookInfo, index: Int, fromHere: Boolean) {
+        val running = DownloadService.runningBookId
+        if (running != null && running != info.bookId) {
+            toast("正在下载另一本，等它下完再试"); return
+        }
+        val idx = if (fromHere) (index until info.chapters.size).toList() else listOf(index)
+        DownloadService.start(this, info, freeOnly = true, indexes = idx)
+        toast(if (fromHere) "从第 ${index + 1} 章起交后台下载" else "第 ${index + 1} 章交后台下载")
+    }
+
+    /** 目录原地更新：取回新目录后重画这一屏，停在目录页（对应 legado 的「更新目录」）。 */
+    private fun refreshTocHere(info: BookInfo, src: BookSource?) {
+        val useSrc = src ?: tocSrc ?: source
+        toast("正在更新目录…")
+        bg(Screen.Toc(info, src), { useSrc.toc(info.bookId, info.name, info.author) }) { res ->
+            res.onSuccess { got ->
+                if (got.chapters.isEmpty()) {
+                    toast("目录是空的，这条源可能失效了")
+                    return@onSuccess
+                }
+                toast("目录已更新：${got.chapters.size} 章")
+                showToc(info.copy(
+                    chapters = got.chapters,
+                    truncated = got.truncated,
+                    intro = got.intro.ifBlank { info.intro },
+                ), useSrc)
+            }.onFailure { toast("目录失败：${it.message}") }
+        }
     }
 
     /**
@@ -1182,7 +1291,7 @@ class MainActivity : Activity() {
         fun go() {
             val idx = (num.text.toString().toIntOrNull() ?: pick).coerceIn(1, total) - 1
             // 先把目录窗口挪到目标章附近：从阅读页返回时直接落在这一页。
-            tocWinStart = (idx - TOC_WINDOW / 2).coerceAtLeast(0)
+            tocWinStart = (tocPos(info, idx) - TOC_WINDOW / 2).coerceAtLeast(0)
             val ch = info.chapters[idx]
             if (ch.locked) { toast("第 ${idx + 1} 章是付费章，取不到正文"); showToc(info, src) }
             else preview(info, idx)
