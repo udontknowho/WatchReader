@@ -1,10 +1,13 @@
 package com.watchdl.ui.shelf
 
+import android.content.Context
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
 import com.watchdl.MainActivity
 import com.watchdl.core.*
 import com.watchdl.ui.attachTabs
@@ -38,6 +41,58 @@ internal object ShelfUi {
     /** 是否处于多选模式（legado `isEditMode`）。 */
     var selecting = false
 
+    // ── 布局与显示项（legado `BookshelfSettings` 里能落到 189 dp 上的那几条）──
+    //
+    // 落盘走既有的全局偏好桶 SharedPreferences("reader")：主题、字号、表冠灵敏度
+    // 都在这一个桶里，不再新造存储机制。legado 那边这些开关存在 BookshelfSettings。
+
+    /** 封面墙 / 列表两档。legado `bookshelfLayoutModePortrait`（0 列表、1 网格）。 */
+    var grid = true
+
+    /** 排序键，见 [ShelfSort]。 */
+    var sort = ShelfSort.RECENT
+
+    /** 排序方向：true = 倒序（legado `bookshelfSortOrder` = 1）。 */
+    var sortDesc = true
+
+    /** 书名最多几行（legado `bookshelfTitleMaxLines`，我们只给 1 / 2 两档）。 */
+    var titleLines = 2
+
+    /** 封面未读角标（legado `showUnread`）。 */
+    var showUnread = true
+
+    /** 封面左下角来源标签（legado `showTip`）。 */
+    var showTag = true
+
+    /** 有新章的圆点（legado `showUnreadNew`）。 */
+    var showNew = true
+
+    /** 「更新目录」跑着时的一行提示；null = 不在更新。 */
+    var updating: String? = null
+
+    fun load(ctx: Context) {
+        val p = ctx.getSharedPreferences("reader", Context.MODE_PRIVATE)
+        grid = p.getBoolean("shelfGrid", true)
+        sort = p.getInt("shelfSort", ShelfSort.RECENT)
+        sortDesc = p.getBoolean("shelfSortDesc", ShelfSort.defaultDesc(sort))
+        titleLines = p.getInt("shelfTitleLines", 2).coerceIn(1, 2)
+        showUnread = p.getBoolean("shelfShowUnread", true)
+        showTag = p.getBoolean("shelfShowTag", true)
+        showNew = p.getBoolean("shelfShowNew", true)
+    }
+
+    fun save(ctx: Context) {
+        ctx.getSharedPreferences("reader", Context.MODE_PRIVATE).edit()
+            .putBoolean("shelfGrid", grid)
+            .putInt("shelfSort", sort)
+            .putBoolean("shelfSortDesc", sortDesc)
+            .putInt("shelfTitleLines", titleLines)
+            .putBoolean("shelfShowUnread", showUnread)
+            .putBoolean("shelfShowTag", showTag)
+            .putBoolean("shelfShowNew", showNew)
+            .apply()
+    }
+
     /** 选中的 bookId。用 LinkedHashSet：顺序按点击先后，删除确认里列书名才稳定。 */
     val selected = linkedSetOf<String>()
 
@@ -58,8 +113,18 @@ internal object ShelfUi {
 internal fun MainActivity.progressTail(done: Int, total: Int, failed: Int): String =
     if (failed > 0) "$done/$total 章 · 失败 $failed" else "$done/$total 章"
 
-/** 书架一行：作业快照 + 封面左下角标签（书源名，没有就给「本地」）。 */
-internal class ShelfRow(val job: BookJob, val sourceTag: String)
+/**
+ * 书架一行：作业快照 + 封面左下角标签（书源名，没有就给「本地」）。
+ *
+ * [updatedAt] 是 job.json 里的「最近一次写入」时刻，排序「按更新时间」用它；
+ * [newCount] 是上次「更新目录」查出的新章数，卡片上的圆点用它。
+ */
+internal class ShelfRow(
+    val job: BookJob,
+    val sourceTag: String,
+    val updatedAt: Long = 0L,
+    val newCount: Int = 0,
+)
 
 /**
  * 书架数据：已下载的书，最近读过的在前。
@@ -87,11 +152,33 @@ internal fun MainActivity.shelfRows(): List<ShelfRow> {
         val tag = shelfSourceTag(
             TinyJson.path(raw, "originName") ?: TinyJson.path(raw, "sourceName"))
         Triple(dir, id, tag)
-    }.sortedByDescending { (dir, id, _) ->
-        readTime(id).takeIf { it > 0 } ?: dir.lastModified()
     }
-    return entries.mapNotNull { (_, id, tag) ->
-        Downloader.restoreLight(jobsStore(), id)?.let { ShelfRow(it, tag) }
+    // 排序键：书名/作者从轻量快照拿，时间从 job.json 的 updatedAt 与阅读记录拿。
+    // 四样都在这一轮读盘里带出，排序不再回读任何文件 —— 快照同时缓存下来，
+    // 后面组行直接取，一本书只 `restoreLight` 一次（3000 章的 job.json 解析不便宜）。
+    val lights = LinkedHashMap<String, BookJob>(entries.size * 2)
+    val sortKeys = HashMap<String, ShelfSortKey>(entries.size * 2)
+    for ((dir, id, _) in entries) {
+        val light = Downloader.restoreLight(jobsStore(), id) ?: continue
+        lights[id] = light
+        val stamp = runCatching { File(dir, "job.json").readText() }
+            .getOrNull()?.let { TinyJson.path(it, "updatedAt")?.toLongOrNull() }
+            ?: dir.lastModified()
+        sortKeys[id] = ShelfSortKey(
+            name = light.name,
+            author = light.author,
+            updatedAt = stamp,
+            lastRead = readTime(id),
+        )
+    }
+    fun keyOf(id: String) = sortKeys[id] ?: ShelfSortKey("", "", 0L, 0L)
+    return entries.sortedWith { a, b ->
+        val c = shelfCompare(keyOf(a.second), keyOf(b.second), ShelfUi.sort)
+        if (ShelfUi.sortDesc) -c else c
+    }.mapNotNull { (_, id, tag) ->
+        lights[id]?.let {
+            ShelfRow(it, tag, keyOf(id).updatedAt, shelfNewCount(id))
+        }
     }
 }
 
@@ -116,6 +203,7 @@ private fun MainActivity.bodyScrollOf(): Int {
  */
 internal fun MainActivity.showShelf(keepScroll: Boolean = false) {
     setScreen(Screen.Shelf)
+    ShelfUi.load(this)
     // 切选择模式会重画整屏；不带回滚动位置，用户在第三屏长按一下就被弹回顶。
     val scrollY = if (keepScroll) bodyScrollOf() else 0
     root.removeAllViews()
@@ -142,7 +230,8 @@ internal fun MainActivity.showShelf(keepScroll: Boolean = false) {
             )))
         // legado 顶栏副标题 `uiState.subtitle`。我们的 headerRow 只有一行标题位，
         // 副标题单独占一行（FS_SM）。189 dp 上「N 本 · 在读 M」约 90 dp，一行放得下。
-        root.addView(shelfSubtitle(shelfSubtitle(
+        // 「更新目录」跑着时这一行改成进度：网络活没有别的着落处。
+        root.addView(shelfSubtitle(ShelfUi.updating ?: shelfSubtitle(
             books.size, books.count { readProgress(it.bookId) > 0 })))
     }
 
@@ -156,7 +245,7 @@ internal fun MainActivity.showShelf(keepScroll: Boolean = false) {
         return
     }
 
-    if (!shelfGrid) {
+    if (!ShelfUi.grid) {
         // 列表档：一行一本，书名 + 作者/在读章 + 最新章。章数多的书想知道下到哪了就看这一档。
         for (row in rows) {
             val job = row.job
@@ -177,7 +266,7 @@ internal fun MainActivity.showShelf(keepScroll: Boolean = false) {
                 highlight = ShelfUi.selected.contains(job.bookId),
                 trailing = "more", onTrailingClick = { showJobMenu(job) }) {
                 if (ShelfUi.selecting) toggleShelfSelection(job)
-                else openBook(job.bookId, displayName, job.author)
+                else openShelfBook(job.bookId, displayName, job.author)
             }
             if (latest != null) {
                 // listItem 只画两行。第三行（最新章节）直接挂在它返回的竖排容器上，
@@ -371,7 +460,7 @@ private fun MainActivity.shelfCard(row: ShelfRow): LinearLayout {
     }
     card.setOnClickListener {
         if (ShelfUi.selecting) toggleShelfSelection(job)
-        else openBook(job.bookId, displayName, job.author)
+        else openShelfBook(job.bookId, displayName, job.author)
     }
     card.setOnLongClickListener {
         // legado 长按在浏览态是进详情页（它另有「选择模式」菜单项）；
@@ -394,10 +483,10 @@ private fun MainActivity.shelfCard(row: ShelfRow): LinearLayout {
     cover.addView(glyph, FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
-    // 未读角标：legado 放在封面 TopEnd（`Alignment.TopEnd`）。
+    // 未读角标：legado 放在封面 TopEnd（`Alignment.TopEnd`），且受 `showUnread` 开关控制。
     // 不按「右下角」摆：47 dp 宽的封面左下角已被来源标签占住，两个牌并排会叠。
     val unread = shelfUnreadCount(job.total, readProgress(job.bookId))
-    shelfBadgeText(unread)?.let { text ->
+    if (ShelfUi.showUnread) shelfBadgeText(unread)?.let { text ->
         val badge = Md3.text(this, text, 8f, Md3.onSecondaryContainer, bold = true).apply {
             gravity = Gravity.CENTER
             background = Md3.bg(Md3.secondaryContainer, 3f)
@@ -417,19 +506,34 @@ private fun MainActivity.shelfCard(row: ShelfRow): LinearLayout {
 
     // 来源标签：legado `Alignment.BottomStart`，底色取卡片容器色。
     // 47 dp 宽减去两个 1 dp 边距只剩 45 dp，8 sp 下正好 4 个汉字。
-    val tag = Md3.text(this, row.sourceTag, 8f, Md3.onSurfaceVariant).apply {
-        background = Md3.bg(Md3.surface3, 3f)
-        setPadding(Md3.dp(this@shelfCard, 1), 0, Md3.dp(this@shelfCard, 1), 0)
-        maxWidth = Md3.dp(this@shelfCard, coverW - 2)
-        isSingleLine = true
-        ellipsize = android.text.TextUtils.TruncateAt.END
+    // 受 `showTip` 控制（legado 那个开关管的就是这个类型标签）。
+    if (ShelfUi.showTag) {
+        val tag = Md3.text(this, row.sourceTag, 8f, Md3.onSurfaceVariant).apply {
+            background = Md3.bg(Md3.surface3, 3f)
+            setPadding(Md3.dp(this@shelfCard, 1), 0, Md3.dp(this@shelfCard, 1), 0)
+            maxWidth = Md3.dp(this@shelfCard, coverW - 2)
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        cover.addView(tag, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM or Gravity.START).apply {
+            leftMargin = Md3.dp(this@shelfCard, 1)
+            bottomMargin = Md3.dp(this@shelfCard, 1)
+        })
     }
-    cover.addView(tag, FrameLayout.LayoutParams(
-        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        Gravity.BOTTOM or Gravity.START).apply {
-        leftMargin = Md3.dp(this@shelfCard, 1)
-        bottomMargin = Md3.dp(this@shelfCard, 1)
-    })
+
+    // 更新圆点：legado `showBadgeDot`（`showUnread && showUnreadNew && book.isNew`）。
+    // 上次「更新目录」查出新章就点一下。未读角标在右上，圆点放左上，两者不抢位。
+    if (ShelfUi.showNew && row.newCount > 0) {
+        cover.addView(View(this).apply {
+            background = Md3.bg(Md3.primary, 3f)
+        }, FrameLayout.LayoutParams(
+            Md3.dp(this, 6), Md3.dp(this, 6), Gravity.TOP or Gravity.START).apply {
+            topMargin = Md3.dp(this@shelfCard, 2)
+            leftMargin = Md3.dp(this@shelfCard, 2)
+        })
+    }
 
     // 选中遮罩：legado 只换卡片底色，手表上认不出，所以封面上再压一层
     // 半透明 secondaryContainer 加一枚勾。
@@ -448,11 +552,11 @@ private fun MainActivity.shelfCard(row: ShelfRow): LinearLayout {
     card.addView(cover, LinearLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, coverH)))
 
-    // 书名：居中、最多两行（legado `titleCenter` / `titleMaxLines`）。
+    // 书名：居中、最多 [ShelfUi.titleLines] 行（legado `titleCenter` / `titleMaxLines`）。
     // 47 dp 三列下每行 3 个汉字，两行 6 个字，中文书名基本够。
     val title = Md3.text(this, displayName, Md3.FS_SM, Md3.onSurface).apply {
         gravity = Gravity.CENTER
-        maxLines = 2
+        maxLines = ShelfUi.titleLines
         ellipsize = android.text.TextUtils.TruncateAt.END
         setPadding(0, Md3.dp(this@shelfCard, Md3.GAP / 2), 0, 0)
     }
@@ -504,7 +608,7 @@ internal fun MainActivity.shelfColor(job: BookJob): Int {
  * 选择模式 / 书架管理 / 导出书单 / 导入书单 / 日志。
  *
  * 我们只做下载和本地文件，没有书源导入、书单、分组、WebDav 这些东西。
- * 照 legado 的排位保留全部条目：能接的接上（布局设置 / 添加网址 / 选择模式 /
+ * 照 legado 的排位保留全部条目：能接的接上（更新目录 / 布局设置 / 添加网址 / 选择模式 /
  * 书架管理 / 导出书单 / 日志），接不上的点一下说清缺什么，
  * 保留占位优于删条目 —— 删了就看不出这一屏还差哪些能力。
  */
@@ -515,11 +619,8 @@ internal fun MainActivity.showShelfMenu() {
         "远程书籍" to todo("远程书籍", "要 WebDav，本版只有本机目录"),
         // legado 的「添加本地」走 SAF 文件选择器，手表上没有可用的选择器。
         "添加本地" to todo("添加本地", "手表上没有文件选择器"),
-        "更新目录" to todo("更新目录", "去书页重新取一次目录"),
-        "布局设置" to {
-            shelfGrid = !shelfGrid
-            showShelf()
-        },
+        "更新目录" to { refreshShelfTocs() },
+        "布局设置" to { showShelfLayoutSheet() },
         "分组管理" to todo("分组管理", "本应用没有书单分组"),
         "添加网址" to { askKeyword() },
         "选择模式" to {
@@ -533,4 +634,222 @@ internal fun MainActivity.showShelfMenu() {
         "导入书单" to { rememberReturn(); showSources() },
         "日志" to { showLogs() },
     )).show()
+}
+
+// ══════════════════ 新章计数 ══════════════════
+
+/**
+ * 上次「更新目录」在这本书上查出的新章数，圆点用它（legado `Book.lastCheckCount`）。
+ *
+ * 存既有偏好桶（键 `new_<bookId>`）。bookId 是完整链接，做键要转义 `%` `/` 之类，
+ * 直接拼进键名里 SharedPreferences 能存（键就是个字符串），不做净化。
+ */
+internal fun MainActivity.shelfNewCount(bookId: String): Int =
+    getSharedPreferences("reader", Context.MODE_PRIVATE).getInt("new_$bookId", 0)
+
+internal fun MainActivity.setShelfNewCount(bookId: String, n: Int) {
+    getSharedPreferences("reader", Context.MODE_PRIVATE).edit()
+        .putInt("new_$bookId", n.coerceAtLeast(0)).apply()
+}
+
+/** 点卡片进目录。顺手清掉新章圆点 —— legado 翻开书也清 `lastCheckCount`。 */
+private fun MainActivity.openShelfBook(bookId: String, name: String, author: String) {
+    if (shelfNewCount(bookId) > 0) setShelfNewCount(bookId, 0)
+    openBook(bookId, name, author)
+}
+
+// ══════════════════ 布局设置 ══════════════════
+
+/**
+ * 布局设置。legado 是 `BookshelfConfigSheet`（六组分区、六百多行）。
+ *
+ * 手表上只取能落地的子集：
+ * - **布局**（列表/网格）、**顺序**（升序/倒序）、**书名行数**、**未读角标**、
+ *   **来源标签**、**更新提示** —— 一行两枚档位，点了就地切；
+ * - **排序**有四个值，一行放不下四枚档位，改成「一行显示当前值 + 点开选择」，
+ *   这正是 legado 里那个下拉控件的交互（`DropdownSettingItem`）。
+ *
+ * 高度预算：189×248 dp 上对话框内边距 16×2 + 标题 28 + 间距 12 + 内容 120 + 按钮 40 = 244 dp，
+ * 所以内容区固定 120 dp 内部滚动（约四行），再高会把按钮挤出屏外。
+ *
+ * 没做的三档：分组、封面形状（`grid_style`）、字号缩放。前两个要分组体系与封面位图，
+ * 我们封面是生成的占位卡片；字号缩放与全局主题字号冲突，不在这里造第二套。
+ */
+internal fun MainActivity.showShelfLayoutSheet() {
+    fun save() {
+        ShelfUi.save(this)
+        showShelf(keepScroll = true)
+    }
+
+    val col = Md3.column(this)
+    /** 当前页的选中态刷新集合：改一项就地重画，不重建对话框。 */
+    var refreshers: List<() -> Unit> = emptyList()
+
+    /** 档位行：标签 + 若干等宽档，样式与阅读设置同一套（填充 primary + 深字）。 */
+    fun seg(label: String, options: List<Pair<String, Boolean>>, get: () -> Boolean, set: (Boolean) -> Unit) {
+        val row = Md3.row(this).apply { setPadding(0, Md3.dp(this@showShelfLayoutSheet, 3), 0, 0) }
+        row.addView(Md3.text(this, label, Md3.FS_SM, Md3.onSurfaceVariant),
+            LinearLayout.LayoutParams(Md3.dp(this, 44), ViewGroup.LayoutParams.WRAP_CONTENT))
+        val chips = mutableListOf<Pair<TextView, Boolean>>()
+        options.forEachIndexed { i, opt ->
+            val chip = Md3.text(this, opt.first, Md3.FS_SM, Md3.onSurfaceVariant).apply {
+                gravity = Gravity.CENTER
+                isClickable = true
+                setOnClickListener {
+                    set(opt.second)
+                    save()
+                    refreshers.forEach { r -> r() }
+                }
+            }
+            chips.add(chip to opt.second)
+            row.addView(chip, LinearLayout.LayoutParams(0, Md3.dp(this, 26), 1f).apply {
+                leftMargin = if (i == 0) 0 else Md3.dp(this@showShelfLayoutSheet, 4)
+            })
+        }
+        col.addView(row)
+        refreshers = refreshers + {
+            val cur = get()
+            chips.forEach { pair ->
+                val sel = pair.second == cur
+                pair.first.setTypeface(null,
+                    if (sel) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+                pair.first.setTextColor(if (sel) Md3.onPrimary else Md3.onSurfaceVariant)
+                pair.first.background = Md3.ripple(this,
+                    if (sel) Md3.primary else android.graphics.Color.TRANSPARENT,
+                    Md3.dp(this, 13).toFloat(),
+                    if (sel) null else Md3.outlineVariant)
+            }
+        }
+    }
+
+    /** 排序行：标签 + 当前值，点一下开选择框（legado 的 DropdownSettingItem）。 */
+    fun sortRow() {
+        val row = Md3.row(this).apply { setPadding(0, Md3.dp(this@showShelfLayoutSheet, 3), 0, 0) }
+        row.addView(Md3.text(this, "排序", Md3.FS_SM, Md3.onSurfaceVariant),
+            LinearLayout.LayoutParams(Md3.dp(this, 44), ViewGroup.LayoutParams.WRAP_CONTENT))
+        val value = Md3.text(this, "", Md3.FS_SM, Md3.onSurface).apply {
+            gravity = Gravity.CENTER
+            background = Md3.ripple(this@showShelfLayoutSheet, Md3.surface4,
+                Md3.dp(this@showShelfLayoutSheet, 13).toFloat(), Md3.outlineVariant)
+            isClickable = true
+            setOnClickListener {
+                Widgets.menuDialog(this@showShelfLayoutSheet, "排序",
+                    ShelfSort.keys.map { key -> ShelfSort.label(key) to {
+                        ShelfUi.sort = key
+                        // 换键给一个说得通的方向：时间新的在前，名字从 A 到 Z。
+                        // 不这么做的话「按书名」会先落到倒序，用户第一眼就是乱的。
+                        ShelfUi.sortDesc = ShelfSort.defaultDesc(key)
+                        save()
+                        refreshers.forEach { r -> r() }
+                    } }).show()
+            }
+        }
+        row.addView(value, LinearLayout.LayoutParams(0, Md3.dp(this, 26), 1f))
+        col.addView(row)
+        refreshers = refreshers + { value.text = ShelfSort.label(ShelfUi.sort) }
+    }
+
+    sortRow()
+    seg("布局", listOf("列表" to false, "网格" to true), { ShelfUi.grid }) { ShelfUi.grid = it }
+    seg("顺序", listOf("正序" to false, "倒序" to true), { ShelfUi.sortDesc }) { ShelfUi.sortDesc = it }
+    seg("书名", listOf("1 行" to false, "2 行" to true), { ShelfUi.titleLines >= 2 }) {
+        ShelfUi.titleLines = if (it) 2 else 1
+    }
+    seg("未读", listOf("关" to false, "开" to true), { ShelfUi.showUnread }) { ShelfUi.showUnread = it }
+    seg("来源", listOf("关" to false, "开" to true), { ShelfUi.showTag }) { ShelfUi.showTag = it }
+    seg("新章", listOf("关" to false, "开" to true), { ShelfUi.showNew }) { ShelfUi.showNew = it }
+    refreshers.forEach { r -> r() }
+
+    // 内容区固定 120 dp 内部滚动：七行约 210 dp，直接塞进对话框会把按钮顶出屏外。
+    // 外面套一层定高 FrameLayout —— md3Dialog 会给 content 重设 LayoutParams，
+    // 把高度写在 ScrollView 上会被覆盖，写在容器里才管用。
+    val scroller = ScrollView(this).apply {
+        isVerticalScrollBarEnabled = false
+        addView(col)
+    }
+    val page = FrameLayout(this).apply {
+        addView(scroller, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this@showShelfLayoutSheet, 120)))
+    }
+    Widgets.md3Dialog(this, "布局设置", content = page,
+        confirm = "完成", dismiss = null).show()
+}
+
+// ══════════════════ 更新目录 ══════════════════
+
+/**
+ * 「更新目录」：照 legado `RefreshTocUseCase` 逐本重取目录，但**只追加新章**。
+ *
+ * 为什么不是整表替换（legado 的做法）：我们的正文按 itemId 存在 chapters.jsonl，
+ * 整表换掉等于让已下正文对不上章号。见 [mergeShelfCatalog]。
+ *
+ * 失败一本不影响别的：连载书里常有一两本源挂掉，用户要的是「能更的都更了」。
+ */
+internal fun MainActivity.refreshShelfTocs() {
+    val rows = shelfRows()
+    if (rows.isEmpty()) { toast("书架是空的"); return }
+    ShelfUi.updating = "正在更新目录 0/${rows.size}"
+    showShelf(keepScroll = true)
+    bg(Screen.Shelf, {
+        var grew = 0
+        var failed = 0
+        var added = 0
+        rows.forEachIndexed { i, row ->
+            val src = sourceForBook(row.job.bookId)
+            val got = if (src == null) null else runCatching {
+                src.toc(row.job.bookId, row.job.name, row.job.author)
+            }.getOrNull()
+            if (got == null || got.chapters.isEmpty()) {
+                failed++
+            } else {
+                val merged = mergeShelfCatalog(
+                    jobsStore().readJob(row.job.bookId).orEmpty(), got.chapters)
+                if (merged == null) {
+                    // 没有新章：上一轮的计数作废，圆点要跟着灭。
+                    if (shelfNewCount(row.job.bookId) > 0) setShelfNewCount(row.job.bookId, 0)
+                } else if (runCatching {
+                        jobsStore().writeJob(row.job.bookId, merged.json)
+                    }.isSuccess) {
+                    setShelfNewCount(row.job.bookId, merged.added)
+                    grew++
+                    added += merged.added
+                } else {
+                    failed++
+                }
+            }
+            ShelfUi.updating = "正在更新目录 ${i + 1}/${rows.size}"
+        }
+        Triple(grew, added, failed)
+    }) { res ->
+        ShelfUi.updating = null
+        res.onSuccess { (grew, added, failed) ->
+            val tail = if (failed > 0) "，$failed 本失败" else ""
+            toast(when {
+                grew > 0 -> "更新完成：$grew 本共新增 $added 章$tail"
+                failed > 0 -> "更新完成：没有新章$tail"
+                else -> "全部已是最新"
+            })
+        }.onFailure { toast("更新失败：${it.message}") }
+        showShelf(keepScroll = true)
+    }
+}
+
+/**
+ * 这本书该用哪个源取目录。
+ *
+ * 与 `DownloadService.resolveSource` 同一判据：链接以源主机开头就算这本归它。
+ * 走 [multi] 而不是重读书源目录，是因为 `multi` 里已经把 `DeviceRegister` 起好，
+ * 番茄源的构造依赖它。
+ */
+private fun MainActivity.sourceForBook(bookId: String): BookSource? {
+    val pool = runCatching { multi.allNamed() }.getOrNull().orEmpty()
+    if (bookId.startsWith("http", ignoreCase = true)) {
+        val host = pool.firstOrNull { ns ->
+            val h = ns.host.trimEnd('/')
+            h.isNotBlank() && bookId.startsWith(h, ignoreCase = true)
+        }
+        if (host != null) return host.source
+    }
+    // 番茄的 bookId 是纯数字，不带主机；池子里第一个就是它（buildMulti 先加）。
+    return pool.firstOrNull { it.name == "番茄" }?.source ?: pool.firstOrNull()?.source
 }

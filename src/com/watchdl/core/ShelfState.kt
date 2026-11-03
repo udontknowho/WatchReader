@@ -97,3 +97,117 @@ fun shelfPruneSelection(selected: MutableSet<String>, alive: Collection<String>)
     selected.retainAll(keep)
     return selected.isNotEmpty()
 }
+
+// ══════════════════ 排序（legado BookshelfConfigSheet 的「排序 / 顺序」） ══════════════════
+
+/**
+ * 排序键。数值照 legado `BookshelfRepository.sortBooks`：
+ * 0 = 最近阅读、1 = 更新时间、2 = 书名、5 = 作者。
+ *
+ * 3（手动拖）与 4（综合）不做：前者要拖拽排序并落盘 order 字段，
+ * 我们连 order 都没存过；后者与 1 在只有下载作业的书上结果一样。
+ */
+object ShelfSort {
+    const val RECENT = 0
+    const val UPDATED = 1
+    const val NAME = 2
+    const val AUTHOR = 5
+
+    /** 菜单里能选的键，顺序与 legado 的 bookshelf_px_array 一致。 */
+    val keys = listOf(RECENT, UPDATED, NAME, AUTHOR)
+
+    fun label(sort: Int): String = when (sort) {
+        UPDATED -> "更新时间"
+        NAME -> "书名"
+        AUTHOR -> "作者"
+        else -> "最近阅读"
+    }
+
+    /** 换键时给的默认方向：时间类倒序（新的在前），名字类正序。 */
+    fun defaultDesc(sort: Int): Boolean = sort == RECENT || sort == UPDATED
+}
+
+/** 排序比对用的四个字段。书架读盘时顺手取出，排序不再回读 job.json。 */
+data class ShelfSortKey(
+    val name: String,
+    val author: String,
+    val updatedAt: Long,
+    val lastRead: Long,
+)
+
+/**
+ * 中文按拼音比，照 legado 的 `cnCompare`（那边用 Collator）。
+ * 直接 `String.compareTo` 是码点序，「阿」会排到「张」后面。
+ */
+private val shelfCollator: java.text.Collator by lazy {
+    java.text.Collator.getInstance(java.util.Locale.CHINA)
+        .apply { strength = java.text.Collator.PRIMARY }
+}
+
+/** 升序比较。倒序由调用处取反，与 legado 的 `isDescending` 一个路子。 */
+fun shelfCompare(a: ShelfSortKey, b: ShelfSortKey, sort: Int): Int = when (sort) {
+    ShelfSort.UPDATED -> a.updatedAt.compareTo(b.updatedAt)
+    ShelfSort.NAME -> shelfCollator.compare(a.name, b.name)
+    ShelfSort.AUTHOR -> shelfCollator.compare(a.author, b.author)
+    else -> a.lastRead.compareTo(b.lastRead)
+}
+
+// ══════════════════ 更新目录（legado RefreshTocUseCase 的 AppendOnly 版） ══════════════════
+
+/** 合并结果：新的 job.json 正文、追加了几章、追加后总章数。 */
+data class ShelfTocMerge(val json: String, val added: Int, val total: Int)
+
+/**
+ * 把新取到的目录**追加**到 job.json 的章节表尾部。
+ *
+ * 与 legado `RefreshTocUseCase`（删全表再插新表）的差别是有意的：
+ * 我们已下的正文按 itemId 存在 chapters.jsonl 里，整表换掉会让正文对不上号。
+ * 只追加「旧的没有的章」，旧章的 itemId / 状态原样保留 —— 连载书新增章
+ * 本来就在末尾，这条路既补得到新章，又不动已下的书。
+ *
+ * 没有新章、或原文读不出章节表时返回 null（调用处据此判定「已是最新」）。
+ */
+fun mergeShelfCatalog(raw: String, fresh: List<ChapterRef>, now: Long = 0L): ShelfTocMerge? {
+    if (raw.isBlank() || fresh.isEmpty()) return null
+    val oldObjs = TinyJson.objects(raw, "chapters")
+    if (oldObjs.isEmpty()) return null
+    val seen = HashSet<String>(oldObjs.size * 2)
+    val kept = StringBuilder()
+    oldObjs.forEachIndexed { i, o ->
+        val id = TinyJson.path(o, "itemId") ?: return@forEachIndexed
+        if (!seen.add(id)) return@forEachIndexed
+        if (kept.isNotEmpty()) kept.append(',')
+        val title = TinyJson.path(o, "title").orEmpty()
+        kept.append("{\"itemId\":").append(Downloader.quote(id))
+            .append(",\"title\":").append(Downloader.quote(title))
+            .append(",\"locked\":").append(if (TinyJson.path(o, "locked") == "true") "true" else "false")
+            .append(",\"status\":").append(Downloader.quote(TinyJson.path(o, "status") ?: "PENDING"))
+            .append('}')
+    }
+    if (kept.isEmpty()) return null
+
+    val added = StringBuilder()
+    var n = 0
+    for (ch in fresh) {
+        if (ch.itemId.isBlank() || !seen.add(ch.itemId)) continue
+        if (added.isNotEmpty()) added.append(',')
+        added.append("{\"itemId\":").append(Downloader.quote(ch.itemId))
+            .append(",\"title\":").append(Downloader.quote(ch.title))
+            .append(",\"locked\":").append(if (ch.locked) "true" else "false")
+            .append(",\"status\":\"PENDING\"}")
+        n++
+    }
+    if (n == 0) return null
+
+    val total = seen.size
+    val sb = StringBuilder(kept.length + added.length + 160)
+    sb.append("{\"bookId\":").append(Downloader.quote(TinyJson.path(raw, "bookId").orEmpty()))
+        .append(",\"name\":").append(Downloader.quote(TinyJson.path(raw, "name").orEmpty()))
+        .append(",\"author\":").append(Downloader.quote(TinyJson.path(raw, "author").orEmpty()))
+        .append(",\"state\":").append(Downloader.quote(TinyJson.path(raw, "state") ?: "PENDING"))
+        .append(",\"total\":").append(total)
+        // 更新时间就是「最近一次查出新章」的时刻，排序「按更新时间」直接用它。
+        .append(",\"updatedAt\":").append(if (now > 0) now else System.currentTimeMillis())
+        .append(",\"chapters\":[").append(kept).append(',').append(added).append("]}")
+    return ShelfTocMerge(sb.toString(), n, total)
+}

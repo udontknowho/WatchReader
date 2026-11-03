@@ -113,6 +113,12 @@ import com.watchdl.core.shelfSourceTag
 import com.watchdl.core.shelfSubtitle
 import com.watchdl.core.shelfToggle
 import com.watchdl.core.shelfUnreadCount
+import com.watchdl.core.ChapterRef
+import com.watchdl.core.ShelfSort
+import com.watchdl.core.ShelfSortKey
+import com.watchdl.core.mergeShelfCatalog
+import com.watchdl.core.shelfCompare
+import com.watchdl.core.TinyJson
 import java.io.File
 
 /**
@@ -675,6 +681,90 @@ fun main() {
         check("没有命中就是整段", findHighlight("abc", emptyList()) == listOf(FindSeg("abc", false)))
         check("空文字没有分段", findHighlight("", listOf(0..1)).isEmpty())
     }
+
+    // ── 书架排序（legado BookshelfRepository.sortBooks 的四个键）────────────
+    // ── 排序键与默认方向 ──────────────────────────────
+    check("四个排序键，顺序照 legado", ShelfSort.keys == listOf(0, 1, 2, 5))
+    check("最近阅读的标签", ShelfSort.label(ShelfSort.RECENT) == "最近阅读")
+    check("更新时间的标签", ShelfSort.label(ShelfSort.UPDATED) == "更新时间")
+    check("未知键落回最近阅读", ShelfSort.label(99) == "最近阅读")
+    check("时间类默认倒序", ShelfSort.defaultDesc(ShelfSort.RECENT) &&
+        ShelfSort.defaultDesc(ShelfSort.UPDATED))
+    check("名字类默认正序", !ShelfSort.defaultDesc(ShelfSort.NAME) &&
+        !ShelfSort.defaultDesc(ShelfSort.AUTHOR))
+
+    // ── 四个键的比较 ──────────────────────────────────
+    val a = ShelfSortKey(name = "Alpha", author = "Zhang", updatedAt = 100L, lastRead = 200L)
+    val b = ShelfSortKey(name = "Beta", author = "An", updatedAt = 300L, lastRead = 50L)
+
+    check("按最近阅读：a 在后", shelfCompare(a, b, ShelfSort.RECENT) > 0)
+    check("按更新时间：a 在前", shelfCompare(a, b, ShelfSort.UPDATED) < 0)
+    check("按书名：a 在前", shelfCompare(a, b, ShelfSort.NAME) < 0)
+    check("按作者：a 在后", shelfCompare(a, b, ShelfSort.AUTHOR) > 0)
+    check("自己跟自己相等", shelfCompare(a, a, ShelfSort.UPDATED) == 0)
+    check("缺省键等同最近阅读", shelfCompare(a, b, 99) == shelfCompare(a, b, ShelfSort.RECENT))
+
+    // 倒序就是取反，与 legado isDescending 一个路子。
+    val rows = listOf(a, b)
+    check("正序", rows.sortedWith { x, y -> shelfCompare(x, y, ShelfSort.UPDATED) }
+        .map { it.name } == listOf("Alpha", "Beta"))
+    check("倒序", rows.sortedWith { x, y -> -shelfCompare(x, y, ShelfSort.UPDATED) }
+        .map { it.name } == listOf("Beta", "Alpha"))
+
+    // ── 更新目录：只追加 ─────────────────────────────
+    val raw = """
+        {"bookId":"u1","name":"测试书","author":"作者","state":"DONE","total":2,"updatedAt":7,
+         "chapters":[
+           {"itemId":"c1","title":"第一章","locked":false,"status":"DONE"},
+           {"itemId":"c2","title":"第二章","locked":true,"status":"FAILED"}]}
+    """.trimIndent()
+    val fresh = listOf(
+        ChapterRef("c1", "第一章", false),
+        ChapterRef("c2", "第二章", true),
+        ChapterRef("c3", "第三章", false),
+        ChapterRef("c4", "第四章", false),
+    )
+    val m = mergeShelfCatalog(raw, fresh, now = 1234L)
+    check("查出两章新增", m?.added == 2, "${m?.added}")
+    check("总章数按合并后算", m?.total == 4, "${m?.total}")
+
+    val json = m!!.json
+    check("书名没丢", TinyJson.path(json, "name") == "测试书")
+    check("作者没丢", TinyJson.path(json, "author") == "作者")
+    check("状态没被改", TinyJson.path(json, "state") == "DONE")
+    check("total 字段同步", TinyJson.path(json, "total") == "4")
+    check("更新时间换成这次检查的时刻", TinyJson.path(json, "updatedAt") == "1234")
+
+    val chapters = TinyJson.objects(json, "chapters")
+    check("章节表四条", chapters.size == 4, "${chapters.size}")
+    check("第一条仍是 c1", TinyJson.path(chapters[0], "itemId") == "c1")
+    check("已下的状态保住 DONE", TinyJson.path(chapters[0], "status") == "DONE")
+    check("失败的状态保住 FAILED", TinyJson.path(chapters[1], "status") == "FAILED")
+    check("付费标记保住", TinyJson.path(chapters[1], "locked") == "true")
+    check("新章追加在末尾", TinyJson.path(chapters[3], "itemId") == "c4")
+    check("新章状态是 PENDING", TinyJson.path(chapters[2], "status") == "PENDING")
+    check("新章标题跟着来", TinyJson.path(chapters[2], "title") == "第三章")
+    check("新章免费标记", TinyJson.path(chapters[3], "locked") == "false")
+
+    // 目录没变化时不动盘。
+    check("没有新章返回 null",
+        mergeShelfCatalog(raw, listOf(ChapterRef("c1", "第一章", false))) == null)
+    check("空目录返回 null", mergeShelfCatalog(raw, emptyList()) == null)
+    check("坏作业不猜", mergeShelfCatalog("{}", fresh) == null)
+    check("空原文不猜", mergeShelfCatalog("", fresh) == null)
+
+    // 新目录里自己重复的 itemId 只收一次，否则章号会错位。
+    val dup = mergeShelfCatalog(raw, listOf(
+        ChapterRef("c3", "第三章", false),
+        ChapterRef("c3", "第三章", false),
+    ))
+    check("重复 itemId 只追加一次", dup?.added == 1, "${dup?.added}")
+
+    // 正文里的引号与换行必须转义，否则整份 job.json 会坏。
+    val tricky = mergeShelfCatalog(raw, listOf(ChapterRef("c9", "他说\"走\"\n好", false)))
+    check("标题里的引号换行被转义",
+        TinyJson.path(TinyJson.objects(tricky!!.json, "chapters").last(), "title")
+            == "他说\"走\"\n好")
 
     root.deleteRecursively()
     println()

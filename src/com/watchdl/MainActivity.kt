@@ -293,8 +293,6 @@ class MainActivity : Activity() {
     // 续传时的起点章数。速度/剩余时间只能用增量算：拿总数除以本次耗时
     // 会算出「2190 章/分 · 约 37 秒」，实际要跑 5 分钟。
     private var progressBase = 0
-    /** 书架当前是不是封面墙档。两档共用一屏，切底不进返回栈。 */
-    internal var shelfGrid = true
     /** 熔断原因，bookId → 一句人能读懂的话。开下时清掉。 */
     private val abortHints = HashMap<String, String>()
     internal var readerSize = Md3.FS_READ
