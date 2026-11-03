@@ -1,6 +1,8 @@
 package com.watchdl.ui.reader
 
 import android.graphics.Color
+import android.os.Handler
+import android.os.Looper
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
@@ -41,6 +43,10 @@ internal object ReaderUi {
      * 与 legado 的 ToggleBrightnessAuto 同一个语义。
      */
     var brightAuto = false
+    /** 工具格按钮（legado 的 `bottomBarButtons`），按顺序一行排开，csv 存 `tools` 键。 */
+    var tools: List<String> = listOf("search", "auto_page", "catalog", "setting")
+    /** 自动翻页间隔秒数（legado 的 `autoReadSpeed`，手机端 1–120，手表 1–60 够用）。 */
+    var autoPageSec = 10
     /** 护眼遮罩开关。 */
     var eyeCare = false
     /** 护眼强度档：0 弱 / 1 中 / 2 强。对应遮罩 alpha。 */
@@ -118,6 +124,9 @@ internal object ReaderMenu {
         // 正文/标题控件是上一屏的，留着就是泄漏旧视图树。
         ReaderUi.bodyView = null
         ReaderUi.titleView = null
+        // 自动翻页的回调里握着上一屏的 ScrollView，不摘掉就会继续翻章。
+        // 这里只取消待跑的回调，不动用户开关：换章重建后要接着翻（showReader 末尾重新排程）。
+        ReaderAuto.cancel()
     }
 
     /** 系统返回：菜单展开时先收菜单。返回 true 表示已消费这次返回。 */
@@ -130,14 +139,63 @@ internal object ReaderMenu {
     }
 }
 
+/**
+ * 自动翻页（legado 的 `autoPage` 动作）。
+ *
+ * 只有一个 Handler：点一下开跑、每 [sec] 秒滚一屏，再点停。运行态不落盘：
+ * 它是“现在要不要自动读”的临时状态，重启应用后接着自动翻章只会把人吓一跳。
+ */
+internal object ReaderAuto {
+    /** 用户是否开着自动翻页。换章重建后要保持，所以不跟 [ReaderMenu.reset] 一起清。 */
+    var on = false
+    /** 间隔秒数，从 [ReaderUi.autoPageSec] 同步过来。 */
+    var sec = 10
+    val MAIN = Handler(Looper.getMainLooper())
+    /** 待跑的滚动任务，停的时候必须摘掉，否则会叠出两条链。 */
+    var handle: Runnable? = null
+
+    /** 只取消待跑的回调，不改开关。 */
+    fun cancel() {
+        handle?.let { MAIN.removeCallbacks(it) }
+        handle = null
+    }
+
+    /** 取消并关掉开关。 */
+    fun stop() {
+        cancel()
+        on = false
+    }
+}
+
 /** 章内查找的结果条数上限。20 条刚好一屏滚两三下，再多就是噪音。 */
 private const val FIND_MAX = 20
+
+/** 工具格能放的按钮 id（legado 的 `ReadBookButtonIds` 里手表认得的那些）。 */
+private val READER_TOOLS = listOf(
+    "search", "auto_page", "catalog", "setting", "change_source", "cache", "bookmark", "more",
+)
+
+/** 默认四格 = legado 底栏实际显示的四个（read_aloud 在 legado 里没图标文案，永远不显示）。 */
+private val READER_TOOLS_DEFAULT = listOf("search", "auto_page", "catalog", "setting")
+
+/**
+ * 工具格 id 列表：csv → 合法 id 序列。
+ *
+ * 空、全是脏值、或存了不认得的 id 时退回默认四格：底栏不能出现空格子，
+ * 也不能因为一个写错的键就整行消失。
+ */
+private fun readerTools(csv: String?): List<String> {
+    val ids = csv.orEmpty().split(',').map { it.trim() }.filter { it in READER_TOOLS }.distinct()
+    return if (ids.isEmpty()) READER_TOOLS_DEFAULT else ids
+}
 
 /** 从 SharedPreferences("reader") 读扩展设置。重复调用无副作用。 */
 internal fun MainActivity.loadReaderExtras() {
     val p = getSharedPreferences("reader", android.content.Context.MODE_PRIVATE)
     ReaderUi.bright = ReaderStyle.brightClamp(p.getFloat("bright", ReaderStyle.BRIGHT_MID))
     ReaderUi.brightAuto = p.getBoolean("brightAuto", false)
+    ReaderUi.tools = readerTools(p.getString("tools", null))
+    ReaderUi.autoPageSec = p.getInt("autoPageSec", 10).coerceIn(1, 60)
     ReaderUi.eyeCare = p.getBoolean("eye", false)
     ReaderUi.eyeLevel = p.getInt("eyeLevel", 1).coerceIn(0, 2)
     ReaderUi.eyeAuto = p.getBoolean("eyeAuto", false)
@@ -164,6 +222,8 @@ internal fun MainActivity.saveReaderExtras() {
     getSharedPreferences("reader", android.content.Context.MODE_PRIVATE).edit()
         .putFloat("bright", ReaderStyle.brightClamp(ReaderUi.bright))
         .putBoolean("brightAuto", ReaderUi.brightAuto)
+        .putString("tools", ReaderUi.tools.joinToString(","))
+        .putInt("autoPageSec", ReaderUi.autoPageSec)
         .putBoolean("eye", ReaderUi.eyeCare)
         .putInt("eyeLevel", ReaderUi.eyeLevel)
         .putBoolean("eyeAuto", ReaderUi.eyeAuto)
@@ -324,6 +384,27 @@ internal fun MainActivity.showReader(
         }
     }
 
+    /**
+     * 自动翻页排程：每 [ReaderUi.autoPageSec] 秒滚一屏。
+     *
+     * 换章会整页重建（showReader 末尾重调一次），所以排程抽成局部函数；
+     * 正文已摘下视图树（离开阅读页）时自动停，否则后台会一直往下翻章。
+     */
+    fun scheduleAuto() {
+        ReaderAuto.cancel()
+        ReaderAuto.sec = ReaderUi.autoPageSec.coerceIn(1, 60)
+        if (!ReaderAuto.on) return
+        val r = object : Runnable {
+            override fun run() {
+                if (!ReaderAuto.on || !body.isAttachedToWindow) { ReaderAuto.stop(); return }
+                scrollPage(true)
+                ReaderAuto.MAIN.postDelayed(this, ReaderAuto.sec * 1000L)
+            }
+        }
+        ReaderAuto.handle = r
+        ReaderAuto.MAIN.postDelayed(r, ReaderAuto.sec * 1000L)
+    }
+
     val taps = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent): Boolean = true
         override fun onSingleTapUp(e: MotionEvent): Boolean {
@@ -398,43 +479,102 @@ internal fun MainActivity.showReader(
     menu.addView(topStack, FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP))
 
-    // 工具格：照 legado 底栏的图标网格（手机上一行 5 格）。
-    // 189 dp 一行放 5 个只剩 30 dp，改成一行 3 格 × 2 行。
+    // 工具格：照 legado `ReadBookMenuBarBottom.kt:447-478` 的图标网格。
+    // 默认四格（legado 默认集合去掉永远不显示的 read_aloud）：查找 / 自动翻页 / 目录 / 设置。
+    // 一格 40 dp：189 dp 一行放 4 格 × 40 = 160 dp，刚好放得下。
     val grid = Md3.column(this)
     grid.setBackgroundColor(readerBackground)
-    fun toolCell(glyph: String, label: String, act: () -> Unit): LinearLayout {
+    fun toolCell(label: String, icon: View, act: () -> Unit): LinearLayout {
         val cell = Md3.column(this)
         cell.gravity = Gravity.CENTER
         cell.isClickable = true
         cell.contentDescription = label
         cell.background = Md3.ripple(this, Color.TRANSPARENT, Md3.dp(this, 6).toFloat())
         cell.setOnClickListener { act() }
-        // 格子只有 30 dp 高，图标 16 dp + 一行 10 sp 标签刚好放下。
-        val icon = Icons.name(glyph)
-        cell.addView(
-            if (icon != null) Icons.view(this, icon, readerAccent, 16)
-            else Md3.text(this, glyph, Md3.FS_MD, readerAccent).apply { gravity = Gravity.CENTER },
-            Md3.lpDp(this, null, 16))
+        // 40 dp 里放 16 dp 图标 + 一行 10 sp 标签，剩下的当上下热区。
+        cell.addView(icon, Md3.lpDp(this, null, 16))
         cell.addView(Md3.text(this, label, 10f, readerMuted).apply { gravity = Gravity.CENTER })
         return cell
     }
-    val tools = listOf(
-        Triple("menu", "目录") { showToc(info, src) },
-        // legado 顶栏的搜索图标。书签已上顶栏徽标，这一格让给章内查找。
-        Triple("search", "查找") { showFind(info, index, text, src) },
-        Triple("swap", "换源") { rememberReturn(); showSwap(info, src) },
-        Triple("settings", "设置") { showReaderSettings(info, index, text, src) },
-        Triple("download", "缓存") { startDownload(info) },
-        Triple("more", "更多") { showReaderMenu(info, index, text, src) },
-    )
-    for (chunk in tools.chunked(3)) {
-        val row = Md3.row(this)
-        for ((glyph, label, act) in chunk) {
-            row.addView(toolCell(glyph, label, act), LinearLayout.LayoutParams(0,
-                Md3.dp(this, 30), 1f))
+
+    // 自动翻页：点一下开跑并收菜单（legado 点完就回到正文），再点停。
+    // IconView 的名字是构造期固定的，所以 play / stop 两枚并存、切可见性。
+    val autoPlay = Icons.view(this, "play", readerAccent, 16)
+    val autoStop = Icons.view(this, "stop", readerAccent, 16)
+    val autoBox = FrameLayout(this)
+    autoBox.addView(autoPlay,
+        FrameLayout.LayoutParams(Md3.dp(this, 16), Md3.dp(this, 16), Gravity.CENTER))
+    autoBox.addView(autoStop,
+        FrameLayout.LayoutParams(Md3.dp(this, 16), Md3.dp(this, 16), Gravity.CENTER))
+    fun paintAutoIcon() {
+        autoPlay.visibility = if (ReaderAuto.on) View.GONE else View.VISIBLE
+        autoStop.visibility = if (ReaderAuto.on) View.VISIBLE else View.GONE
+    }
+    paintAutoIcon()
+
+    /** id → 图标。跟 legado 的 ReadMenuActionDefs 同一套图形。 */
+    fun toolGlyph(id: String): String = when (id) {
+        "catalog" -> "menu"
+        "setting" -> "settings"
+        "change_source" -> "swap"
+        "cache" -> "download"
+        "bookmark" -> "bookmark"
+        "more" -> "more"
+        "auto_page" -> "play"
+        else -> "search"
+    }
+    fun toolTitle(id: String): String = when (id) {
+        "catalog" -> "目录"
+        "setting" -> "设置"
+        "change_source" -> "换源"
+        "cache" -> "缓存"
+        "bookmark" -> "书签"
+        "more" -> "更多"
+        "auto_page" -> "自动翻页"
+        else -> "查找"
+    }
+    /** 一格的动作。换源 / 缓存 / 书签 / 更多默认不在工具格上，但配了就能回来。 */
+    fun runTool(id: String) {
+        when (id) {
+            "catalog" -> showToc(info, src)
+            "setting" -> showReaderSettings(info, index, text, src)
+            "change_source" -> { rememberReturn(); showSwap(info, src) }
+            "cache" -> startDownload(info)
+            "bookmark" -> if (BookmarkStore.has(info.bookId, index)) {
+                BookmarkStore.remove(info.bookId, index); toast("已移除本章书签")
+            } else addMark(info, index, text)
+            "more" -> showReaderMenu(info, index, text, src)
+            else -> showFind(info, index, text, src)
         }
-        grid.addView(row, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, 30)))
+    }
+
+    // 超过四格换行（legado 一行 5 格 × 1–2 行，手表一行 4 格）；默认四格只有一行。
+    val cells = ReaderUi.tools.map { id ->
+        if (id == "auto_page") {
+            toolCell(toolTitle(id), autoBox) {
+                if (ReaderAuto.on) {
+                    ReaderAuto.stop()
+                } else {
+                    ReaderAuto.on = true
+                    scheduleAuto()
+                    // 点完就收菜单：自动读的时候底栏盖住半屏，没必要留着。
+                    setMenu(false)
+                }
+                paintAutoIcon()
+            }
+        } else {
+            toolCell(toolTitle(id), Icons.view(this, toolGlyph(id), readerAccent, 16)) {
+                runTool(id)
+            }
+        }
+    }
+    for (chunk in cells.chunked(4)) {
+        val toolRow = Md3.row(this)
+        for (cell in chunk) {
+            toolRow.addView(cell, LinearLayout.LayoutParams(0, Md3.dp(this, 40), 1f))
+        }
+        grid.addView(toolRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, 40)))
     }
 
     // 底部进度行：‹ 上一章 / 全书进度滑条 / 下一章 ›
@@ -636,6 +776,9 @@ internal fun MainActivity.showReader(
     frame.addView(menu, FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     root.addView(frame, Md3.lpWeight(1f))
+    // 换章会走 preview → ReaderMenu.reset（取消回调）→ 重建这一屏，
+    // 所以自动翻页的排程必须在最后重新挂上，否则读一章就停。
+    scheduleAuto()
 
 }
 
@@ -731,6 +874,15 @@ private fun MainActivity.showReaderMenu(
         "章内查找" to { showFind(info, index, text, src) },
         // legado 顶栏的刷新：重跑一次取正文，复用 preview 的本地缓存 + 在线兜底。
         "重新取本章正文" to { preview(info, index) },
+        // 换源 / 缓存 / 书签本轮从工具格撤下来，先放在这里；④ 改整屏 Sheet 后仍从这儿进。
+        "换源" to { rememberReturn(); showSwap(info, src) },
+        "离线缓存" to { startDownload(info) },
+        (if (BookmarkStore.has(info.bookId, index)) "移除本章书签" else "加书签") to {
+            if (BookmarkStore.has(info.bookId, index)) {
+                BookmarkStore.remove(info.bookId, index)
+                toast("已移除本章书签")
+            } else addMark(info, index, text)
+        },
         "阅读设置" to { showReaderSettings(info, index, text, src) },
         "全部书签" to { showMarks(info) },
         "导出 TXT" to { exportTxt(info) },
@@ -1075,6 +1227,9 @@ private fun MainActivity.showReaderSettings(info: BookInfo, index: Int, text: St
             save()
             showReader(info, index, text, src)
         }
+        // 自动翻页间隔：legado 的 autoReadSpeed（手机 1–120），手表 1–60 够用。
+        slider(col, "自动翻页", 1f, 60f, 59, ReaderUi.autoPageSec.toFloat(),
+            { "${it.toInt()} s" }) { ReaderUi.autoPageSec = it.toInt().coerceIn(1, 60) }
         // 恢复默认：正文各项回出厂值。书源与进度不动，只动排版。
         val reset = Md3.text(this, "恢复默认排版", Md3.FS_SM, Md3.onSurfaceVariant).apply {
             gravity = Gravity.CENTER
