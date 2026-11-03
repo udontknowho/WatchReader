@@ -8,6 +8,7 @@ import android.widget.TextView
 import com.watchdl.MainActivity
 import com.watchdl.core.DevLog
 import com.watchdl.core.Palette
+import com.watchdl.core.ReaderStyle
 import com.watchdl.core.Screen
 import com.watchdl.ui.reader.ReaderUi
 import com.watchdl.ui.reader.loadReaderExtras
@@ -176,9 +177,10 @@ private fun MainActivity.settingsRead(col: LinearLayout) {
             saveReaderPrefs(readerSize, readerSpacing, readerBackground)
             paintPreview()
         }
+        // 亮度这里只给三档：设置页是全局项，详细排版去阅读页的「阅读设置」调。
         segmentRow(g, "亮度", listOf("暗" to 0, "中" to 1, "亮" to 2).map { it.first to (it.second as Any) },
-            get = { ReaderUi.brightTier as Any },
-            set = { ReaderUi.brightTier = it as Int }) {
+            get = { ReaderStyle.brightTier(ReaderUi.bright) as Any },
+            set = { ReaderUi.bright = ReaderStyle.brightValue(it as Int) }) {
             // 只落盘，不在这里改窗口亮度：applyBright 压的是整个窗口，
             // 而离开阅读页本来就没复位（已知遗留）。从设置里改会连书架一起变暗。
             saveReaderExtras()
@@ -219,9 +221,9 @@ private fun MainActivity.settingsRead(col: LinearLayout) {
             set = { ReaderUi.paraLevel = it as Int }) {
             saveReaderExtras()
         }
-        segmentRow(g, "首行缩进", listOf("关" to false, "开" to true).map { it.first to (it.second as Any) },
-            get = { ReaderUi.indentOn as Any },
-            set = { ReaderUi.indentOn = it as Boolean }) {
+        segmentRow(g, "首行缩进", listOf("无" to 0, "1 字" to 1, "2 字" to 2).map { it.first to (it.second as Any) },
+            get = { ReaderUi.indentLevel as Any },
+            set = { ReaderUi.indentLevel = it as Int }) {
             saveReaderExtras()
         }
     })

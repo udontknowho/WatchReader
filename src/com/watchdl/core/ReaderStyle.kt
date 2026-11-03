@@ -13,12 +13,15 @@ object ReaderStyle {
     const val BRIGHT_MID = 0.6f
     const val BRIGHT_FULL = 1.0f
 
-    /** 档位对应的窗口亮度。越界的档按最近一档处理。 */
+    /** 亮度档对应的窗口亮度。越界的档按最近一档处理。 */
     fun brightValue(tier: Int): Float = when (tier.coerceIn(0, 2)) {
         0 -> BRIGHT_DIM
         2 -> BRIGHT_FULL
         else -> BRIGHT_MID
     }
+
+    /** 连续亮度（设置面板的滑杆）夹在可读范围：再暗就看不清字，再亮就刺眼。 */
+    fun brightClamp(v: Float): Float = v.coerceIn(0.15f, 1f)
 
     /**
      * 亮度值落回档位。
@@ -69,11 +72,40 @@ object ReaderStyle {
         return out.toIntArray()
     }
 
-    /** 首行缩进：每个非空段落前加两个全角空格。legado 叫“首行缩进 2 字”。 */
-    fun indent(text: String): String {
-        if (text.isEmpty()) return text
-        return text.split('\n').joinToString("\n") { p -> if (p.isBlank()) p else "　　$p" }
+    // ── 首行缩进：legado 是 0–4 字滑杆，手表取 0 / 1 / 2 字 ──────────
+    /** 缩进档对应的全角空格个数。 */
+    fun indentCount(level: Int): Int = level.coerceIn(0, 2)
+
+    /** 首行缩进：每个非空段落前加 [level] 个字宽的全角空格。legado 叫“首行缩进 N 字”。 */
+    fun indent(text: String, level: Int = 2): String {
+        val n = indentCount(level)
+        if (text.isEmpty() || n == 0) return text
+        val pad = "\u3000".repeat(n)
+        return text.split('\n').joinToString("\n") { p -> if (p.isBlank()) p else pad + p }
     }
+
+    // ── 字距：legado 是 -0.5–0.5 em 滑杆，手表给 -0.05–0.10 的可用区间 ──
+    /** 字距（em）夹在可用区间：正文汉字收到 -0.05 em 已明显挤，放到 0.10 em 已显碎。 */
+    fun letterEm(v: Float): Float = v.coerceIn(-0.05f, 0.10f)
+
+    // ── 字重：legado 是连续滑杆，手表取三档（Android 只保证 400/500/700 有字形） ──
+    /** 字重档对应的 Typeface 权重数值。 */
+    fun weightValue(level: Int): Int = when (level.coerceIn(0, 2)) {
+        1 -> 500
+        2 -> 700
+        else -> 400
+    }
+
+    // ── 阅读边距：正文离表壳圆弧留多少 ──────────────────
+    /** 边距档对应的 dp。手表屏 189 dp 宽，24 dp 已是极限。 */
+    fun marginDp(level: Int): Int = when (level.coerceIn(0, 2)) {
+        0 -> 8
+        2 -> 24
+        else -> 16
+    }
+
+    /** 标题边距档对应的 dp（标题与正文之间的距离）。 */
+    fun titleGapDp(level: Int): Int = level.coerceIn(0, 3) * 4
 
     // ── 章内查找：定位与计数 ───────────────────────────────
     /**
@@ -104,6 +136,16 @@ object ReaderStyle {
 
     // ── 护眼：整屏暖色遮罩 ─────────────────────────────────
     const val EYE_ALPHA = 28
+
+    /** 护眼强度档：0 弱 / 1 中 / 2 强。手表三档能分辨，再细的滑杆拖不准。 */
+    fun eyeAlpha(level: Int): Int = when (level.coerceIn(0, 2)) {
+        0 -> 16
+        2 -> 44
+        else -> EYE_ALPHA
+    }
+
+    /** 夜间自动护眼的时间窗：22 点到次日 7 点。 */
+    fun isNight(hour: Int): Boolean = hour >= 22 || hour < 7
 
     /**
      * 护眼遮罩色。ARGB 整数，暖橙、低透明。
