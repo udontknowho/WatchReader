@@ -127,8 +127,8 @@ internal object ReaderMenu {
         // 自动翻页的回调里握着上一屏的 ScrollView，不摘掉就会继续翻章。
         // 这里只取消待跑的回调，不动用户开关：换章重建后要接着翻（showReader 末尾重新排程）。
         ReaderAuto.cancel()
+        ReaderAuto.reschedule = null
     }
-
     /** 系统返回：菜单展开时先收菜单。返回 true 表示已消费这次返回。 */
     fun consumeBack(): Boolean {
         if (!open) return false
@@ -154,6 +154,14 @@ internal object ReaderAuto {
     /** 待跑的滚动任务，停的时候必须摘掉，否则会叠出两条链。 */
     var handle: Runnable? = null
 
+    /**
+     * 重新排程的闭包，由当前阅读页挂上（换章重建覆盖，离开阅读页清空）。
+     *
+     * 更多操作 Sheet 与阅读设置都能改自动翻页的开关，它们手里没有页面局部的
+     * `body`，所以排程这件事必须挂在状态对象上，不能只在 showReader 里。
+     */
+    var reschedule: (() -> Unit)? = null
+
     /** 只取消待跑的回调，不改开关。 */
     fun cancel() {
         handle?.let { MAIN.removeCallbacks(it) }
@@ -164,6 +172,12 @@ internal object ReaderAuto {
     fun stop() {
         cancel()
         on = false
+    }
+
+    /** 开关自动翻页并立即生效：菜单里点一下就该开始滚，不必等下一次重建。 */
+    fun applyOn(open: Boolean) {
+        if (open) on = true else stop()
+        reschedule?.invoke()
     }
 }
 
@@ -177,6 +191,30 @@ private val READER_TOOLS = listOf(
 
 /** 默认四格 = legado 底栏实际显示的四个（read_aloud 在 legado 里没图标文案，永远不显示）。 */
 private val READER_TOOLS_DEFAULT = listOf("search", "auto_page", "catalog", "setting")
+
+/** 工具格 id → 图标。跟 legado 的 `ReadMenuActionDefs` 同一套图形。 */
+private fun readerToolGlyph(id: String): String = when (id) {
+    "catalog" -> "menu"
+    "setting" -> "settings"
+    "change_source" -> "swap"
+    "cache" -> "download"
+    "bookmark" -> "bookmark"
+    "more" -> "more"
+    "auto_page" -> "play"
+    else -> "search"
+}
+
+/** 工具格 id → 文案。 */
+private fun readerToolTitle(id: String): String = when (id) {
+    "catalog" -> "目录"
+    "setting" -> "设置"
+    "change_source" -> "换源"
+    "cache" -> "缓存"
+    "bookmark" -> "书签"
+    "more" -> "更多"
+    "auto_page" -> "自动翻页"
+    else -> "查找"
+}
 
 /**
  * 工具格 id 列表：csv → 合法 id 序列。
@@ -512,27 +550,6 @@ internal fun MainActivity.showReader(
     }
     paintAutoIcon()
 
-    /** id → 图标。跟 legado 的 ReadMenuActionDefs 同一套图形。 */
-    fun toolGlyph(id: String): String = when (id) {
-        "catalog" -> "menu"
-        "setting" -> "settings"
-        "change_source" -> "swap"
-        "cache" -> "download"
-        "bookmark" -> "bookmark"
-        "more" -> "more"
-        "auto_page" -> "play"
-        else -> "search"
-    }
-    fun toolTitle(id: String): String = when (id) {
-        "catalog" -> "目录"
-        "setting" -> "设置"
-        "change_source" -> "换源"
-        "cache" -> "缓存"
-        "bookmark" -> "书签"
-        "more" -> "更多"
-        "auto_page" -> "自动翻页"
-        else -> "查找"
-    }
     /** 一格的动作。换源 / 缓存 / 书签 / 更多默认不在工具格上，但配了就能回来。 */
     fun runTool(id: String) {
         when (id) {
@@ -551,7 +568,7 @@ internal fun MainActivity.showReader(
     // 超过四格换行（legado 一行 5 格 × 1–2 行，手表一行 4 格）；默认四格只有一行。
     val cells = ReaderUi.tools.map { id ->
         if (id == "auto_page") {
-            toolCell(toolTitle(id), autoBox) {
+            toolCell(readerToolTitle(id), autoBox) {
                 if (ReaderAuto.on) {
                     ReaderAuto.stop()
                 } else {
@@ -563,7 +580,7 @@ internal fun MainActivity.showReader(
                 paintAutoIcon()
             }
         } else {
-            toolCell(toolTitle(id), Icons.view(this, toolGlyph(id), readerAccent, 16)) {
+            toolCell(readerToolTitle(id), Icons.view(this, readerToolGlyph(id), readerAccent, 16)) {
                 runTool(id)
             }
         }
@@ -712,6 +729,9 @@ internal fun MainActivity.showReader(
 
     setMenu = { on ->
         ReaderMenu.open = on
+        // 自动翻页在菜单展开时暂停、收起后继续（legado 浮动胶囊的 `!menuVisible` 条件同义）：
+        // 一边看菜单一边被滑走，改设置就改不成了。只取消待跑的回调，不动用户开关。
+        if (on) ReaderAuto.cancel() else if (ReaderAuto.on) scheduleAuto()
         menu.animate().cancel()
         topStack.animate().cancel()
         bottom.animate().cancel()
@@ -779,6 +799,9 @@ internal fun MainActivity.showReader(
     // 换章会走 preview → ReaderMenu.reset（取消回调）→ 重建这一屏，
     // 所以自动翻页的排程必须在最后重新挂上，否则读一章就停。
     scheduleAuto()
+    // 更多操作 Sheet / 阅读设置里改开关时，手里没有这里的 `scheduleAuto`，
+    // 把排程挂在状态对象上给它们调（离开阅读页时 [ReaderMenu.reset] 会清掉）。
+    ReaderAuto.reschedule = { scheduleAuto() }
 
 }
 
@@ -862,33 +885,151 @@ private class ParaSpan(private val extraPx: Int) : android.text.style.LineHeight
 }
 
 /**
- * 阅读页 ⋮ 菜单，对应 legado 的 ReadMenuActionDefs。
+ * 阅读页「更多操作」整屏 Sheet（legado 的 `ReaderMoreActionsSheet`，手表子集）。
  *
- * 浮层菜单在 189 dp 宽的屏上几乎占满整屏又要留浮层留白，两头不讨好；
- * 用户判词已定：长菜单一律整屏对话框，所以走 longMenuDialog。
+ * 一句话列表看不出层级也点不准，改成整屏 Sheet：骨架构同 [Widgets.longMenuDialog]
+ * （不透明 surface 底、48 dp 顶栏「更多操作」+ 关闭、列表可滚），
+ * 行换成带图标的 [Widgets.listItem]，图标取自 legado `ReadMenuActionDefs` 的同一套图形。
+ * 自动翻页那一行把当前开关写进标题，省下一行副标题 —— 表上没高度给它。
  */
 private fun MainActivity.showReaderMenu(
     info: BookInfo, index: Int, text: String, src: BookSource?,
 ) {
-    val items = listOf<Pair<CharSequence, () -> Unit>>(
-        "章内查找" to { showFind(info, index, text, src) },
-        // legado 顶栏的刷新：重跑一次取正文，复用 preview 的本地缓存 + 在线兜底。
-        "重新取本章正文" to { preview(info, index) },
-        // 换源 / 缓存 / 书签本轮从工具格撤下来，先放在这里；④ 改整屏 Sheet 后仍从这儿进。
-        "换源" to { rememberReturn(); showSwap(info, src) },
-        "离线缓存" to { startDownload(info) },
-        (if (BookmarkStore.has(info.bookId, index)) "移除本章书签" else "加书签") to {
-            if (BookmarkStore.has(info.bookId, index)) {
-                BookmarkStore.remove(info.bookId, index)
-                toast("已移除本章书签")
-            } else addMark(info, index, text)
-        },
-        "阅读设置" to { showReaderSettings(info, index, text, src) },
-        "全部书签" to { showMarks(info) },
-        "导出 TXT" to { exportTxt(info) },
-        "阅读记录" to { showProgress(info) },
+    val dlg = android.app.Dialog(this)
+    val root = Md3.column(this).apply { setBackgroundColor(Md3.surface) }
+
+    val bar = Md3.row(this)
+    bar.setPadding(Md3.dp(this, Md3.PAD), 0, 0, 0)
+    bar.addView(
+        Md3.ellipsize(Md3.text(this, "更多操作", Md3.FS_LG, Md3.onSurface, bold = true))
+            .apply { gravity = Gravity.CENTER_VERTICAL },
+        LinearLayout.LayoutParams(0, Md3.dp(this, Md3.TAB_H), 1f),
     )
-    Widgets.longMenuDialog(this, "更多", items).show()
+    // 这块表没有实体返回键，关闭按钮就是唯一出口。
+    bar.addView(Md3.iconButton(this, "close", { dlg.dismiss() }, desc = "关闭"),
+        LinearLayout.LayoutParams(Md3.dp(this, Md3.TAP), Md3.dp(this, Md3.TAB_H)))
+    root.addView(bar, LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, Md3.TAB_H)))
+
+    val list = Md3.column(this)
+    /** 一行带图标的菜单项。行高取 [Md3.TAP]：248 dp 高的屏上 56 dp 一行只能露出三行半。 */
+    fun row(title: String, glyph: String, act: () -> Unit) {
+        list.addView(
+            Widgets.listItem(
+                this, title,
+                leading = Icons.view(this, glyph, Md3.onSurfaceVariant, 18),
+                onClick = { dlg.dismiss(); act() },
+            ),
+            Md3.lpDp(this, null, Md3.TAP),
+        )
+    }
+
+    val marked = BookmarkStore.has(info.bookId, index)
+    row("目录", "menu") { showToc(info, src) }
+    row("章内查找", "search") { showFind(info, index, text, src) }
+    // 自动翻页：标题带当前开着还是关着。开的时候顺手收菜单，直接回正文看它滚。
+    row("自动翻页 · ${if (ReaderAuto.on) "开" else "关"}", "play") {
+        val open = !ReaderAuto.on
+        ReaderAuto.applyOn(open)
+        if (open) {
+            ReaderMenu.consumeBack()
+        } else {
+            toast("自动翻页已关")
+        }
+    }
+    row(if (marked) "移除本章书签" else "添加书签", "bookmark") {
+        if (BookmarkStore.has(info.bookId, index)) {
+            BookmarkStore.remove(info.bookId, index)
+            toast("已移除本章书签")
+        } else addMark(info, index, text)
+    }
+    row("换源", "swap") { rememberReturn(); showSwap(info, src) }
+    // legado 顶栏的刷新：重跑一次取正文，复用 preview 的本地缓存 + 在线兜底。
+    row("刷新本章", "refresh") { preview(info, index) }
+    row("离线缓存", "download") { startDownload(info) }
+    row("阅读设置", "settings") { showReaderSettings(info, index, text, src) }
+    // 工具格里到底放哪几格，就是 legado 的 bottomBarButtons 配置。
+    row("工具格按钮", "grid") { showToolsDialog(info, index, text, src) }
+    row("全部书签", "file") { showMarks(info) }
+    row("阅读记录", "history") { showProgress(info) }
+    row("导出 TXT", "upload") { exportTxt(info) }
+
+    val sv = ScrollView(this).apply {
+        isVerticalScrollBarEnabled = false
+        addView(list)
+    }
+    root.addView(sv, LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+    dlg.setContentView(root)
+    dlg.window?.apply {
+        setLayout(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        )
+        setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Md3.surface))
+    }
+    dlg.setCanceledOnTouchOutside(true)
+    dlg.show()
+}
+
+/**
+ * 工具格按钮配置（legado 的 `bottomBarButtons` / `ReadMenuButtonConfig`）。
+ *
+ * 勾选集直接写回 [ReaderUi.tools] 并落盘，然后重建阅读页 —— 底栏那几个格是
+ * 建页面时按列表排的，就地改要拆视图树，反而比重建更容易打回章首。
+ * 至少留一个：全空的底栏既看不出是什么，也没了回正文的入口。
+ */
+private fun MainActivity.showToolsDialog(
+    info: BookInfo, index: Int, text: String, src: BookSource?,
+) {
+    val chosen = ReaderUi.tools.toMutableList()
+    val box = Md3.column(this)
+    fun render() {
+        box.removeAllViews()
+        for (id in READER_TOOLS) {
+            val on = id in chosen
+            box.addView(
+                Widgets.listItem(
+                    this, readerToolTitle(id),
+                    leading = Icons.view(this, readerToolGlyph(id),
+                        if (on) Md3.primary else Md3.onSurfaceVariant, 18),
+                    trailing = if (on) "check" else null,
+                    onClick = {
+                        if (on) {
+                            if (chosen.size <= 1) {
+                                toast("至少留一个按钮")
+                            } else {
+                                chosen.remove(id)
+                                render()
+                            }
+                        } else {
+                            chosen.add(id)
+                            render()
+                        }
+                    },
+                ),
+                Md3.lpDp(this, null, Md3.TAP),
+            )
+        }
+    }
+    render()
+    val sv = ScrollView(this).apply {
+        isVerticalScrollBarEnabled = false
+        addView(box)
+    }
+    Widgets.md3Dialog(this, "工具格按钮",
+        body = "勾选要排在底栏的按钮，至少留一个。",
+        content = sv,
+        confirm = "保存", dismiss = "取消",
+        onConfirm = {
+            // 顺序按 [READER_TOOLS] 的固定序排，不按点选先后：底栏位置不该随勾选顺序跳。
+            ReaderUi.tools = READER_TOOLS.filter { it in chosen }
+                .ifEmpty { listOf("search") }
+            saveReaderExtras()
+            showReader(info, index, text, src)
+        },
+    ).show()
 }
 
 /**
