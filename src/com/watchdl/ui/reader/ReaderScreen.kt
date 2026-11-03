@@ -77,7 +77,7 @@ internal object ReaderUi {
     var marginLevel = 1
     /** 阅读时屏幕常亮（legado 的「屏幕超时」）。 */
     var keepOn = false
-    /** 顶栏书签徽标（legado 的「书签徽标」）。 */
+    /** 顶栏 ⋮ 的书签徽标（legado 的「书签徽标」）：开时本章有书签就把 ⋮ 染成主色。 */
     var badgeOn = true
 
     /**
@@ -116,11 +116,19 @@ internal object ReaderMenu {
     var open = false
     /** 收起菜单的闭包，由当前阅读页挂上。 */
     var onClose: (() -> Unit)? = null
+    /**
+     * 顶栏 ⋮ 徽标的重画。
+     *
+     * 书签增删现在只能从「更多操作」Sheet 进，而 Sheet 关掉后阅读页还在，
+     * 徽标不会自己变色 —— 这里挂一个只改染色的闭包，比重建整页（会打回章首）便宜得多。
+     */
+    var badgeRefresh: (() -> Unit)? = null
 
     /** 收起并断开与页面的连接。换章、回目录、离屏时调。 */
     fun reset() {
         open = false
         onClose = null
+        badgeRefresh = null
         // 正文/标题控件是上一屏的，留着就是泄漏旧视图树。
         ReaderUi.bodyView = null
         ReaderUi.titleView = null
@@ -472,41 +480,44 @@ internal fun MainActivity.showReader(
     }, FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
-    // 顶栏：返回 + 书名 / 「章名 · 书源名」+ 书签徽标。
+    // 顶栏：返回 + 书名 / 「章名 · 书源名」+ 一枚 ⋮。
     // BookSource 接口不带名字（规则源才有 displayName），没名字就只显章名。
     val srcName = (src as? LegadoSource)?.displayName
     val subLine = listOfNotNull(
         info.chapters.getOrNull(index)?.title?.takeIf { it.isNotBlank() },
         srcName?.takeIf { it.isNotBlank() },
     ).joinToString(" · ")
-    // 顶栏只留书签：189 dp 宽放不下「返回 + 两个动作 + 书名」。
-    // 设置项改从 ⋮ 菜单进，工具格里本来就有一格。
+    // 右侧只留一枚 ⋮（= legado 的 `titleBarCompact=true`）：189 dp 宽放不下「返回 + 两个动作 + 书名」。
+    // legado 默认顶栏是 下载 / 刷新 / 换源 / 更多四个动作，收成一枚后全进「更多操作」Sheet。
     val bar = Widgets.topBar(this, info.name, onBack = { showToc(info) }, subtitle = subLine)
     bar.setBackgroundColor(readerBackground)
     if (light) Widgets.tintSubtree(bar, readerInk)
     // 顶栏副行的 TextView（widgets.topBar 在有 subtitle 时是「返回 / 两行栈 / 动作」三层）。
     // 拖全书进度滑条时把它临时改成「第 n/N 章 · 章名」，松手再恢复。
     val subTv = ((bar.getChildAt(1) as? LinearLayout)?.getChildAt(1) as? TextView)
-    // 书签徽标：对应 legado 的 BookmarkBadgeDelegate。本章有书签时图标转主色。
-    // 点一下就地加/移除，不重建页面 —— 重建会把滚动位置打回章首。
-    // 「书签徽标」关掉时顶栏右侧空着，只留返回。
-    if (ReaderUi.badgeOn) {
+    // legado 顶栏没有书签按钮，只有 bookmarkBadge 这个「本章有书签」的染色信号；
+    // 这里把它落在 ⋮ 上：本章有书签时 ⋮ 染主色。
+    // 「阅读设置 → 更多 → 徽标」关掉后不再染色，但仍可点（徽标是提示，不是开关）。
+    // 添加 / 移除书签走「更多操作」Sheet，不再就地改图标。
     val marked = BookmarkStore.has(info.bookId, index)
-    val mark = Icons.view(this, "bookmark", if (marked) readerAccent else readerMuted, Md3.ICON_ACTION)
-    mark.minimumWidth = Md3.dp(this, Md3.TAP)
-    mark.minimumHeight = Md3.dp(this, Md3.TOP_BAR)
-    mark.setPadding(Md3.dp(this, 6), 0, Md3.dp(this, 6), 0)
-    mark.isClickable = true
-    mark.background = Md3.ripple(this, Color.TRANSPARENT, Md3.dp(this, Md3.TAP / 2).toFloat())
-    mark.contentDescription = if (marked) "移除本章书签" else "加书签"
-    mark.setOnClickListener {
-        addMark(info, index, text)
-        val on = BookmarkStore.has(info.bookId, index)
-        mark.tint = if (on) readerAccent else readerMuted
-        mark.contentDescription = if (on) "移除本章书签" else "加书签"
-    }
-    bar.addView(mark, LinearLayout.LayoutParams(
+    val badged = marked && ReaderUi.badgeOn
+    val more = Icons.view(this, "more",
+        if (badged) readerAccent else readerMuted, Md3.ICON_ACTION)
+    more.minimumWidth = Md3.dp(this, Md3.TAP)
+    more.minimumHeight = Md3.dp(this, Md3.TOP_BAR)
+    more.setPadding(Md3.dp(this, 6), 0, Md3.dp(this, 6), 0)
+    more.isClickable = true
+    more.background = Md3.ripple(this, Color.TRANSPARENT, Md3.dp(this, Md3.TAP / 2).toFloat())
+    // 染色是视觉信号，听读器读不到颜色，所以描述里同步说一声。
+    more.contentDescription = if (badged) "更多操作，本章有书签" else "更多操作"
+    more.setOnClickListener { showReaderMenu(info, index, text, src) }
+    bar.addView(more, LinearLayout.LayoutParams(
         Md3.dp(this, Md3.TAP), Md3.dp(this, Md3.TOP_BAR)))
+    // Sheet 里加/删了书签后只改染色，不重建页。
+    ReaderMenu.badgeRefresh = {
+        val on = BookmarkStore.has(info.bookId, index) && ReaderUi.badgeOn
+        more.tint = if (on) readerAccent else readerMuted
+        more.contentDescription = if (on) "更多操作，本章有书签" else "更多操作"
     }
     val topStack = Md3.column(this)
     topStack.setBackgroundColor(readerBackground)
@@ -942,6 +953,8 @@ private fun MainActivity.showReaderMenu(
             BookmarkStore.remove(info.bookId, index)
             toast("已移除本章书签")
         } else addMark(info, index, text)
+        // 顶栏 ⋮ 的徽标跟着变色（不重建页面，否则滚动位置回章首）。
+        ReaderMenu.badgeRefresh?.invoke()
     }
     row("换源", "swap") { rememberReturn(); showSwap(info, src) }
     // legado 顶栏的刷新：重跑一次取正文，复用 preview 的本地缓存 + 在线兜底。
@@ -1362,6 +1375,8 @@ private fun MainActivity.showReaderSettings(info: BookInfo, index: Int, text: St
         val col = Md3.column(this)
         seg(col, "常亮", listOf("关" to false as Any, "开" to true),
             { ReaderUi.keepOn as Any }) { ReaderUi.keepOn = it as Boolean }
+        // 徽标：开时本章有书签就把顶栏 ⋮ 染成主色（legado 的 bookmarkBadge）。
+        // 染色在建顶栏时定下，所以这一个开关仍然重建页面。
         seg(col, "徽标", listOf("隐藏" to false as Any, "显示" to true),
             { ReaderUi.badgeOn as Any }) {
             ReaderUi.badgeOn = it as Boolean
