@@ -356,7 +356,9 @@ internal fun MainActivity.showReader(
     // 浅色底时整套前景色都要换：正文、顶栏、底栏按钮、进度。
     // 以前只换了正文，白底上顶栏还是黑块，上下章还是浅紫，几乎看不见。
     val light = Color.red(readerBackground) > 100
-    val readerInk = if (light) Color.rgb(28, 27, 31) else Md3.onSurface
+    // 番茄档带显式字色（legado readConfig 的 bgStr/textColor），优先；其余底色仍由深浅反推。
+    val readerInk = ReaderStyle.inkOverride(readerBackground)
+        ?: if (light) Color.rgb(28, 27, 31) else Md3.onSurface
     val readerAccent = if (light) Color.rgb(56, 30, 114) else Md3.primary
     val readerMuted = if (light) Color.rgb(73, 69, 79) else Md3.onSurfaceVariant
     val hairline = if (light) 0x24000000 else 0x24FFFFFF
@@ -384,7 +386,10 @@ internal fun MainActivity.showReader(
     // 顶栏收走后首行会顶到表壳圆弧上：四边补回页边距（scrollBody 只给了左右下）。
     // 阅读边距按「边距」档走：legado 的边距是四边滑杆，手表三档就够。
     val pad = Md3.dp(this, ReaderStyle.marginDp(ReaderUi.marginLevel))
-    body.setPadding(pad, pad, pad, pad)
+    // 上下各让出 14 dp 页眉页脚，再加 2 dp 留白。高度账：
+    // 屏 248 dp；页眉页脚各 14 dp → 正文可视 248−28−4=216 dp；
+    // 菜单展开时顶栏 TOP_BAR 64 + 底栏 111 以浮层盖住，不参与挤压正文。
+    body.setPadding(pad, Md3.dp(this, 14 + 2), pad, Md3.dp(this, 14 + 2))
     val col = Widgets.contentColumn(body)
 
     // 标题：legado 把章节标题排正文之前（TypographyTitleTab 的「标题位置」）。
@@ -406,6 +411,66 @@ internal fun MainActivity.showReader(
     restyleReader(text)
     frame.addView(body, FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+    // ── 页眉 / 页脚：各 14 dp 常驻细条，压在菜单浮层之下 ─────────────
+    // 不进 ScrollView：放进去会跟着正文滚走。z 序：body → 页眉页脚 → 护眼遮罩 → 胶囊 → 菜单。
+    // 两头的小字都是 10 sp、readerMuted、includeFontPadding=false。
+    fun stripText(t: CharSequence, gravity: Int): TextView =
+        Md3.text(this, t, 10f, readerMuted).apply {
+            includeFontPadding = false
+            Md3.ellipsize(this)
+            this.gravity = gravity or Gravity.CENTER_VERTICAL
+        }
+
+    /** 本章共多少屏、现在第几屏。正文未排版时按 1/1。 */
+    fun pageOf(): Pair<Int, Int> {
+        val layout = tv.layout ?: return 1 to 1
+        val vh = (body.height - body.paddingTop - body.paddingBottom).coerceAtLeast(1)
+        val linesPerPage = (vh / tv.lineHeight.coerceAtLeast(1)).coerceAtLeast(1)
+        val totalPages = ((layout.lineCount + linesPerPage - 1) / linesPerPage).coerceAtLeast(1)
+        val textTop = childTopIn(body, tv) + tv.paddingTop
+        val line = layout.getLineForVertical((body.scrollY - textTop).coerceAtLeast(0))
+        return (line / linesPerPage + 1).coerceIn(1, totalPages) to totalPages
+    }
+
+    // 页眉：左章节名（让位给屏号），右「n/m」。
+    val header = Md3.column(this)
+    header.setBackgroundColor(readerBackground)
+    val headerRow = Md3.row(this)
+    headerRow.setPadding(pad, 0, pad, 0)
+    val chapTv = stripText(info.chapters.getOrNull(index)?.title.orEmpty(), Gravity.START)
+    headerRow.addView(chapTv,
+        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+    val pageTv = stripText("1/1", Gravity.END)
+    headerRow.addView(pageTv)
+    header.addView(headerRow,
+        LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+    // 番茄档 headerMode=1 就是「页眉有线」，所以这根线常显，不做开关。
+    header.addView(View(this).apply { setBackgroundColor(hairline) }, Md3.lpDp(this, null, 1))
+    frame.addView(header, FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, 14), Gravity.TOP))
+
+    // 页脚：左书名，中全书进度（与底栏滑条同一口径），右电量。
+    val footer = Md3.column(this)
+    footer.setBackgroundColor(readerBackground)
+    footer.addView(View(this).apply { setBackgroundColor(hairline) }, Md3.lpDp(this, null, 1))
+    val footerRow = Md3.row(this)
+    footerRow.setPadding(pad, 0, pad, 0)
+    footerRow.addView(stripText(info.name, Gravity.START),
+        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+    // 中段进度：紧跟在书名的伸缩区之后、电量之前。14 dp 条里做精确居中要给两侧都留
+    // 配重，书名的可用宽度会被砍掉一半，反而更容易被截断 —— 所以这里只做「中偏右」。
+    val pctTv = stripText("", Gravity.CENTER)
+    footerRow.addView(pctTv)
+    val battery = BatteryText(this).apply {
+        setTextColor(readerMuted)
+        setPadding(Md3.dp(this@showReader, 4), 0, 0, 0)
+    }
+    footerRow.addView(battery)
+    footer.addView(footerRow,
+        LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+    frame.addView(footer, FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, 14), Gravity.BOTTOM))
 
     // ── 点击分区：上屏回滚一屏 / 中段出菜单 / 下屏前进一屏 ─────────────
     // 分区边界照 legado 九宫格的**行**分界（33% / 66%，`feature/reader/core/gesture/
@@ -508,15 +573,17 @@ internal fun MainActivity.showReader(
     }, FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
-    // 顶栏：返回 + 书名 / 「章名 · 书源名」+ 一枚 ⋮。
+    // 顶栏：返回 + 书名 / 「章名 · 书源名」+ 刷新 / 换源 / ⋮ 三枚动作。
     // BookSource 接口不带名字（规则源才有 displayName），没名字就只显章名。
     val srcName = (src as? LegadoSource)?.displayName
     val subLine = listOfNotNull(
         info.chapters.getOrNull(index)?.title?.takeIf { it.isNotBlank() },
         srcName?.takeIf { it.isNotBlank() },
     ).joinToString(" · ")
-    // 右侧只留一枚 ⋮（= legado 的 `titleBarCompact=true`）：189 dp 宽放不下「返回 + 两个动作 + 书名」。
-    // legado 默认顶栏是 下载 / 刷新 / 换源 / 更多四个动作，收成一枚后全进「更多操作」Sheet。
+    // 顶栏三枚动作（刷新 / 换源 / ⋮）：legado 默认顶栏是「下载 / 刷新 / 换源 / 更多」四枚，
+    // 手表 189 dp 宽只够三枚，下载归入「更多操作」Sheet。
+    // 宽度预算：顶栏可用 189−8=181 dp（Widgets.topBar 自带 PAD/2 两侧内边距）
+    // = 返回 32 + 书名 61 + 刷新 28 + 换源 28 + ⋮ 32。
     val bar = Widgets.topBar(this, info.name, onBack = {
         // 去目录挑章之前先记下当前位置，回来时才有「返回刚才那章」。
         markAnchor(info, index)
@@ -527,24 +594,59 @@ internal fun MainActivity.showReader(
     // 顶栏副行的 TextView（widgets.topBar 在有 subtitle 时是「返回 / 两行栈 / 动作」三层）。
     // 拖全书进度滑条时把它临时改成「第 n/N 章 · 章名」，松手再恢复。
     val subTv = ((bar.getChildAt(1) as? LinearLayout)?.getChildAt(1) as? TextView)
+    // 返回按钮由 Widgets.topBar 建成 Md3.TAP(48) 宽，收到 32 dp 才腾得出两枚动作。
+    (bar.getChildAt(0) as? View)?.let { b ->
+        (b.layoutParams as? LinearLayout.LayoutParams)?.let { lp ->
+            lp.width = Md3.dp(this, 32)
+            b.layoutParams = lp
+        }
+        b.minimumWidth = Md3.dp(this, 32)
+    }
+    // 书名让位：topBar 建出的是 FS_LG（22 sp），一行装不下「书名 + 三枚动作」。
+    // 收到 14 sp 单行，ellipsize 保留。有 subtitle 时 0 是书名、1 是副行 subTv。
+    val barTitle = (bar.getChildAt(1) as? LinearLayout)?.getChildAt(0) as? TextView
+        ?: (bar.getChildAt(1) as? TextView)
+    barTitle?.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14f)
+    barTitle?.setSingleLine(true)
     // legado 顶栏没有书签按钮，只有 bookmarkBadge 这个「本章有书签」的染色信号；
     // 这里把它落在 ⋮ 上：本章有书签时 ⋮ 染主色。
     // 「阅读设置 → 更多 → 徽标」关掉后不再染色，但仍可点（徽标是提示，不是开关）。
     // 添加 / 移除书签走「更多操作」Sheet，不再就地改图标。
     val marked = BookmarkStore.has(info.bookId, index)
     val badged = marked && ReaderUi.badgeOn
+    // 刷新与换源：与 ⋮ 同构（18 dp 图标挤在 28 dp 槽里，minimumWidth 覆盖 Md3.TAP=48）。
+    val refreshBtn = Icons.view(this, "refresh", readerMuted, 18)
+    refreshBtn.minimumWidth = Md3.dp(this, 28)
+    refreshBtn.minimumHeight = Md3.dp(this, Md3.TOP_BAR)
+    refreshBtn.setPadding(Md3.dp(this, 5), 0, Md3.dp(this, 5), 0)
+    refreshBtn.isClickable = true
+    refreshBtn.background = Md3.ripple(this, Color.TRANSPARENT, Md3.dp(this, 14).toFloat())
+    refreshBtn.contentDescription = "刷新本章"
+    refreshBtn.setOnClickListener { preview(info, index) }
+    bar.addView(refreshBtn, LinearLayout.LayoutParams(
+        Md3.dp(this, 28), Md3.dp(this, Md3.TOP_BAR)))
+    val swapBtn = Icons.view(this, "swap", readerMuted, 18)
+    swapBtn.minimumWidth = Md3.dp(this, 28)
+    swapBtn.minimumHeight = Md3.dp(this, Md3.TOP_BAR)
+    swapBtn.setPadding(Md3.dp(this, 5), 0, Md3.dp(this, 5), 0)
+    swapBtn.isClickable = true
+    swapBtn.background = Md3.ripple(this, Color.TRANSPARENT, Md3.dp(this, 14).toFloat())
+    swapBtn.contentDescription = "换源"
+    swapBtn.setOnClickListener { rememberReturn(); showSwap(info, src) }
+    bar.addView(swapBtn, LinearLayout.LayoutParams(
+        Md3.dp(this, 28), Md3.dp(this, Md3.TOP_BAR)))
     val more = Icons.view(this, "more",
         if (badged) readerAccent else readerMuted, Md3.ICON_ACTION)
-    more.minimumWidth = Md3.dp(this, Md3.TAP)
+    more.minimumWidth = Md3.dp(this, 32)
     more.minimumHeight = Md3.dp(this, Md3.TOP_BAR)
-    more.setPadding(Md3.dp(this, 6), 0, Md3.dp(this, 6), 0)
+    more.setPadding(Md3.dp(this, 4), 0, Md3.dp(this, 4), 0)
     more.isClickable = true
-    more.background = Md3.ripple(this, Color.TRANSPARENT, Md3.dp(this, Md3.TAP / 2).toFloat())
+    more.background = Md3.ripple(this, Color.TRANSPARENT, Md3.dp(this, 16).toFloat())
     // 染色是视觉信号，听读器读不到颜色，所以描述里同步说一声。
     more.contentDescription = if (badged) "更多操作，本章有书签" else "更多操作"
     more.setOnClickListener { showReaderMenu(info, index, text, src) }
     bar.addView(more, LinearLayout.LayoutParams(
-        Md3.dp(this, Md3.TAP), Md3.dp(this, Md3.TOP_BAR)))
+        Md3.dp(this, 32), Md3.dp(this, Md3.TOP_BAR)))
     // Sheet 里加/删了书签后只改染色，不重建页。
     ReaderMenu.badgeRefresh = {
         val on = BookmarkStore.has(info.bookId, index) && ReaderUi.badgeOn
@@ -671,6 +773,16 @@ internal fun MainActivity.showReader(
         if (limit <= 0) return 0
         return (body.scrollY * 100 / limit).coerceIn(0, 100)
     }
+
+    /** 页眉右字与页脚进度。两者只在滚动回调里刷新。 */
+    fun paintStrips() {
+        val p = pageOf()
+        pageTv.text = "${p.first}/${p.second}"
+        // 与底栏滑条同一口径：全书 = 章数 × 100，章内百分比落在余数里，取整到 0–100。
+        pctTv.text = "${((index * 100 + innerPct()) / total).coerceIn(0, 100)}%"
+    }
+    // 首帧先上一遍：没拖动过也要显示「第几屏 / 共几屏」与全书进度。
+    paintStrips()
     val atStart = index * 100 + innerPct()
     val seek = android.widget.SeekBar(this)
     seek.max = 100 * total
@@ -861,6 +973,8 @@ internal fun MainActivity.showReader(
             val pct = if (limit > 0) (y * 100 / limit).coerceIn(0, 100) else 0
             seek.progress = index * 100 + pct
         }
+        // 页眉的屏号与页脚的进度跟着正文走。
+        paintStrips()
         scrollSave?.let { body.removeCallbacks(it) }
         val task = Runnable { saveOffset(info.bookId, index, y) }
         scrollSave = task
@@ -941,7 +1055,8 @@ internal fun MainActivity.showReader(
 private fun MainActivity.restyleReader(raw: String) {
     val tv = ReaderUi.bodyView ?: return
     val light = Color.red(readerBackground) > 100
-    val ink = if (light) Color.rgb(28, 27, 31) else Md3.onSurface
+    val ink = ReaderStyle.inkOverride(readerBackground)
+        ?: if (light) Color.rgb(28, 27, 31) else Md3.onSurface
     // 缩进改的是文本本身，先把文本重设一遍再挂段距 span：
     // 旧的 ParaSpan 不会自己脱落，段距改回「无」时必须整串重设。
     val shown = if (raw.isEmpty()) "本章无正文" else shownText(raw)
@@ -994,6 +1109,60 @@ private fun MainActivity.applyParaSpacing(tv: TextView, text: CharSequence) {
         sp.setSpan(ParaSpan(extra), i, i + 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
     }
     tv.setText(sp, TextView.BufferType.SPANNABLE)
+}
+
+/**
+ * 页脚电量：读系统电池广播。
+ *
+ * 先不注册就读一次粘性广播：读到了才挂接收器；读不到就显示「—」且不注册 ——
+ * 为一个永远不更新的数字挂着广播接收器没有意义。
+ */
+private class BatteryText(ctx: android.content.Context) : TextView(ctx) {
+    private val filter =
+        android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED)
+    private var registered = false
+
+    /** 广播里的 level / scale 折成 0–100；读不到给 null。 */
+    private fun pct(i: android.content.Intent?): Int? {
+        if (i == null) return null
+        val level = i.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1)
+        val scale = i.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1)
+        if (level < 0 || scale <= 0) return null
+        return (level * 100 / scale).coerceIn(0, 100)
+    }
+
+    private val rx = object : android.content.BroadcastReceiver() {
+        override fun onReceive(c: android.content.Context?, i: android.content.Intent?) {
+            pct(i)?.let { text = "$it%" }
+        }
+    }
+
+    /** 粘性广播的初值；null 表示这台设备读不到电量。 */
+    private val sticky: Int? =
+        runCatching { pct(context.registerReceiver(null, filter)) }.getOrNull()
+
+    init {
+        setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 10f)
+        includeFontPadding = false
+        setSingleLine(true)
+        gravity = Gravity.END or Gravity.CENTER_VERTICAL
+        text = sticky?.let { "$it%" } ?: "—"
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        if (sticky == null || registered) return
+        // 注册失败也不影响显示：初值已经画上了。
+        registered = runCatching { context.registerReceiver(rx, filter) }.isSuccess
+    }
+
+    override fun onDetachedFromWindow() {
+        if (registered) {
+            runCatching { context.unregisterReceiver(rx) }
+            registered = false
+        }
+        super.onDetachedFromWindow()
+    }
 }
 
 /** 段末行高。chooseHeight 每行会被调两次，加一次就够。 */
@@ -1050,7 +1219,13 @@ private fun MainActivity.showReaderMenu(
         )
     }
 
+    // 行序照 legado 的 ReadMenuActionDefs：换源与刷新在前（读不下去时最常按的两个），
+    // 目录与章内查找其次，工具与书签类收在后面。
     val marked = BookmarkStore.has(info.bookId, index)
+    row("换源", "swap") { rememberReturn(); showSwap(info, src) }
+    // legado 顶栏的刷新：重跑一次取正文，复用 preview 的本地缓存 + 在线兜底。
+    row("刷新本章", "refresh") { preview(info, index) }
+    row("离线缓存", "download") { startDownload(info) }
     row("目录", "menu") { markAnchor(info, index); showToc(info, src) }
     row("章内查找", "search") { showFind(info, index, text, src) }
     // 自动翻页：标题带当前开着还是关着。开的时候顺手收菜单，直接回正文看它滚。
@@ -1071,10 +1246,6 @@ private fun MainActivity.showReaderMenu(
         // 顶栏 ⋮ 的徽标跟着变色（不重建页面，否则滚动位置回章首）。
         ReaderMenu.badgeRefresh?.invoke()
     }
-    row("换源", "swap") { rememberReturn(); showSwap(info, src) }
-    // legado 顶栏的刷新：重跑一次取正文，复用 preview 的本地缓存 + 在线兜底。
-    row("刷新本章", "refresh") { preview(info, index) }
-    row("离线缓存", "download") { startDownload(info) }
     row("阅读设置", "settings") { showReaderSettings(info, index, text, src) }
     // 工具格里到底放哪几格，就是 legado 的 bottomBarButtons 配置。
     row("工具格按钮", "grid") { showToolsDialog(info, index, text, src) }
@@ -1457,11 +1628,14 @@ private fun MainActivity.showReaderSettings(info: BookInfo, index: Int, text: St
     // ── 主题：legado GlobalThemePage + BgTextConfigSheet + EyeProtection ──
     fun buildTheme(): View {
         val col = Md3.column(this)
+        // 5 个 chip 等宽挤在 189 dp 里（每个约 23 dp），两字的「番茄」会被截断，
+        // 所以与前四档一样取单字「茄」。底色与字色取自 legado readConfig 样本。
         val bgs = listOf(
             "深" to DARK_BG,
             "浅" to Color.WHITE,
             "暖" to Color.rgb(255, 248, 230),
             "米" to Color.rgb(232, 225, 210),
+            "茄" to ReaderStyle.BG_FANQIE_DAY,
         )
         seg(col, "背景", bgs.map { it.first to (it.second as Any) }, { readerBackground as Any }) {
             val wasLight = Color.red(readerBackground) > 100

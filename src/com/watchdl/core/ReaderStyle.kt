@@ -158,6 +158,26 @@ object ReaderStyle {
         return ((from + delta) % count + count) % count
     }
 
+    // ── 主题底色：legado 的 readConfig 样本 ──────────────────
+    //
+    // 番茄小说那份 readConfig.json 给了五档底色，第 5 档日间 #ded9c5 / 夜间 #0e0e0e
+    // 并各自带显式字色（bgStr、textColor 与 Night 变体），不是「深底配白字、浅底配黑字」
+    // 那种由深浅反推的关系。米黄底上的字是棕褐色，反推会得到近黑，读着发硬。
+    /** 番茄主题的底色（ARGB，不透明）。 */
+    const val BG_FANQIE_DAY = 0xFFDED9C5.toInt()
+    const val BG_FANQIE_NIGHT = 0xFF0E0E0E.toInt()
+
+    /**
+     * 底色带显式前景色时返回它，否则 null（交回「由深浅反推」）。
+     *
+     * 用位运算拼色，不调 android.graphics.Color：自检要能在纯 JVM 上跑。
+     */
+    fun inkOverride(bg: Int): Int? = when (bg) {
+        BG_FANQIE_DAY -> 0xFF5B4928.toInt()
+        BG_FANQIE_NIGHT -> 0xFFBFBFBF.toInt()
+        else -> null
+    }
+
     /** 命中计数。legado 写作“n / 共 m”，这里补上单位免得误读成页码。 */
     fun counterText(current: Int, count: Int): String =
         if (count <= 0) "共 0 处" else "第 ${current.coerceIn(0, count - 1) + 1} / 共 $count 处"
