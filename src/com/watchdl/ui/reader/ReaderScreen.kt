@@ -1,7 +1,9 @@
 package com.watchdl.ui.reader
 
 import android.graphics.Color
+import android.view.GestureDetector
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
@@ -44,6 +46,35 @@ internal object ReaderUi {
     var findAt = -1
     /** 命中列表属于哪一章（书号#章号）。换章后旧偏移失效，必须丢掉。 */
     var findOwner = ""
+}
+
+/**
+ * 阅读页菜单的显隐状态。
+ *
+ * 菜单收起时屏上没有返回箭头，系统返回必须先收菜单、再退回目录 ——
+ * 这条规则不能只写在某个 View 的点击里，所以状态放在对象上：
+ * showReader 每次重建都覆盖 [onClose]，离开阅读页时 [reset]。
+ */
+internal object ReaderMenu {
+    /** 菜单当前是否展开。 */
+    var open = false
+    /** 收起菜单的闭包，由当前阅读页挂上。 */
+    var onClose: (() -> Unit)? = null
+
+    /** 收起并断开与页面的连接。换章、回目录、离屏时调。 */
+    fun reset() {
+        open = false
+        onClose = null
+    }
+
+    /** 系统返回：菜单展开时先收菜单。返回 true 表示已消费这次返回。 */
+    fun consumeBack(): Boolean {
+        if (!open) return false
+        open = false
+        val close = onClose
+        close?.invoke()
+        return close != null
+    }
 }
 
 /** 章内查找的结果条数上限。20 条刚好一屏滚两三下，再多就是噪音。 */
@@ -102,13 +133,66 @@ internal fun MainActivity.showReader(info: BookInfo, index: Int, text: String, s
         ReaderUi.findHits = emptyList()
         ReaderUi.findAt = -1
     }
-    root.removeAllViews()
-    // 整块页身先装进 page，外面再套一层 frame：护眼遮罩要能盖住全屏。
-    // 189×248 dp 上遮罩只能做一层不可点的半透明层，撑不出旁的位置。
-    val page = Md3.column(this)
+    // 沉浸阅读：正文铺满整屏，顶栏 / 工具格 / 底栏收进一层浮层。
+    // 照 legado 的 ReadBookMenuBar：上下两条 + 全屏透明关闭层，正文区不压暗、不推移。
+    // 以前三段常驻，189×248 dp 上正文只剩 100 dp 出头。
+    ReaderMenu.reset()
+    val frame = FrameLayout(this)
+    /** 菜单显隐。先置空再赋值：关闭层与点击分区都要先引用它。 */
+    var setMenu: (Boolean) -> Unit = {}
 
-    // legado 阅读页顶栏：书名在上，副行是「章名 · 书源名」。
-    // 原来只有章名，看完一章不知道读的是哪本书、正文从哪个源来的。
+    val body = Widgets.scrollBody(this, crownStep, crownGlide)
+    body.setBackgroundColor(readerBackground)
+    // 顶栏收走后首行会顶到表壳圆弧上：四边补回页边距（scrollBody 只给了左右下）。
+    val pad = Md3.dp(this, Md3.PAD)
+    body.setPadding(pad, pad, pad, pad)
+    val col = Widgets.contentColumn(body)
+
+    // 正文用专用字号（比正文 UI 大），行距 1.8 在手表上偏松，手机上刚好。
+    val shown = if (text.isEmpty()) "本章无正文" else shownText(text)
+    val tv = Md3.text(this, shown, readerSize, readerInk)
+    tv.setLineSpacing(Md3.dp(this, 2).toFloat(), readerSpacing)
+    tv.justificationMode = android.text.Layout.JUSTIFICATION_MODE_INTER_WORD
+    tv.setPadding(Md3.dp(this, 3), Md3.dp(this, 2), Md3.dp(this, 3), Md3.dp(this, 24))
+    applyParaSpacing(tv, shown)
+    col.addView(tv)
+    frame.addView(body, FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+    // 点屏幕中列 = 菜单显隐（legado 的九宫格里中间格是菜单）。
+    // 左右两列沿用「上一章 / 下一章」：legado 那里是翻页，手表是滚动阅读，没有页可翻。
+    // 用 OnTouchListener 旁听而不消费事件，竖滑仍由 ScrollView 接管，滚动手感不变。
+    val taps = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+        override fun onDown(e: MotionEvent): Boolean = true
+        override fun onSingleTapUp(e: MotionEvent): Boolean {
+            val w = body.width
+            if (w > 0) {
+                when {
+                    e.x < w / 3f -> prevChapter(info, index)
+                    e.x > w * 2 / 3f -> nextChapter(info, index)
+                    else -> setMenu(!ReaderMenu.open)
+                }
+            }
+            return true
+        }
+    })
+    body.setOnTouchListener { _, e ->
+        taps.onTouchEvent(e)
+        // 返回 false：事件继续交给 ScrollView，滚动、表冠、长按都不受影响。
+        false
+    }
+
+    // ── 菜单浮层 ──────────────────────────────────────
+    // 关闭层全屏可点、不压暗：legado 的 ReaderMenuDismissLayer 就是一层透明可点区域。
+    val menu = FrameLayout(this)
+    menu.visibility = View.GONE
+    menu.addView(View(this).apply {
+        isClickable = true
+        setOnClickListener { setMenu(false) }
+    }, FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+    // 顶栏：返回 + 书名 / 「章名 · 书源名」+ 书签徽标。
     // BookSource 接口不带名字（规则源才有 displayName），没名字就只显章名。
     val srcName = (src as? LegadoSource)?.displayName
     val subLine = listOfNotNull(
@@ -138,27 +222,17 @@ internal fun MainActivity.showReader(info: BookInfo, index: Int, text: String, s
     }
     bar.addView(mark, LinearLayout.LayoutParams(
         Md3.dp(this, Md3.TAP), Md3.dp(this, Md3.TOP_BAR)))
-    page.addView(bar)
-    page.addView(View(this).apply { setBackgroundColor(hairline) }, Md3.lpDp(this, null, 1))
+    val topStack = Md3.column(this)
+    topStack.setBackgroundColor(readerBackground)
+    // 顶栏空白处的点按不穿透到关闭层：整条是菜单的一部分，不是「点一下收菜单」。
+    topStack.isClickable = true
+    topStack.addView(bar)
+    topStack.addView(View(this).apply { setBackgroundColor(hairline) }, Md3.lpDp(this, null, 1))
+    menu.addView(topStack, FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP))
 
-    val body = Widgets.scrollBody(this, crownStep, crownGlide)
-    body.setBackgroundColor(readerBackground)
-    val col = Widgets.contentColumn(body)
-
-    // 正文用专用字号（比正文 UI 大），行距 1.8 在手表上偏松，手机上刚好。
-    val shown = if (text.isEmpty()) "本章无正文" else shownText(text)
-    val tv = Md3.text(this, shown, readerSize, readerInk)
-    tv.setLineSpacing(Md3.dp(this, 2).toFloat(), readerSpacing)
-    tv.justificationMode = android.text.Layout.JUSTIFICATION_MODE_INTER_WORD
-    tv.setPadding(Md3.dp(this, 3), Md3.dp(this, 2), Md3.dp(this, 3), Md3.dp(this, 24))
-    applyParaSpacing(tv, shown)
-    col.addView(tv)
-
-    page.addView(body, Md3.lpWeight(1f))
-
-    // 工具格：照 legado 底栅的图标网格（每行 5 个 × N 行）。
-    // 189 dp 一行放 5 个只剩 30 dp，改成 3×2 六格。
-    page.addView(View(this).apply { setBackgroundColor(hairline) }, Md3.lpDp(this, null, 1))
+    // 工具格：照 legado 底栏的图标网格（手机上一行 5 格）。
+    // 189 dp 一行放 5 个只剩 30 dp，改成一行 3 格 × 2 行。
     val grid = Md3.column(this)
     grid.setBackgroundColor(readerBackground)
     fun toolCell(glyph: String, label: String, act: () -> Unit): LinearLayout {
@@ -195,31 +269,6 @@ internal fun MainActivity.showReader(info: BookInfo, index: Int, text: String, s
         grid.addView(row, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, 30)))
     }
-    page.addView(grid)
-    page.addView(View(this).apply { setBackgroundColor(hairline) }, Md3.lpDp(this, null, 1))
-
-    // 读到哪了：滚动停下再记，滚动过程中每帧写盘没有意义。
-    // onPause / onDestroy 会再存一次，覆盖突然退出、切后台的情况。
-    readerBody = body
-    readerBookId = info.bookId
-    readerIndex = index
-    body.setOnScrollChangeListener { _, _, y, _, _ ->
-        readerOffset = y
-        scrollSave?.let { body.removeCallbacks(it) }
-        val task = Runnable { saveOffset(info.bookId, index, y) }
-        scrollSave = task
-        body.postDelayed(task, 400)
-    }
-    // 恢复上次读到的地方。等布局完成再滚，否则拿不到 maxScroll。
-    val restore = readOffset(info.bookId).takeIf { it > 0 }
-    if (restore != null) {
-        body.post {
-            val child = body.getChildAt(0)
-            val limit = ((child?.height ?: 0) - body.height +
-                body.paddingTop + body.paddingBottom).coerceAtLeast(0)
-            body.scrollTo(0, restore.coerceAtMost(limit))
-        }
-    }
 
     // 底部：进度 + 上/下一章。两边的点击目标都要够大，手机上单手也能摸到。
     // 底栏必须背实底色 + 一根分隔线：否则正文从按钮下面露出来，看着像排版坏了。
@@ -227,7 +276,6 @@ internal fun MainActivity.showReader(info: BookInfo, index: Int, text: String, s
     foot.gravity = Gravity.CENTER_VERTICAL
     foot.setPadding(Md3.dp(this, 12), 0, Md3.dp(this, 12), 0)
     foot.setBackgroundColor(readerBackground)
-    page.addView(View(this).apply { setBackgroundColor(hairline) }, Md3.lpDp(this, null, 1))
 
     val prev = Md3.text(this, "‹ 上一章", Md3.FS_MD, readerAccent, bold = true).apply {
         gravity = Gravity.CENTER
@@ -269,14 +317,68 @@ internal fun MainActivity.showReader(info: BookInfo, index: Int, text: String, s
     foot.addView(next)
     // 高度必须容得下 HIT 高的子项，否则页码被挤到第二行（P0-3）。
     foot.layoutParams = Md3.lpDp(this, null, Md3.HIT)
-    page.addView(foot)
 
-    // 护眼：整屏暖色半透明层盖在页身上，不消费触摸，滚动照常。
+    // 底栏 = 工具格 + 进度行。legado 是「进度行在上、工具格在下」，手表反过来：
+    // 表壳是圆的，底部 48 dp 处可见弦宽约 164 dp，30 dp 的格子放到最底下一行会被切掉。
+    val bottom = Md3.column(this)
+    bottom.setBackgroundColor(readerBackground)
+    bottom.isClickable = true
+    bottom.addView(View(this).apply { setBackgroundColor(hairline) }, Md3.lpDp(this, null, 1))
+    bottom.addView(grid)
+    bottom.addView(View(this).apply { setBackgroundColor(hairline) }, Md3.lpDp(this, null, 1))
+    bottom.addView(foot)
+    menu.addView(bottom, FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
+
+    setMenu = { on ->
+        ReaderMenu.open = on
+        menu.animate().cancel()
+        topStack.animate().cancel()
+        bottom.animate().cancel()
+        if (on) {
+            menu.visibility = View.VISIBLE
+            menu.alpha = 0f
+            topStack.translationY = -Md3.dp(this, 20).toFloat()
+            bottom.translationY = Md3.dp(this, 20).toFloat()
+            menu.animate().alpha(1f).setDuration(120).start()
+            topStack.animate().translationY(0f).setDuration(140).start()
+            bottom.animate().translationY(0f).setDuration(140).start()
+        } else {
+            menu.animate().alpha(0f).setDuration(90).withEndAction {
+                // 动画途中又展开了就不能隐藏：判断当前状态，不判断这一次的意图。
+                if (!ReaderMenu.open) menu.visibility = View.GONE
+            }.start()
+        }
+    }
+    // 系统返回先收菜单（见 MainActivity.onBackPressed）：菜单是浮层，不是新的一屏。
+    ReaderMenu.onClose = { setMenu(false) }
+
+    // 读到哪了：滚动停下再记，滚动过程中每帧写盘没有意义。
+    // onPause / onDestroy 会再存一次，覆盖突然退出、切后台的情况。
+    readerBody = body
+    readerBookId = info.bookId
+    readerIndex = index
+    body.setOnScrollChangeListener { _, _, y, _, _ ->
+        readerOffset = y
+        scrollSave?.let { body.removeCallbacks(it) }
+        val task = Runnable { saveOffset(info.bookId, index, y) }
+        scrollSave = task
+        body.postDelayed(task, 400)
+    }
+    // 恢复上次读到的地方。等布局完成再滚，否则拿不到 maxScroll。
+    val restore = readOffset(info.bookId).takeIf { it > 0 }
+    if (restore != null) {
+        body.post {
+            val child = body.getChildAt(0)
+            val limit = ((child?.height ?: 0) - body.height +
+                body.paddingTop + body.paddingBottom).coerceAtLeast(0)
+            body.scrollTo(0, restore.coerceAtMost(limit))
+        }
+    }
+
+    // 护眼：整屏暖色半透明层盖在正文上，不消费触摸，滚动照常。
     // legado 是色温矩阵 + 强度滑杆 + 夜间自动；手表只留开关，写进差别表。
     if (ReaderUi.eyeCare) {
-        val frame = FrameLayout(this)
-        frame.addView(page, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         frame.addView(View(this).apply {
             setBackgroundColor(ReaderStyle.eyeColor())
             // 不拦截触摸：遮罩只上色，翻页与滚动必须还能用。
@@ -284,9 +386,17 @@ internal fun MainActivity.showReader(info: BookInfo, index: Int, text: String, s
             isFocusable = false
         }, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        root.addView(frame, Md3.lpWeight(1f))
-    } else {
-        root.addView(page, Md3.lpWeight(1f))
+    }
+    // 菜单最后加：z 序在正文与护眼层之上。
+    frame.addView(menu, FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+    root.addView(frame, Md3.lpWeight(1f))
+
+    // 第一次进阅读页给一次提示：菜单默认收起，不说一句没人知道点中间。
+    val hint = getSharedPreferences("reader", android.content.Context.MODE_PRIVATE)
+    if (!hint.getBoolean("hint_tap", false)) {
+        hint.edit().putBoolean("hint_tap", true).apply()
+        toast("点屏幕中间出菜单")
     }
 }
 
@@ -434,6 +544,8 @@ internal fun MainActivity.preview(info: BookInfo, index: Int) {
     val src = (curScreen as? Screen.Toc)?.src
         ?: (curScreen as? Screen.Reader)?.src
         ?: tocSrc
+    // 正文要重取，屏上的菜单连着的旧视图树跟着作废。
+    com.watchdl.ui.reader.ReaderMenu.reset()
     root.removeAllViews()
     root.addView(Widgets.topBar(this, ch.title, onBack = { showToc(info) }))
     val body = Widgets.scrollBody(this, crownStep, crownGlide)

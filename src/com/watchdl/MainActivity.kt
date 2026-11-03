@@ -1885,7 +1885,8 @@ class MainActivity : Activity() {
             Screen.My -> showShelf()
             is Screen.Toc -> goBackToPrevious()
             is Screen.Hits -> goBackToPrevious()
-            is Screen.Reader -> showToc(s.info)
+            // 菜单是浮层不是新的一屏：展开时先收菜单，收起时再回目录。
+            is Screen.Reader -> if (!ReaderMenu.consumeBack()) showToc(s.info)
             is Screen.Sources -> goBackToPrevious()
             is Screen.Market -> showSources()
             is Screen.Progress -> showToc(s.info)
