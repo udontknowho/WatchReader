@@ -609,7 +609,13 @@ class MainActivity : Activity() {
         if (wantTitle.isNotBlank()) {
             ReaderUi.swapReturnTitle = ""
             val at = ReaderStyle.chapterIndex(info.chapters.map { it.title }, wantTitle)
-            if (at >= 0 && !info.chapters[at].locked) { preview(info, at); return }
+            if (at >= 0 && !info.chapters[at].locked) {
+                // 钉住换源前那一屏：showReader 里 pinned 分支会按 restoreKey/restoreAt 落位。
+                // 只写章号的话回来是章首，读到一半的人得自己再滑回去。
+                ReaderUi.restoreKey = "${info.bookId}#$at"
+                ReaderUi.restoreAt = ReaderUi.swapReturnAt
+                preview(info, at); return
+            }
             toast("没找到原章节，从目录挑一章")
         }
         root.removeAllViews()
@@ -1019,6 +1025,7 @@ class MainActivity : Activity() {
     private fun showTocFailed(name: String, candidates: List<BookHit>) {
         // 换源全失败：把「回原章」的残值清掉，否则下一次正常进目录会被它劫持。
         ReaderUi.swapReturnTitle = ""
+        ReaderUi.swapReturnAt = 0
         val count = candidates.size
         root.removeAllViews()
         root.addView(Widgets.topBar(this, name, onBack = { goBackToPrevious() }))

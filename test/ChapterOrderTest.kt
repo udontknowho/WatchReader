@@ -89,6 +89,9 @@ fun main() {
         com.watchdl.core.ChapterOrder.normalise(dupLink.map { (t, u) -> com.watchdl.core.ChapterRef(u, t) }).map { it.title },
         listOf("第一章 甲", "第二章 乙"))
 
+    // --- chapterIndex（换源回原章的三级放宽）用例在 ReaderChapterIndexTest.kt ---
+    bad += chapterIndexSuite()
+
     println(if (bad == 0) "ChapterOrder 自检通过" else "ChapterOrder 失败 $bad 项")
     if (bad > 0) kotlin.system.exitProcess(1)
 }
