@@ -34,6 +34,13 @@ import java.io.File
 internal object ReaderUi {
     /** 窗口亮度：legado 是 0–100 滑杆，这里存 0.15–1.0 的实际窗口亮度。 */
     var bright = ReaderStyle.BRIGHT_MID
+    /**
+     * 亮度跟随系统（legado 的 BrightnessAuto）。
+     *
+     * 为真时 [applyBright] 不再写死窗口亮度，而是交回 -1f；用户一拖亮度滑条就自动关掉，
+     * 与 legado 的 ToggleBrightnessAuto 同一个语义。
+     */
+    var brightAuto = false
     /** 护眼遮罩开关。 */
     var eyeCare = false
     /** 护眼强度档：0 弱 / 1 中 / 2 强。对应遮罩 alpha。 */
@@ -130,6 +137,7 @@ private const val FIND_MAX = 20
 internal fun MainActivity.loadReaderExtras() {
     val p = getSharedPreferences("reader", android.content.Context.MODE_PRIVATE)
     ReaderUi.bright = ReaderStyle.brightClamp(p.getFloat("bright", ReaderStyle.BRIGHT_MID))
+    ReaderUi.brightAuto = p.getBoolean("brightAuto", false)
     ReaderUi.eyeCare = p.getBoolean("eye", false)
     ReaderUi.eyeLevel = p.getInt("eyeLevel", 1).coerceIn(0, 2)
     ReaderUi.eyeAuto = p.getBoolean("eyeAuto", false)
@@ -155,6 +163,7 @@ internal fun MainActivity.loadReaderExtras() {
 internal fun MainActivity.saveReaderExtras() {
     getSharedPreferences("reader", android.content.Context.MODE_PRIVATE).edit()
         .putFloat("bright", ReaderStyle.brightClamp(ReaderUi.bright))
+        .putBoolean("brightAuto", ReaderUi.brightAuto)
         .putBoolean("eye", ReaderUi.eyeCare)
         .putInt("eyeLevel", ReaderUi.eyeLevel)
         .putBoolean("eyeAuto", ReaderUi.eyeAuto)
@@ -178,7 +187,8 @@ internal fun MainActivity.saveReaderExtras() {
 private fun MainActivity.applyBright() {
     val w = window ?: return
     val attrs = w.attributes ?: return
-    attrs.screenBrightness = ReaderStyle.brightClamp(ReaderUi.bright)
+    // 跟随系统时交回 -1f（BRIGHTNESS_OVERRIDE_NONE）：系统按环境光自己调，比锁死一档舒服。
+    attrs.screenBrightness = if (ReaderUi.brightAuto) -1f else ReaderStyle.brightClamp(ReaderUi.bright)
     w.attributes = attrs
     if (ReaderUi.keepOn) {
         w.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -435,7 +445,8 @@ internal fun MainActivity.showReader(
         gravity = Gravity.CENTER
     }
     prev.isClickable = true
-    prev.minHeight = Md3.dp(this, Md3.HIT)
+    // 进度行只有 36 dp（legado 同高），子项热区不再撑到 HIT，否则把行顶高。
+    prev.minHeight = Md3.dp(this, 36)
     prev.setPadding(Md3.dp(this, 4), 0, Md3.dp(this, 4), 0)
     // 与「下一节」对称：本章还有没读完的节时，回头必须先回上一节。
     prev.setOnClickListener {
@@ -449,7 +460,7 @@ internal fun MainActivity.showReader(
         gravity = Gravity.CENTER_VERTICAL or Gravity.CENTER_HORIZONTAL
         // 宽度不够时会折行，把底栏撑成两行（与左右按钮不共基线）。
         setSingleLine(true)
-        minHeight = Md3.dp(this@showReader, Md3.HIT)
+        minHeight = Md3.dp(this@showReader, 36)
     }
     foot.addView(m, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
@@ -457,7 +468,7 @@ internal fun MainActivity.showReader(
         gravity = Gravity.CENTER
     }
     next.isClickable = true
-    next.minHeight = Md3.dp(this, Md3.HIT)
+    next.minHeight = Md3.dp(this, 36)
     next.setPadding(Md3.dp(this, 4), 0, Md3.dp(this, 4), 0)
     // 本章还有未读的节时，这一下必须先翻节 —— 否则读者点「下一章」，
     // 本章后半截就再也不会被看到。
@@ -469,18 +480,63 @@ internal fun MainActivity.showReader(
         next.isClickable = false
     }
     foot.addView(next)
-    // 高度必须容得下 HIT 高的子项，否则页码被挤到第二行（P0-3）。
-    foot.layoutParams = Md3.lpDp(this, null, Md3.HIT)
+    // 高度按 legado 的进度行：36 dp，不再用 HIT。
+    foot.layoutParams = Md3.lpDp(this, null, 36)
 
-    // 底栏 = 工具格 + 进度行。legado 是「进度行在上、工具格在下」，手表反过来：
-    // 表壳是圆的，底部 48 dp 处可见弦宽约 164 dp，30 dp 的格子放到最底下一行会被切掉。
+    // 亮度行：照 legado `ReadBookMenuBarBottom.kt:138-158` 的「跟随系统按钮 + 亮度滑条」。
+    // 按钮亮 = 跟随系统开着；一拖滑条就退出跟随系统（legado 的 ToggleBrightnessAuto 同义）。
+    val brightRow = Md3.row(this)
+    brightRow.setPadding(Md3.dp(this, 12), 0, Md3.dp(this, 12), 0)
+    brightRow.setBackgroundColor(readerBackground)
+    val autoBtn = Icons.view(this, "brightness", readerMuted, 18)
+    autoBtn.minimumWidth = Md3.dp(this, 32)
+    autoBtn.minimumHeight = Md3.dp(this, 32)
+    autoBtn.isClickable = true
+    autoBtn.contentDescription = "跟随系统亮度"
+    autoBtn.background = Md3.ripple(this, Color.TRANSPARENT, Md3.dp(this, 16).toFloat())
+    fun paintAuto() { autoBtn.tint = if (ReaderUi.brightAuto) readerAccent else readerMuted }
+    paintAuto()
+    brightRow.addView(autoBtn, LinearLayout.LayoutParams(Md3.dp(this, 32), Md3.dp(this, 32)))
+    // max 取 85：亮度档是 0.15–1.0，每格 1% 正好 85 档。
+    val brightSeek = android.widget.SeekBar(this)
+    brightSeek.max = 85
+    brightSeek.progress = (((ReaderUi.bright - 0.15f) / 0.85f) * 85).toInt().coerceIn(0, 85)
+    // SeekBar 自带 48 dp 最小高，不归零会把 32 dp 的亮度行顶高。
+    brightSeek.minimumHeight = 0
+    brightSeek.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+        override fun onProgressChanged(sb: android.widget.SeekBar?, p: Int, fromUser: Boolean) {
+            if (!fromUser) return
+            // 一动手就不再跟随系统：手动值优先，否则改了也看不出变化。
+            if (ReaderUi.brightAuto) { ReaderUi.brightAuto = false; paintAuto() }
+            ReaderUi.bright = 0.15f + p / 85f * 0.85f
+            applyBright()
+        }
+        override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
+        // 拖动过程中每帧写盘没有意义，松手存一次。
+        override fun onStopTrackingTouch(sb: android.widget.SeekBar?) { saveReaderExtras() }
+    })
+    autoBtn.setOnClickListener {
+        ReaderUi.brightAuto = !ReaderUi.brightAuto
+        paintAuto()
+        applyBright()
+        saveReaderExtras()
+    }
+    brightRow.addView(brightSeek, LinearLayout.LayoutParams(0, Md3.dp(this, 32), 1f))
+    brightRow.layoutParams = Md3.lpDp(this, null, 32)
+
+    // 底栏三行（自上而下）：分隔线 / 亮度行 32 / 分隔线 / 进度行 36 / 分隔线 / 工具格。
+    // 行序照 legado 的 ReadBookMenuBarBottom：亮度在上、进度居中、工具格在下。
+    // 高度账（189×248 dp）：1 + 32 + 1 + 36 + 1 + 工具格 = 111 dp（工具格 40 时），
+    // 占窗口 45%，比 legado 的 64% 上限还留 47 dp。
     val bottom = Md3.column(this)
     bottom.setBackgroundColor(readerBackground)
     bottom.isClickable = true
     bottom.addView(View(this).apply { setBackgroundColor(hairline) }, Md3.lpDp(this, null, 1))
-    bottom.addView(grid)
+    bottom.addView(brightRow)
     bottom.addView(View(this).apply { setBackgroundColor(hairline) }, Md3.lpDp(this, null, 1))
     bottom.addView(foot)
+    bottom.addView(View(this).apply { setBackgroundColor(hairline) }, Md3.lpDp(this, null, 1))
+    bottom.addView(grid)
     menu.addView(bottom, FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
 
@@ -952,7 +1008,11 @@ private fun MainActivity.showReaderSettings(info: BookInfo, index: Int, text: St
             showReader(info, index, text, src)
         }
         slider(col, "亮度", 0.15f, 1f, 17, ReaderUi.bright,
-            { "${(it * 100).toInt()}%" }) { ReaderUi.bright = it }
+            { "${(it * 100).toInt()}%" }) {
+            // 与底栏亮度滑条同源：手动改亮度就退出跟随系统。
+            ReaderUi.bright = it
+            ReaderUi.brightAuto = false
+        }
         seg(col, "护眼", listOf("关" to false as Any, "开" to true),
             { ReaderUi.eyeCare as Any }) { ReaderUi.eyeCare = it as Boolean; save(); showReader(info, index, text, src) }
         slider(col, "强度", 0f, 2f, 2, ReaderUi.eyeLevel.toFloat(),
