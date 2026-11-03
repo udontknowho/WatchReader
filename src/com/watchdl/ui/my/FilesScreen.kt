@@ -237,6 +237,14 @@ private fun readPreview(f: File): PreviewText {
                     cut = true
                     break
                 }
+                // 单行本身就可能超上限：sources/ 下的书源是压成一行的 JSON。
+                // 整行塞进 TextView 要按上千字算折行，排版会明显卡顿，所以按字符截。
+                if (line.length > PREVIEW_CHARS) {
+                    sb.append(line, 0, PREVIEW_CHARS)
+                    cut = true
+                    lines++
+                    break
+                }
                 sb.append(line).append('\n')
                 lines++
             }
@@ -268,7 +276,7 @@ internal fun MainActivity.renderTextPreview(f: File, onBack: () -> Unit) {
             return@bg
         }
         val head = humanBytes(p.bytes) + " · " +
-            (if (p.cut) "只显示前 ${p.lines} 行" else "${p.lines} 行")
+            (if (p.cut) "已截断，只显示开头" else "${p.lines} 行")
         col.addView(Widgets.groupCard(this, head) { g ->
             g.addView(Md3.text(this, p.text.ifBlank { "（空文件）" }, Md3.FS_MD, Md3.onSurface)
                 .apply {

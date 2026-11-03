@@ -111,8 +111,12 @@ internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
     // 点了进书源编辑（`onOriginClick` → `OpenBookSourceEdit`）。
     // 我们对应的是书源管理屏；没有对应物时就不加点击，不留死链接。
     srcName(src).takeIf { it.isNotBlank() }?.let { n ->
-        val origin = Md3.ellipsize(Md3.text(this, "书源：$n", Md3.FS_SM, Md3.primary))
-        if (src is LegadoSource) {
+        // 能点时用 primary，不能点时退回次级灰。primary 是「这里可以按」的信号，
+        // 点不动的文字染成 primary 就是在骗人 —— 之前内置源也染了 primary 却按不动。
+        val clickable = src is LegadoSource
+        val origin = Md3.ellipsize(Md3.text(this, "书源：$n", Md3.FS_SM,
+            if (clickable) Md3.primary else Md3.onSurfaceVariant))
+        if (clickable) {
             origin.background = Md3.ripple(this, android.graphics.Color.TRANSPARENT, 0f)
             origin.isClickable = true
             origin.contentDescription = "书源：$n，点按管理书源"
