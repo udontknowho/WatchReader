@@ -163,10 +163,10 @@ internal fun MainActivity.showHits(keyword: String, allHits: List<BookHit>, stat
         }
         // 翻页条：只在结果超过一窗时才出，否则会让小屏多占两行。
         if (hits.size > HITS_WINDOW) {
-            val nav = Widgets.button(this, "${winStart + 1}–$winEnd / ${hits.size} 条", "tonal", {
+            val nav = Widgets.button(this, "${winStart + 1}–$winEnd / ${hits.size} 条", "tonal") {
                 hitsWinStart = if (winEnd >= hits.size) 0 else winEnd
                 showHits(keyword, allHits, stat, offset, batch, replay = true)
-            })
+            }
             // 一窗是 HITS_WINDOW（60）条，不是一百条：说「一百」会让用户以为丢了一半。
             nav.contentDescription = "翻到下一批，一次 $HITS_WINDOW 条"
             col.addView(nav)
@@ -176,9 +176,9 @@ internal fun MainActivity.showHits(keyword: String, allHits: List<BookHit>, stat
 
     // 换一批源：放在**固定底栏**，列表怎么滑都在。
     if (canRotate) {
-        val next = Widgets.button(this, "换一批（还剩 $remaining 条源）", "tonal", {
+        val next = Widgets.button(this, "换一批（还剩 $remaining 条源）", "tonal") {
             rotateSources(hitsScreen)
-        })
+        }
         next.contentDescription = "换一批源，还有 $remaining 条源没搜过"
         next.layoutParams = Md3.lpDp(this, null, Md3.BTN).apply {
             topMargin = Md3.dp(this@showHits, Md3.GAP / 2)

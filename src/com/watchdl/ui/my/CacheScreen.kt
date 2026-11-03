@@ -185,7 +185,7 @@ internal fun MainActivity.showCache() {
             CacheUi.query = ""
             CacheUi.open = null
             showCache()
-        }, Md3.lpDp(this, null, 32))
+        })
     } else if (shown.size != rows.size) {
         // 只有真在筛状态时才提一句，否则这句话每屏都占一行，读的人又不需要它。
         col.addView(Md3.ellipsize(Md3.text(this,
@@ -424,13 +424,13 @@ private fun MainActivity.cacheChapterWindow(col: LinearLayout, u: CacheUsage) {
     val last = job.chapters.lastIndex
     val start = CacheUi.win.coerceIn(0, last)
     val end = (start + CHAPTER_WINDOW - 1).coerceAtMost(last)
-    // 翻页是轻动作：text 变体、矮一档（32dp）、满宽，居中。
+    // 翻页是轻动作：text 变体、矮一档、随字宽靠右（宽度规则在 Widgets.button 里）。
     val gap = Md3.dp(this, Md3.GAP)
     if (start > 0) {
-        col.addView(Widgets.button(this, "↑ 前面还有 $start 章", "text") {
+        col.addView(Widgets.button(this, "↑ 前面还有 $start 章", "text", topMarginPx = gap / 2) {
             CacheUi.win = (start - CHAPTER_WINDOW).coerceAtLeast(0)
             showCache()
-        }, Md3.lpDp(this, null, 32).apply { topMargin = gap / 2 })
+        })
     }
     for (i in start..end) {
         val ch = job.chapters[i]
@@ -438,10 +438,10 @@ private fun MainActivity.cacheChapterWindow(col: LinearLayout, u: CacheUsage) {
         col.addView(cacheChapterRow(u, i, ch, job.statuses[i], done))
     }
     if (end < last) {
-        col.addView(Widgets.button(this, "↓ 后面还有 ${last - end} 章", "text") {
+        col.addView(Widgets.button(this, "↓ 后面还有 ${last - end} 章", "text", topMarginPx = gap / 2) {
             CacheUi.win = end + 1
             showCache()
-        }, Md3.lpDp(this, null, 32).apply { topMargin = gap / 2 })
+        })
     }
 
     // 整本动作区。数字从按钮标签里搬出来单占一行：标签带「（371 章）」这种
@@ -470,10 +470,10 @@ private fun MainActivity.cacheChapterWindow(col: LinearLayout, u: CacheUsage) {
     // 要离线读就整本下，两个动作各自闭合。
     col.addView(Widgets.button(this, "删除这本书", "tonal") { deleteCacheBook(u) },
         Md3.lpDp(this, null, Md3.BTN).apply { topMargin = gap })
-    col.addView(Widgets.button(this, "收起", "text") {
+    col.addView(Widgets.button(this, "收起", "text", topMarginPx = gap / 2) {
         CacheUi.open = null
         showCache()
-    }, Md3.lpDp(this, null, Md3.BTN).apply { topMargin = gap / 2 })
+    })
 }
 
 /**

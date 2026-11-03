@@ -1018,8 +1018,9 @@ class MainActivity : Activity() {
         col.addView(Widgets.button(this, "换源重试", "filled") {
             if (candidates.isNotEmpty()) loadToc(name, "", candidates) else toast("没有可重试的源")
         }, Md3.lpDp(this, null, Md3.BTN).apply { topMargin = Md3.dp(this@MainActivity, Md3.GAP) })
-        col.addView(Widgets.button(this, "返回搜索", "text") { goBackToPrevious() },
-            Md3.lpDp(this, null, Md3.BTN).apply { topMargin = Md3.dp(this@MainActivity, Md3.GAP) })
+        col.addView(Widgets.button(this, "返回搜索", "text", topMarginPx = Md3.dp(this, Md3.GAP)) {
+            goBackToPrevious()
+        })
         root.addView(body)
     }
 

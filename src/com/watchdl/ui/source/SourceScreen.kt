@@ -680,7 +680,7 @@ internal fun MainActivity.showDiscover(
         Triple(gender == "male", "男频", { if (gender != "male") showDiscover(site, "male", "") }),
         Triple(gender == "female", "女频", { if (gender != "female") showDiscover(site, "female", "") }),
     )) {
-        val b = Widgets.button(this, label, if (on) "filled" else "tonal", act)
+        val b = Widgets.button(this, label, if (on) "filled" else "tonal", onClick = act)
         b.contentDescription = label
         head.addView(b, LinearLayout.LayoutParams(0, Md3.dp(this, Md3.BTN), 1f).apply {
             if (head.childCount > 0) leftMargin = Md3.dp(this@showDiscover, Md3.GAP / 2)
@@ -767,9 +767,9 @@ internal fun MainActivity.showDiscover(
         }.onFailure { e ->
             holder.addView(Md3.text(this, "取不到：${e.message?.take(60)}",
                 Md3.FS_SM, Md3.error))
-            holder.addView(Widgets.button(this, "重试", "tonal", {
+            holder.addView(Widgets.button(this, "重试", "tonal") {
                 showDiscover(site, gender, rankKey)
-            }))
+            })
         }
     }
     attachTabs(1)
@@ -880,7 +880,7 @@ internal fun MainActivity.showMarket(page: Int, accumulated: List<YioveSource.It
         }.onFailure { e ->
             col.removeAllViews()
             col.addView(Widgets.emptyState(this, "warning", "拉取失败：${e.message?.take(60)}"))
-            col.addView(Widgets.button(this, "重试", "tonal", { showMarket(page, accumulated) }))
+            col.addView(Widgets.button(this, "重试", "tonal") { showMarket(page, accumulated) })
         }
     }
 }
@@ -917,7 +917,7 @@ private fun MainActivity.renderMarket(
         ) { if (!has) installFromMarket(it0.name, it0.id, page, items) })
     }
 
-    val more = Widgets.button(this, "下一页", "tonal", { showMarket(page + 1, items) })
+    val more = Widgets.button(this, "下一页", "tonal") { showMarket(page + 1, items) }
     more.layoutParams = Md3.lpDp(this, null, Md3.BTN).apply {
         topMargin = Md3.dp(this@renderMarket, Md3.GAP)
     }

@@ -198,8 +198,39 @@ object Widgets {
     }
 
     /** 按钮。转发到 [Md3.button]，让调用处只认 Widgets 一个入口。 */
-    fun button(ctx: Context, label: CharSequence, variant: String = "filled", onClick: (() -> Unit)? = null): TextView =
-        Md3.button(ctx, label, variant, onClick)
+    /**
+     * 按钮。宽度按变体定，页面不再各自写 LayoutParams：
+     *
+     * - filled / tonal / outline：主操作，铺满一行（危险动作也走这里，够大才好点）。
+     * - text：次操作，宽度随字、靠右，不再拉成一条横杠。
+     *
+     * 一行两枚时调用处自己传等分 weight，会覆盖这里的值。
+     *
+     * @param topMarginPx 上边距，传像素（[Md3.dp] 换算），0 表示不设
+     */
+    fun button(
+        ctx: Context,
+        label: CharSequence,
+        variant: String = "filled",
+        topMarginPx: Int = 0,
+        onClick: (() -> Unit)? = null,
+    ): TextView {
+        val b = Md3.button(ctx, label, variant, onClick)
+        // text 变体矮一档：它是轻动作，占满 34 dp 只会把列表挤下去。
+        b.layoutParams = if (variant == "text") {
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, Md3.dp(ctx, 32)
+            ).apply {
+                gravity = Gravity.END
+                topMargin = topMarginPx
+            }
+        } else {
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(ctx, Md3.BTN)
+            ).apply { topMargin = topMarginPx }
+        }
+        return b
+    }
 
     /** 应用栏图标按钮。转发到 [Md3.iconButton]，让调用处只认 Widgets 一个入口。 */
     fun iconButton(ctx: Context, glyph: String, onClick: (() -> Unit)? = null): View =
