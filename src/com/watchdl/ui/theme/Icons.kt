@@ -24,6 +24,8 @@ internal object Icons {
      */
     val DATA = mapOf(
         "back" to "M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z",
+        // 行尾箭头：legado `ClickableSettingItem` 的 ChevronRight，设置各页的可跳行都用它。
+        "chevron" to "M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z",
         "menu" to "M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z",
         "search" to "M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3" +
             "S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5z" +

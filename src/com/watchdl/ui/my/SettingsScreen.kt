@@ -20,9 +20,13 @@ import com.watchdl.ui.theme.Widgets
 /**
  * 设置（从 `MainActivity.kt` 搬出，行为不变；对应 legado `ui/config/`）。
  *
- * legado 的设置是一张导航列表 + 十来个子页（主题 / 阅读 / 其他 / 封面 / 缓存 /
- * 备份 / 隐私 / 实验室）。手表只留我们真有的四页：主题、其他、阅读，
+ * legado 的设置是一张导航列表 + 十来个子页（外观 / 阅读界面 / 高级 / 封面 / 缓存 /
+ * 备份 / 隐私 / 实验室）。手表只留我们真有能力的四页：外观、高级、阅读界面，
  * 外加本应用独有的表冠。每页的项都按 legado 的分组语义摆，尺寸按 189 × 248 dp 压。
+ *
+ * 屏名沿用 legado 的中文原名：`theme_setting` 是「外观」、`other_setting` 是「高级」、
+ * `read_config` 是「阅读界面」。不叫「主题设置 / 其他设置 / 阅读设置」——
+ * 后者还与阅读页里的「阅读设置」重名，两个屏同名会把返回路径看糊。
  */
 
 /** 设置子页代号。字符串进 [Screen.Settings]，进程重建后能回到同一子页。 */
@@ -50,7 +54,7 @@ private const val LABEL_W_LONG = 58
  * 设置页：首屏导航 + 四个子页，照 legado `ui/config/ConfigNavScreen`。
  *
  * 原来 7 组挤在一页，189 × 248 dp 上要滚三屏，找一项得靠记忆滑。
- * 阅读设置**改完立即落盘**（不用点「确定」），预览实时跟着变。
+ * 阅读界面**改完立即落盘**（不用点「确定」），预览实时跟着变。
  *
  * [page] 取 [PAGE_MAIN] / [PAGE_THEME] / [PAGE_READ] / [PAGE_CROWN] / [PAGE_OTHER]。
  */
@@ -58,10 +62,10 @@ internal fun MainActivity.showSettings(page: String = PAGE_MAIN) {
     setScreen(Screen.Settings(page))
     root.removeAllViews()
     val title = when (page) {
-        PAGE_THEME -> "主题设置"
-        PAGE_READ -> "阅读设置"
+        PAGE_THEME -> "外观"
+        PAGE_READ -> "阅读界面"
         PAGE_CROWN -> "表冠"
-        PAGE_OTHER -> "其他设置"
+        PAGE_OTHER -> "高级"
         else -> "设置"
     }
     root.addView(Widgets.topBar(this, title, onBack = { goBackToPrevious() }))
@@ -85,7 +89,10 @@ internal fun MainActivity.showSettings(page: String = PAGE_MAIN) {
  * description。我们原来每项都写副标题，双行 72 dp × 4 = 288 dp，一屏放不下；
  * 去掉副标题后单行 48 dp × 4 = 192 dp，顶栏之后刚好一屏全见。
  *
- * 顺序照 legado 的语义：主题 → 其他 → 阅读。表冠放末位 ——
+ * 行尾照 legado 的 `ClickableSettingItem` 挂 ChevronRight：这四行都是「进去还有一屏」，
+ * 不挂箭头时整行看着像开关，点下去却换页。
+ *
+ * 顺序照 legado 的语义：外观 → 高级 → 阅读界面。表冠放末位 ——
  * 本机靠旋转表冠滚动列表与正文，每格位移与追平时长直接决定手感，
  * 不同人差异很大，所以给一个入口；legado 没有表冠页，这是本应用独有的。
  */
@@ -93,14 +100,14 @@ private fun MainActivity.settingsMain(col: LinearLayout) {
     val card = Widgets.groupCard(this, null) { g ->
         fun e(title: String, page: String) {
             // 单行项压到 HIT（48 dp）：M3 最小热区，再矮点不中。
-            g.addView(Widgets.groupItem(ctx = this, title = title) {
+            g.addView(Widgets.groupItem(ctx = this, title = title, trailing = "chevron") {
                 rememberReturn()
                 showSettings(page)
             }.apply { minimumHeight = Md3.dp(this@settingsMain, Md3.HIT) })
         }
-        e("主题设置", PAGE_THEME)
-        e("其他设置", PAGE_OTHER)
-        e("阅读设置", PAGE_READ)
+        e("外观", PAGE_THEME)
+        e("高级", PAGE_OTHER)
+        e("阅读界面", PAGE_READ)
         e("表冠", PAGE_CROWN)
     }
     // groupCard 自带 16 dp 下边距，这里清掉：192 dp 的行 + 16 dp 就会多出半行滚动。
@@ -109,12 +116,14 @@ private fun MainActivity.settingsMain(col: LinearLayout) {
 }
 
 /**
- * 主题设置：一个「配色」组，每套配色一行，当前那行右侧写「当前」。
+ * 外观（legado `ThemeConfigScreen` 里我们能做到的部分）：一组配色 + 一行恢复默认。
  *
- * 原来是 2 × 3 芯片网格。legado 主题页的配色是列表行（`SettingItem` 带 option
- * 显示当前值），行里能直接写名字，芯片只有 39 dp 宽、两个字要缩到 12 sp 才塞得下。
- * 六行 × 56 dp 超出一屏，靠 body 滚动：行高不再压，56 dp 是 M3 单行标准，
- * 压了热区不够点。
+ * 每套配色一行，行首画该套的主色点 —— legado 的配色是一排色卡，看一眼颜色就能选；
+ * 189 dp 宽放不下六张 64 dp 卡，改成行首色点，信息不丢，高度还能接受。
+ * 当前那行照 legado 的 `option` 位写「当前」，用主色。
+ *
+ * legado 这页还有主题模式（跟随/浅/深）、纯黑、字体、切图标、字体缩放、背景图、模糊：
+ * 本应用只有深色档、没有字体与背景图能力，这些不造假开关。
  */
 private fun MainActivity.settingsTheme(col: LinearLayout) {
     col.addView(Widgets.groupCard(this, "配色") { g ->
@@ -123,6 +132,7 @@ private fun MainActivity.settingsTheme(col: LinearLayout) {
             g.addView(Widgets.listItem(
                 ctx = this,
                 title = p.name,
+                leading = paletteDot(p.primary),
                 // legado 的 option 用主色显示当前值；这里就是「当前」两个字。
                 trailing = if (on) "当前" else null,
                 onClick = {
@@ -134,14 +144,45 @@ private fun MainActivity.settingsTheme(col: LinearLayout) {
             ))
         }
     })
+
+    // legado 这页末尾是一行「恢复默认」+ 确认框（`AppAlertDialog`）。
+    // 我们可恢复的只有配色，描述里就写清只动配色，别让人以为阅读设置也被抹了。
+    col.addView(Widgets.groupCard(this, null) { g ->
+        g.addView(Widgets.groupItem(
+            ctx = this,
+            title = "恢复默认",
+            subtitle = "配色回到默认的紫。阅读设置、书架排序都不动。",
+            onClick = { askResetPalette() },
+        ))
+    })
+}
+
+/** 恢复默认配色前先问一句：换配色会整屏变色，误点一次很难自己找回是哪套。 */
+private fun MainActivity.askResetPalette() {
+    Widgets.md3Dialog(
+        this, "恢复默认配色",
+        body = "配色回到默认的紫。阅读设置、书架排序都不动。",
+        confirm = "恢复",
+        onConfirm = {
+            pickTheme(Palette.DEFAULT_ID)
+            showSettings(PAGE_THEME)
+        },
+    ).show()
+}
+
+/** 配色行首的色点：用该套的主色画一个小圆，比只写色名好认。 */
+private fun MainActivity.paletteDot(color: Int): android.view.View = android.view.View(this).apply {
+    background = Md3.bg(color, Md3.dp(this@paletteDot, 9).toFloat())
+    minimumWidth = Md3.dp(this@paletteDot, 18)
+    minimumHeight = Md3.dp(this@paletteDot, 18)
 }
 
 /**
- * 阅读设置：预览块 + 「屏幕设置」组 + 「正文」组。
+ * 阅读界面：预览块 + 「屏幕显示与亮度」组 + 「正文」组。
  *
- * 分组照 legado `ReadConfigScreen`：屏幕设置（方向/状态栏/护眼/亮度）、翻页控制、
- * 其他。我们没有方向和翻页方式（手表只有表冠与触摸滚动），留下的项按语义归两组：
- * 背景、亮度、护眼是「屏幕」，字号、行距、段距、首行缩进是「正文」。
+ * 分组照 legado `ReadConfigScreen`：屏幕显示与亮度、翻页控制、其他。
+ * 我们没有屏幕方向和翻页方式（手表只有表冠与触摸滚动），留下的项按语义归两组：
+ * 背景、亮度、跟随系统、护眼是「屏幕」，字号、行距、段距、首行缩进是「正文」。
  * 亮度、护眼、段距、缩进本来就有（阅读页菜单里能改），这里只是把它们露出来。
  */
 private fun MainActivity.settingsRead(col: LinearLayout) {
@@ -170,7 +211,7 @@ private fun MainActivity.settingsRead(col: LinearLayout) {
         "暖" to Color.rgb(255, 248, 230),
     )
 
-    col.addView(Widgets.groupCard(this, "屏幕设置") { g ->
+    col.addView(Widgets.groupCard(this, "屏幕显示与亮度") { g ->
         segmentRow(g, "背景", bgs.map { it.first to (it.second as Any) },
             get = { readerBackground as Any },
             set = { readerBackground = it as Int }) {
@@ -183,6 +224,13 @@ private fun MainActivity.settingsRead(col: LinearLayout) {
             set = { ReaderUi.bright = ReaderStyle.brightValue(it as Int) }) {
             // 只落盘，不在这里改窗口亮度：applyBright 压的是整个窗口，
             // 而离开阅读页本来就没复位（已知遗留）。从设置里改会连书架一起变暗。
+            saveReaderExtras()
+        }
+        // legado 的亮度是「滑杆 + 跟随系统」两项；我们的滑杆在阅读页里，设置页给三档。
+        // 跟随系统这一项一直缺（`brightAuto` 存了盘却没处改），这里补上。
+        segmentRow(g, "跟随系统", listOf("关" to false, "开" to true).map { it.first to (it.second as Any) },
+            get = { ReaderUi.brightAuto as Any },
+            set = { ReaderUi.brightAuto = it as Boolean }) {
             saveReaderExtras()
         }
         segmentRow(g, "护眼", listOf("关" to false, "开" to true).map { it.first to (it.second as Any) },
@@ -261,11 +309,11 @@ private fun MainActivity.settingsCrown(col: LinearLayout) {
 }
 
 /**
- * 其他设置：导出、书源、开发者三组，组与行都照 legado `OtherConfigScreen`。
+ * 高级：导出、书源、开发者三组，组与行都照 legado `OtherConfigScreen`。
  *
- * legado 的分组是「语言 / 更新 / 主界面 / 阅读 / 其他」，每项都带 description。
- * 我们没有语言、更新、主界面，留下三组，每行补一句 description ——
- * 一句话说清点了会发生什么，比只写「版本」两字强。
+ * legado 的分组是「（无标题：语言 / 更新 / 启动检查更新）/ 主界面 / 阅读 / 高级」，
+ * 每项都带 description。我们没有语言、更新、主界面与阅读类的全局开关，
+ * 留下三组，每行补一句 description —— 一句话说清点了会怎样，比只写两字强。
  *
  * 原来第四组「关于」只剩一个只读的版本行，已整组删掉：版本信息归独立「关于」页
  * （`ui/my/AboutScreen.kt`，从「我的」进）。legado 的 OtherConfigScreen 也没有
@@ -282,7 +330,8 @@ private fun MainActivity.settingsOther(col: LinearLayout) {
     })
 
     col.addView(Widgets.groupCard(this, "书源") { g ->
-        g.addView(Widgets.listItem(this, "管理书源", "启用/禁用、分组与导入", twoLine = true) {
+        g.addView(Widgets.listItem(this, "管理书源", "启用/禁用、分组与导入", twoLine = true,
+            trailing = "chevron") {
             rememberReturn(); showSources()
         })
     })
@@ -290,7 +339,12 @@ private fun MainActivity.settingsOther(col: LinearLayout) {
     // 开发者模式：默认关闭，关着时只有普通 logcat，不占内存不写盘。
     col.addView(Widgets.groupCard(this, "开发者") { g ->
         g.addView(Widgets.listItem(this, "开发者模式", devLogHint(), twoLine = true,
-            trailing = if (devLogOn()) "开" else "关") { toggleDevLog() })
+            trailing = if (devLogOn()) "开" else "关") {
+            toggleDevLog()
+            // toggleDevLog 自己会重画成设置首屏（日志页那边也共用一个入口）。
+            // 这里再回到「高级」：否则点一下开关就被弹回首屏，开关像是没了反馈。
+            showSettings(PAGE_OTHER)
+        })
         if (devLogOn()) {
             g.addView(Widgets.listItem(this, "导出日志", "写入文件后系统分享", twoLine = true) { exportDevLog() })
             g.addView(Widgets.listItem(this, "清空日志", "删掉 dev.log，阅读记录不受影响", twoLine = true) {
