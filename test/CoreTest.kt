@@ -312,7 +312,8 @@ fun main() {
     run {
         // 无 BOM 的 UTF-16LE：只看替换符会判成 UTF-8，整本变带洞的乱码。
         // 「一」= U+4E00 低字节是 0x00、落在偶位；换行极少时靠数零字节会把 LE 判成 BE。
-        // 这个样本才打得穿旧判据（旧算法给出「NNNNNNNN」）。
+        // 样本取「每行 156 个一」，是 229664d 那版零字节判据唯一会翻车（给出 NNNNNNNN）
+        // 的形态 —— 现在用来防那种判据回潮。
         val dash = "一".repeat(156) + "\n"
         val dec = com.watchdl.core.LocalImport.decodeText(dash.repeat(40).toByteArray(Charsets.UTF_16LE))
         check("全是「一」的 UTF-16LE 能认", dec.count { it == '一' } == 156 * 40,
@@ -336,11 +337,24 @@ fun main() {
         check("纯 ASCII 不被判成 UTF-16", enDec.startsWith("The quick brown fox"),
             enDec.take(12))
         // 不带空格的连续 ASCII 编码成 UTF-16BE：端序只能靠零字节奇偶位定。
-        val noSpace = "abcdefghijklmnopqrstuvwxyz0123456789".repeat(30)
+        // 只用小写字母：含数字时旧判据反而能判对，这条就测不出缺陷。
+        val noSpace = "abcdefghijklmnopqrstuvwxyz".repeat(40)
         val beDec = com.watchdl.core.LocalImport.decodeText(noSpace.toByteArray(Charsets.UTF_16BE))
         check("UTF-16BE 连续 ASCII 不判成 LE", beDec == noSpace, beDec.take(12))
         val leDec = com.watchdl.core.LocalImport.decodeText(noSpace.toByteArray(Charsets.UTF_16LE))
         check("UTF-16LE 连续 ASCII 不判成 BE", leDec == noSpace, leDec.take(12))
+
+        // 语料里 30% 常用汉字的两个字节都落在可打印 ASCII 区间（来=eg、是=/f）。
+        // 若按「双 ASCII 字节就当乱码」扣分，对话体密集的 UTF-16 中文会整本翻去 GB18030。
+        val dense = "来人是谁？就是那个在大学里认识的女孩子。\n".repeat(60)
+        val denseDec = com.watchdl.core.LocalImport.decodeText(dense.toByteArray(Charsets.UTF_16LE))
+        check("双 ASCII 字节汉字不误判", denseDec.trimEnd('\n') == dense.trimEnd('\n'), denseDec.take(12))
+
+        // 英文为主、只夹少量中文的 UTF-8：取样窗切在多字节字符中间也不能判成 GBK。
+        val enBody = "The quick brown fox jumps over the lazy dog.\n".repeat(400)
+        val sparse = enBody + "这里只有一个中文字。\n" + enBody
+        val sparseDec = com.watchdl.core.LocalImport.decodeText(sparse.toByteArray(Charsets.UTF_8))
+        check("英文夹少量中文仍是 UTF-8", sparseDec.contains("这里只有一个中文字"), sparseDec.take(12))
 
         // 分章：全角数字、各种分隔符、番外、Chapter 无空格。
         val heads = listOf(
@@ -374,6 +388,19 @@ fun main() {
         val nat = com.watchdl.core.LocalImport.epubChapters(bosN.toByteArray())
         check("无 spine 按自然序", nat.map { it.title } == listOf("第1章", "第2章", "第10章", "第11章"),
             nat.map { it.title }.toString())
+
+        // 20 位流水号不能溢出成 0；前导零与非数字混排也得稳住。
+        val bigZip = java.io.ByteArrayOutputStream()
+        java.util.zip.ZipOutputStream(bigZip).use { z ->
+            for (f in listOf("a2", "a99999999999999999999", "ch01", "ch1", "x0", "x00")) {
+                z.putNextEntry(java.util.zip.ZipEntry("$f.xhtml"))
+                z.write("<html><body><h1>$f 章</h1><p>正文内容够十个字才行吧。</p></body></html>".toByteArray())
+                z.closeEntry()
+            }
+        }
+        val bt = com.watchdl.core.LocalImport.epubChapters(bigZip.toByteArray()).map { it.title }
+        check("20 位数字不溢出", bt.indexOf("a2 章") < bt.indexOf("a99999999999999999999 章"), bt.toString())
+        check("前导零不并列丢章", bt.size == 6, bt.toString())
 
         val dir = java.io.File(System.getProperty("java.io.tmpdir"), "local-edge-test")
         dir.deleteRecursively(); dir.mkdirs()

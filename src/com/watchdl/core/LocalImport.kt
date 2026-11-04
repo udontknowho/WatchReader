@@ -37,6 +37,19 @@ object LocalImport {
     /** epub 文本条目累计封顶。 */
     private const val MAX_EPUB_TEXT = 64L * 1024 * 1024
 
+    /**
+     * 正文累计上限的实际取值。
+     *
+     * [MAX_EPUB_TEXT] 是 64MB 的天花板，但整本正文在 importInto 里是**一次性**解成
+     * List<Chapter> 再落盘的，实测 55MB 正文要 185MB 堆。手表给不了这么多，所以取
+     * 四分之一堆为上限：真机上这个数才是能兑现的承诺。想吃到 64MB 得先把解析改成
+     * 边解析边落盘。
+     */
+    private fun textCap(): Long {
+        val quarter = Runtime.getRuntime().maxMemory() / 4
+        return if (quarter < MAX_EPUB_TEXT) quarter else MAX_EPUB_TEXT
+    }
+
     /** 读最多 [cap] 字节，不把流整个吃进内存。 */
     private fun readCapped(ins: InputStream, cap: Int): ByteArray {
         val buf = ByteArray(16 * 1024)
@@ -71,9 +84,13 @@ object LocalImport {
     /**
      * 字节 → 文本。
      *
-     * 顺序：BOM（UTF-8 / UTF-16 两种端序）→ 严格 UTF-8 → GB18030 兜底。
-     * 判据是替换符个数：GBK 的正文字节按 UTF-8 解几乎必然出 `\uFFFD`，
-     * 反过来 UTF-8 按 GB18030 解也会出。两种都解一遍，取坏的少的那种。
+     * 有 BOM 直接按 BOM 解。没有 BOM 走三步：
+     * 1. 首/中/尾各取 4KB 拼成样本（[sampleProbes]），四种编码各解一遍打分，取最高。
+     *    打分看高频字占比：解错编码得到的是随机码位，几乎不含「的/一/是」。
+     * 2. 端序靠 0 字节的奇偶分布定，不靠打分 —— 纯 ASCII 的 UTF-16 只有这一步能分。
+     * 3. 全文兜底：只在结果替换符占比超过 1% 时，才在 UTF-8 与 GB18030 之间换一次。
+     *    兜底必须双向受限：GB18030 对随机字节几乎不产替换符，无边界的「谁少用谁」
+     *    会把只多一个坏字节的正确结果整本换掉。
      *
      * 不用 [CharsetFontDecoder]：那套是番茄私用区码位的字符表还原，
      * 与「文件是什么编码」是两件事，解决不了 GBK 文件。
@@ -95,11 +112,16 @@ object LocalImport {
         // 只取开头会在「GBK 文件前面是一段英文版权页」时判错，所以首/中/尾各取一段。
         val cs = pickCharset(sampleProbes(bytes))
         val picked = runCatching { String(bytes, cs) }.getOrDefault(String(bytes, Charsets.UTF_8))
-        // 兜底：全文替换符谁少用谁。8KB 样本看不见的坏字节，靠这一步收。
         val bad = picked.count { it == '\uFFFD' }
-        if (bad > 0) {
-            val gb = runCatching { String(bytes, charset("GB18030")) }.getOrNull()
-            if (gb != null && gb.count { it == '\uFFFD' } < bad) return gb.trim('\uFEFF', '\u0000')
+        // 兜底只在 UTF-8 / GB18030 之间换，且坏字节得占 1% 以上才算「真判错了」。
+        // GB18030 对随机字节几乎不产替换符，不设这两道闸，正确结果里多一个坏字节
+        // 就会被整本换成另一种编码的乱码，而且换完连替换符都没有。
+        if (bad > 0 && bad * 100 > picked.length && (cs == Charsets.UTF_8 || cs.name() == "GB18030")) {
+            val alt = if (cs == Charsets.UTF_8) runCatching { charset("GB18030") }.getOrNull()
+                      else Charsets.UTF_8
+            val other = alt?.let { runCatching { String(bytes, it) }.getOrNull() }
+            if (other != null && other.count { it == '\uFFFD' } * 2 < bad)
+                return other.trim('\uFEFF', '\u0000')
         }
         return picked.trim('\uFEFF', '\u0000')
     }
@@ -110,9 +132,41 @@ object LocalImport {
         if (bytes.size <= n * 3) return bytes
         val out = ByteArrayOutputStream(n * 3)
         out.write(bytes, 0, n)
-        out.write(bytes, (bytes.size - n) / 2, n)
-        out.write(bytes, bytes.size - n, n)
+        out.write(bytes, safeStart(bytes, (bytes.size - n) / 2), n)
+        out.write(bytes, safeStart(bytes, bytes.size - n), n)
         return out.toByteArray()
+    }
+
+    /**
+     * 把起点退到 UTF-8 前导字节上。
+     *
+     * 取样窗若从多字节字符中间开始，UTF-8 侧会凭空多出 1–2 个替换符，而 GB18030
+     * 对残缺字节不产替换符 —— 英文为主、只夹少量中文的文件会被顶去 GB18030，
+     * 中文变乱码且事后查不出来。最多退 3 字节即可退到前导字节。
+     */
+    private fun safeStart(bytes: ByteArray, start: Int): Int {
+        var i = start
+        var back = 0
+        while (i > 0 && back < 3 && (bytes[i].toInt() and 0xC0) == 0x80) { i--; back++ }
+        return i
+    }
+
+    /**
+     * UTF-16 端序的字节级证据，范围 [-0.5, +0.5]。
+     *
+     * 单字节字符（ASCII、换行）的高字节是 0：LE 的 0 落在奇数位，BE 落在偶数位。
+     * 字数分不出端序（两种端序解出来都是汉字，只是镜像），这一步是唯一可靠的判据。
+     */
+    private fun endianBias(probe: ByteArray, c: java.nio.charset.Charset): Double {
+        var oddZ = 0
+        var evenZ = 0
+        probe.forEachIndexed { i, b ->
+            if (b == 0.toByte()) { if (i % 2 == 0) evenZ++ else oddZ++ }
+        }
+        val total = oddZ + evenZ
+        if (total < 8) return 0.0
+        val le = oddZ.toDouble() / total
+        return if (c == Charsets.UTF_16LE) le - 0.5 else 0.5 - le
     }
 
     /** 后缀优先认 epub；后缀说不清时看 PK 头（SAF 常给没扩展名的名字）。 */
@@ -135,19 +189,12 @@ object LocalImport {
         for (c in cands) {
             val t = runCatching { String(probe, c) }.getOrNull() ?: continue
             if (t.isEmpty()) continue
-            val utf16 = c == Charsets.UTF_16LE || c == Charsets.UTF_16BE
             var good = 0
             var bad = 0
             for (ch in t) {
-                // UTF-16 把两个可打印 ASCII 字节拼成一个「汉字」（`eg`=来、`/f`=是），
-                // 这正是纯 ASCII 文本被误判成 UTF-16 的来源。这类字符不给分。
-                val hi = ch.code ushr 8
-                val lo = ch.code and 0xFF
-                val asciiPair = hi in 0x20..0x7E && lo in 0x20..0x7E
                 when {
                     ch == '\uFFFD' -> bad += 6
                     ch < ' ' && ch != '\n' && ch != '\r' && ch != '\t' -> bad += 4
-                    utf16 && asciiPair -> bad += 3
                     ch in FREQ -> good += 3
                     ch in '\u4e00'..'\u9fff' -> good += 1
                     ch in 'a'..'z' || ch in 'A'..'Z' || ch in '0'..'9' -> good += 1
@@ -155,15 +202,11 @@ object LocalImport {
                     ch in "，。！？、：；“”‘’（）《》…—·" -> good += 2
                 }
             }
+            // 不给「两个可打印 ASCII 字节拼成的汉字」扣分：语料里 30% 的常用汉字
+            // （来=eg、是=/f、中=-N）本来就长这样，扣分会让对话体密集的 UTF-16 中文
+            // 整本翻去 GB18030。区分端序改用 0 字节的奇偶分布。
             var score = (good - bad).toDouble() / t.length
-            // 端序纠偏：UTF-16 的单字节字符把 0 挤在一侧。
-            if (utf16 && t.length <= probe.size / 2) {
-                var oddZ = 0
-                var evenZ = 0
-                probe.forEachIndexed { i, b -> if (b == 0.toByte()) { if (i % 2 == 0) evenZ++ else oddZ++ } }
-                val wantsLe = oddZ > evenZ
-                if ((c == Charsets.UTF_16LE) != wantsLe) score -= 0.5
-            }
+            if (c == Charsets.UTF_16LE || c == Charsets.UTF_16BE) score += endianBias(probe, c)
             if (score > bestScore) { bestScore = score; best = c }
         }
         return best
@@ -275,19 +318,21 @@ object LocalImport {
                 val path = e.name.replace('\\', '/')
                 if (!isTextEntry(path) || entries.containsKey(path)) continue
                 // 上限真的要有：坏包里一个巨型 xml 能把内存吃光（注释写了、代码没写）。
-                if (total > MAX_EPUB_TEXT) {
-                    // 静默跳过 = 用户永远不知道结尾丢了几百章。宁可报错让他换个版本。
-                    throw IllegalStateException(
-                        "这本书正文超过 ${MAX_EPUB_TEXT / 1024 / 1024}MB，手机/电脑上拆分后再导入",
-                    )
-                }
-                val one = runCatching { readCapped(zis, ENTRY_CAP) }.getOrElse { ByteArray(0) }
-                if (one.size >= ENTRY_CAP) {
+                // 多读 1 字节：恰好 4MB 的合法条目不该被当成超限。
+                val one = runCatching { readCapped(zis, ENTRY_CAP + 1) }.getOrElse { ByteArray(0) }
+                if (one.size > ENTRY_CAP) {
                     // 单章 4MB 以上基本是解析错了（或整本塞一个 XHTML），截半句比报错更糟。
                     throw IllegalStateException("EPUB 里有超过 ${ENTRY_CAP / 1024 / 1024}MB 的单章")
                 }
                 if (one.isEmpty()) continue
                 total += one.size
+                // 判在累加之后：否则「47MB + 一个 4MB 条目」会越过上限放行。
+                // 静默跳过更糟 —— 用户永远不知道结尾丢了几百章，宁可报错让他换个版本。
+                if (total > textCap()) {
+                    throw IllegalStateException(
+                        "这本书正文超过 ${textCap() / 1024 / 1024}MB，手机/电脑上拆分后再导入",
+                    )
+                }
                 entries[path] = one
             }
         }
@@ -452,9 +497,12 @@ object LocalImport {
         val looksEpub = isEpub(fileName, bytes)
         // 上限按格式取：epub 的体积是图片字体，按 txt 的 12MB 卡会把正规 epub 挡在门外。
         // 这里必须和 MainActivity 的预检同一口径，所以判据抽成 isEpub。
-        val limit = if (ext == "epub" || looksEpub) MAX_EPUB_BYTES else MAX_BYTES
+        val limit = if (looksEpub) MAX_EPUB_BYTES else MAX_BYTES
         if (bytes.size > limit) {
-            throw IllegalArgumentException("文件太大（${bytes.size / 1024 / 1024}MB），上限 ${limit / 1024 / 1024}MB")
+            // 向上取整：12.5MB 的文件报「（12MB），上限 12MB」读起来像自相矛盾。
+            throw IllegalArgumentException(
+                "文件太大（${(bytes.size + 1048575L) / 1048576}MB），上限 ${limit / 1024 / 1024}MB",
+            )
         }
         val format: String
         val chapters: List<Chapter>

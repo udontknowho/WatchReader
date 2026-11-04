@@ -515,15 +515,23 @@ class MainActivity : Activity() {
             val declared = localFileSize(uri)
             // epub 的体积几乎全是图片和字体，正文只有几百 KB。按 txt 的 12MB 卡，
             // 一本 27MB 的正规 epub 会被直接拒掉。正文大小交给累计上限管。
-            // 判据与 LocalImport 同一份：SAF 常给出没扩展名的 `document`，
-            // 只看后缀会把 epub 按 12MB 卡掉。
-            val ext = name.substringAfterLast('.', "").lowercase()
-            val limit = if (ext == "epub" || (ext != "txt" && declared in 0..LocalImport.MAX_EPUB_BYTES &&
-                    declared > LocalImport.MAX_BYTES)) LocalImport.MAX_EPUB_BYTES
+            // 判据与 LocalImport.isEpub 同一份：SAF 常给出没扩展名的 `document`，
+            // 也不能按大小猜（20MB 的 txt 会被当成 epub 放行）。读前 4 字节看 PK 头。
+            val head = contentResolver.openInputStream(uri)?.use { ins ->
+                val b = ByteArray(4)
+                var n = 0
+                while (n < 4) {
+                    val r = ins.read(b, n, 4 - n)
+                    if (r <= 0) break
+                    n += r
+                }
+                if (n == 4) b else b.copyOf(n)
+            } ?: ByteArray(0)
+            val limit = if (LocalImport.isEpub(name, head)) LocalImport.MAX_EPUB_BYTES
                         else LocalImport.MAX_BYTES
             if (declared > limit) {
                 throw IllegalArgumentException(
-                    "文件太大（${declared / 1024 / 1024}MB），上限 ${limit / 1024 / 1024}MB",
+                    "文件太大（${(declared + 1048575) / 1048576}MB），上限 ${limit / 1024 / 1024}MB",
                 )
             }
             val bytes = contentResolver.openInputStream(uri)?.use { ins ->

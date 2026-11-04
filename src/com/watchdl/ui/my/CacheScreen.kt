@@ -282,10 +282,11 @@ private fun cacheBookSummary(u: CacheUsage): String {
     val paused = if (pausedBook) u.pending else 0
     // 卡内可用宽只有 128dp（189 − 页边 − 卡内边），原来的「下载中 0 · 等待 0 · …」
     // 是 144dp，必被截，截掉的正好是最要紧的「失败 N」。
-    // 去掉空格后「下0·等2999·停0·失12」约 113dp，可用 128dp，余量 15dp ——
+    // 去掉空格后「失12·下0·等2999·停0」约 113dp，可用 128dp，余量 15dp ——
     // 只够再长一位数字，系统字体放大到 1.3 倍仍会截。数字再涨就得换两行或只显非零项。
-    // 「失」放在最后是因为它最重要：真被截时希望先丢「等」。
-    return "下$downloading·等$waiting·停$paused·失${u.failed}"
+    // 省略发生在尾部（Md3.ellipsize），所以把最要紧的「失 N」放行首，先丢的是「停」。
+    return if (u.failed > 0) "失${u.failed}·下$downloading·等$waiting·停$paused"
+           else "下$downloading·等$waiting·停$paused"
 }
 
 /**
