@@ -4,8 +4,9 @@ package com.watchdl.core
  * 书架卡上的三处推断：未读角标、来源标签、副标题、选择集合。
  *
  * 依据本地参考仓 `~/ref/legado-novel`（Compose/MD3，3.26.21）的
- * `ui/main/bookshelf/BookItem.kt`：`badgeText = unreadText`、
- * `leftBottomText = matchedSourceLabel ?: bookTypeLabel`、`isSelected` 两处。
+ * `ui/main/bookshelf/BookItem.kt`：`leftBottomText = matchedSourceLabel ?: bookTypeLabel`、
+ * `isSelected` 两处。未读角标（`badgeText`）去掉了 —— 47 dp 封面上放不下真实的
+ * 四位数，`99+` 又不区分 300 章和 3000 章，只剩一块色块。
  * 那里是 Composable 里的即时表达式；我们抽成纯函数，JVM 自检能直接覆盖，
  * 界面只负责摆放。
  */
@@ -20,18 +21,6 @@ fun shelfUnreadCount(total: Int, readIndex: Int): Int {
     if (total <= 0) return 0
     val cur = readIndex.coerceAtLeast(0)
     return (total - cur - 1).coerceIn(0, total)
-}
-
-/**
- * 角标文案。0 返回 null（不画），超过 99 折成 `99+`。
- *
- * 为什么不用真数：卡宽三列下 47 dp，角标牌上限是封面的 1/3（约 15 dp），
- * 四位数在 8 sp 下也放不进那块地方，折掉反而能读。
- */
-fun shelfBadgeText(unread: Int): String? = when {
-    unread <= 0 -> null
-    unread > 99 -> "99+"
-    else -> unread.toString()
 }
 
 /** 书架副标题（legado `uiState.subtitle`）：`N 本 · 在读 M`。 */

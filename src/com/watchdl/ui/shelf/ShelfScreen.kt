@@ -59,9 +59,6 @@ internal object ShelfUi {
     /** 书名最多几行（legado `bookshelfTitleMaxLines`，我们只给 1 / 2 两档）。 */
     var titleLines = 2
 
-    /** 封面未读角标（legado `showUnread`）。 */
-    var showUnread = true
-
     /** 封面左下角来源标签（legado `showTip`）。 */
     var showTag = true
 
@@ -77,7 +74,6 @@ internal object ShelfUi {
         sort = p.getInt("shelfSort", ShelfSort.RECENT)
         sortDesc = p.getBoolean("shelfSortDesc", ShelfSort.defaultDesc(sort))
         titleLines = p.getInt("shelfTitleLines", 2).coerceIn(1, 2)
-        showUnread = p.getBoolean("shelfShowUnread", true)
         showTag = p.getBoolean("shelfShowTag", true)
         showNew = p.getBoolean("shelfShowNew", true)
     }
@@ -88,7 +84,6 @@ internal object ShelfUi {
             .putInt("shelfSort", sort)
             .putBoolean("shelfSortDesc", sortDesc)
             .putInt("shelfTitleLines", titleLines)
-            .putBoolean("shelfShowUnread", showUnread)
             .putBoolean("shelfShowTag", showTag)
             .putBoolean("shelfShowNew", showNew)
             .apply()
@@ -431,7 +426,7 @@ private fun MainActivity.shelfCoverHeightDp(): Int = shelfCardWidthDp() * 7 / 5
  * 网格卡：封面墙上一张。
  *
  * 抄 legado `BookItem.kt` 的 `BookshelfGridItem` + `BookshelfCover` 三处：
- * 封面上右角未读数（`badgeText`）、左下角来源标签（`leftBottomText`）、
+ * 左下角来源标签（`leftBottomText`）、
  * 选中态底色（`isSelected` → secondaryContainer）；书名居中最多两行
  * （`titleCenter = true`、`titleMaxLines = 2`）。
  *
@@ -484,27 +479,6 @@ private fun MainActivity.shelfCard(row: ShelfRow): LinearLayout {
     cover.addView(glyph, FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
-    // 未读角标：legado 放在封面 TopEnd（`Alignment.TopEnd`），且受 `showUnread` 开关控制。
-    // 不按「右下角」摆：47 dp 宽的封面左下角已被来源标签占住，两个牌并排会叠。
-    val unread = shelfUnreadCount(job.total, readProgress(job.bookId))
-    if (ShelfUi.showUnread) shelfBadgeText(unread)?.let { text ->
-        val badge = Md3.text(this, text, 8f, Md3.onSecondaryContainer, bold = true).apply {
-            gravity = Gravity.CENTER
-            background = Md3.bg(Md3.secondaryContainer, 3f)
-            setPadding(Md3.dp(this@shelfCard, 1), 0, Md3.dp(this@shelfCard, 1), 0)
-            // 上限是封面宽的 1/3（约 15 dp），超了就截 —— 角标再大就不像角标。
-            maxWidth = Md3.dp(this@shelfCard, coverW / 3)
-            isSingleLine = true
-            ellipsize = android.text.TextUtils.TruncateAt.END
-        }
-        cover.addView(badge, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            Gravity.TOP or Gravity.END).apply {
-            topMargin = Md3.dp(this@shelfCard, 1)
-            rightMargin = Md3.dp(this@shelfCard, 1)
-        })
-    }
-
     // 来源标签：legado `Alignment.BottomStart`，底色取卡片容器色。
     // 47 dp 宽减去两个 1 dp 边距只剩 45 dp，8 sp 下正好 4 个汉字。
     // 受 `showTip` 控制（legado 那个开关管的就是这个类型标签）。
@@ -525,7 +499,7 @@ private fun MainActivity.shelfCard(row: ShelfRow): LinearLayout {
     }
 
     // 更新圆点：legado `showBadgeDot`（`showUnread && showUnreadNew && book.isNew`）。
-    // 上次「更新目录」查出新章就点一下。未读角标在右上，圆点放左上，两者不抢位。
+    // 上次「更新目录」查出新章就点一下。左上角原本让给了未读角标，角标去掉后仍留在这里。
     if (ShelfUi.showNew && row.newCount > 0) {
         cover.addView(View(this).apply {
             background = Md3.bg(Md3.primary, 3f)
@@ -693,7 +667,7 @@ private fun MainActivity.openShelfBook(bookId: String, name: String, author: Str
  * 布局设置。legado 是 `BookshelfConfigSheet`（六组分区、六百多行）。
  *
  * 手表上只取能落地的子集：
- * - **布局**（列表/网格）、**顺序**（升序/倒序）、**书名行数**、**未读角标**、
+ * - **布局**（列表/网格）、**顺序**（升序/倒序）、**书名行数**、
  *   **来源标签**、**更新提示** —— 一行两枚档位，点了就地切；
  * - **排序**有四个值，一行放不下四枚档位，改成「一行显示当前值 + 点开选择」，
  *   这正是 legado 里那个下拉控件的交互（`DropdownSettingItem`）。
@@ -784,12 +758,11 @@ internal fun MainActivity.showShelfLayoutSheet() {
     seg("书名", listOf("1 行" to false, "2 行" to true), { ShelfUi.titleLines >= 2 }) {
         ShelfUi.titleLines = if (it) 2 else 1
     }
-    seg("未读", listOf("关" to false, "开" to true), { ShelfUi.showUnread }) { ShelfUi.showUnread = it }
     seg("来源", listOf("关" to false, "开" to true), { ShelfUi.showTag }) { ShelfUi.showTag = it }
     seg("新章", listOf("关" to false, "开" to true), { ShelfUi.showNew }) { ShelfUi.showNew = it }
     refreshers.forEach { r -> r() }
 
-    // 内容区固定 120 dp 内部滚动：七行约 210 dp，直接塞进对话框会把按钮顶出屏外。
+    // 内容区固定 120 dp 内部滚动：六行约 180 dp，直接塞进对话框会把按钮顶出屏外。
     // 外面套一层定高 FrameLayout —— md3Dialog 会给 content 重设 LayoutParams，
     // 把高度写在 ScrollView 上会被覆盖，写在容器里才管用。
     val scroller = ScrollView(this).apply {

@@ -83,7 +83,6 @@ import com.watchdl.core.searchRankTier
 import com.watchdl.core.searchRanked
 import com.watchdl.core.searchSourceBadge
 import com.watchdl.core.searchSummaryText
-import com.watchdl.core.shelfBadgeText
 import com.watchdl.core.shelfDeleteMessage
 import com.watchdl.core.shelfPruneSelection
 import com.watchdl.core.shelfSelectAll
@@ -233,7 +232,7 @@ fun main() {
         chapterCacheStatusText(ChapterCacheStatus.Cached) == "下载完成" &&
         chapterCacheStatusText(ChapterCacheStatus.NotCached) == "未缓存")
 
-    // 书架卡与选择模式（照 legado-novel `BookItem.kt` 的 badgeText / leftBottomText、
+    // 书架卡与选择模式（照 legado-novel `BookItem.kt` 的 leftBottomText、
     // `BookshelfTopBar` 的编辑态）。
     println("[书架卡与选择]")
     check("未读 = 总章 - 在读 - 1", shelfUnreadCount(10, 3) == 6)
@@ -241,9 +240,6 @@ fun main() {
     check("读到最后一章 → 0", shelfUnreadCount(10, 9) == 0)
     check("下标超界不出现负数", shelfUnreadCount(10, 50) == 0)
     check("没有章 → 0", shelfUnreadCount(0, 0) == 0)
-    check("角标 0 不画", shelfBadgeText(0) == null)
-    check("角标 7", shelfBadgeText(7) == "7")
-    check("角标超 99 折成 99+", shelfBadgeText(1200) == "99+")
     check("副标题", shelfSubtitle(12, 3) == "12 本 · 在读 3")
     check("在读数不超总数", shelfSubtitle(3, 9) == "3 本 · 在读 3")
     check("选择标题照 legado 措辞", shelfSelectTitle(2) == "已选 2")
