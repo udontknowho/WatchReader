@@ -164,6 +164,34 @@ class JobStore(private val root: File) {
     }
 
     /**
+     * 一次性写入整本正文（本地导入用）。
+     *
+     * 逐章走 [appendChapter] 的话每章一次 fsync，一千章的书在手表的闪存上要等好几秒。
+     * 这里同样先写 tmp 再 rename，但有且只有一次 fsync：中途断电不会留下半截正文库。
+     */
+    fun writeChapters(bookId: String, lines: List<String>) {
+        synchronized(lockFor(bookId)) {
+            if (bookId in deleted) return
+            dirOf(bookId).mkdirs()
+            val f = chaptersFile(bookId)
+            val tmp = File(f.parentFile, "chapters.jsonl.tmp")
+            runCatching {
+                RandomAccessFile(tmp, "rw").use { raf ->
+                    raf.setLength(0)
+                    for (line in lines) {
+                        raf.write((line + "\n").toByteArray(Charsets.UTF_8))
+                    }
+                    raf.fd.sync()
+                }
+                if (!tmp.renameTo(f)) {
+                    f.writeText(lines.joinToString("\n", postfix = "\n"))
+                    tmp.delete()
+                }
+            }.onFailure { tmp.delete() }
+        }
+    }
+
+    /**
      * 已缓存章的 itemId 集合。
      *
      * **只取 itemId，不留正文**：3000 章的书正文能到几十 MB，

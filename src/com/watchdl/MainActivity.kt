@@ -483,6 +483,56 @@ class MainActivity : Activity() {
     }
 
     /**
+     * 「添加本地」选完文件回到这里。
+     *
+     * 只用 [onActivityResult]，不引 androidx 的 ActivityResultLauncher：
+     * 项目走手工 kotlinc 流水线，加一个依赖就是改构建链。
+     * 读完不许把字节留在内存里 —— 导入完成后全交给 [LocalImport] 落盘。
+     */
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_LOCAL_BOOK) return
+        if (resultCode != Activity.RESULT_OK) return
+        val uri = data?.data ?: return
+        importLocalBook(uri)
+    }
+
+    /**
+     * 把一个 SAF 选中的文件导成书架里的一本书。
+     *
+     * 全程在后台线程：一本 10 MB 的 txt 分章加落盘要秒级，放主线程就是一次 ANR。
+     * 文件名要从 ContentResolver 查 `OpenableColumns.DISPLAY_NAME`，不能拿
+     * `uri.lastPathSegment` 当书名 —— 那串是 `document/1234`，书架上会显示成数字。
+     */
+    private fun importLocalBook(uri: android.net.Uri) {
+        toast("正在导入…")
+        bg(Screen.Shelf, {
+            val name = localFileName(uri)
+            val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                ?: throw IllegalStateException("读不到这个文件")
+            LocalImport.importInto(jobsStore(), name, bytes)
+        }) { res ->
+            res.onSuccess { toast("已导入《${it.name}》（${it.format}）${it.chapters} 章") }
+                .onFailure { toast("导入失败：${it.message ?: "未知原因"}") }
+            showShelf(keepScroll = true)
+        }
+    }
+
+    /** 选择器给的文件名。查不到才退到 URI 末段。 */
+    private fun localFileName(uri: android.net.Uri): String {
+        runCatching {
+            contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),
+                null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    val n = c.getString(0)
+                    if (!n.isNullOrBlank()) return n
+                }
+            }
+        }
+        return uri.lastPathSegment?.substringAfterLast('/').orEmpty()
+    }
+
+    /**
      * 下载通知带 `EXTRA_BOOK_ID` 点进来时，直接落到那本书的进度屏。
      *
      * 报告 P0-1：以前通知点了只回首页，而首页那本下载中的书没有实时进度，
@@ -1105,6 +1155,8 @@ class MainActivity : Activity() {
 
 
     internal fun startDownload(info: BookInfo) {
+        // 本地书的正文已经在盘上，下载服务只会拿 local:xxx 去发请求。
+        if (LocalImport.isLocal(info.bookId)) { toast("本地书不用下载，正文就在本机"); return }
         // S14：以前用内存里的 `downloading` 标志，唯一复位点在 [progressReceiver] 里，
         // 而接收器只在 onResume~onPause 之间注册。点下载 → 退回目录 → 按 Home（注销接收器）
         // → 服务被杀 → 回 App，标志还是 true，点「继续下载」直接 return，
@@ -1192,6 +1244,8 @@ class MainActivity : Activity() {
 
     /** 目录原地更新：取回新目录后重画这一屏，停在目录页（对应 legado 的「更新目录」）。 */
     private fun refreshTocHere(info: BookInfo, src: BookSource?) {
+        // 本地书的目录就是导入时那个文件的章节表，没有远程版本可拉。
+        if (LocalImport.isLocal(info.bookId)) { toast("本地书的目录来自文件，不能更新"); return }
         val useSrc = src ?: tocSrc ?: source
         toast("正在更新目录…")
         bg(Screen.Toc(info, src), { useSrc.toc(info.bookId, info.name, info.author) }) { res ->

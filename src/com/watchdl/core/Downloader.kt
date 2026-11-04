@@ -513,7 +513,9 @@ class Downloader(
                 val line = downloaded[ch.itemId] ?: return@forEachIndexed
                 val body = TinyJson.path(line, "content") ?: ""
                 val chars = bodyChars(body)
-                statuses[i] = if (chars >= MIN_BODY_CHARS) ChapterStatus.DONE
+                // 本地导入的书不套 300 字线：短章本来就是作者写的短，
+                // 套上会把好好的本地书在目录里标成一串失败（正文照旧能读）。
+                statuses[i] = if (chars >= MIN_BODY_CHARS || LocalImport.isLocal(bookId)) ChapterStatus.DONE
                               else ChapterStatus.FAILED
             }
             // 进程被杀时没有机会写 DONE。RUNNING 只能表示上次异常中断，不能继续冒充运行中。

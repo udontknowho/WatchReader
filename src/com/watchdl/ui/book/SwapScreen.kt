@@ -34,6 +34,9 @@ private const val SWAP_ROWS = 60
 private var swapBusy = false
 
 internal fun MainActivity.showSwap(info: BookInfo, cur: BookSource?) {
+    // 本地书没有第二个源可换：它的正文就是用户手机上那个文件。
+    // 不拦住的话会把「本地书名」拿去全网搜，搜到的同书不同源也对不上已读进度。
+    if (LocalImport.isLocal(info.bookId)) { toast("本地书没有可换的书源"); return }
     setScreen(Screen.Swap(info, cur))
     // 切屏时 bg 会把上一次的搜索 cancel 掉，忙标志没人清就会永久卡在「还在找」。
     // 重建这一屏说明上一次已经作废，这里直接放开。

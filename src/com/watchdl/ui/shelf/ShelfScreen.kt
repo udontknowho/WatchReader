@@ -1,6 +1,7 @@
 package com.watchdl.ui.shelf
 
 import android.content.Context
+import android.content.Intent
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -617,8 +618,9 @@ internal fun MainActivity.showShelfMenu() {
     Widgets.longMenuDialog(this, "书架", listOf(
         // legado 的「远程书籍」是 WebDav 同步，本版没有网络备份。
         "远程书籍" to todo("远程书籍", "要 WebDav，本版只有本机目录"),
-        // legado 的「添加本地」走 SAF 文件选择器，手表上没有可用的选择器。
-        "添加本地" to todo("添加本地", "手表上没有文件选择器"),
+        // legado 的「添加本地」走 SAF 文件选择器。手表系统自带「文件」选择器，
+        // 用 ACTION_OPEN_DOCUMENT 就能拉到，不需要任何存储权限，也不用 androidx。
+        "添加本地" to { pickLocalBook() },
         "更新目录" to { refreshShelfTocs() },
         "布局设置" to { showShelfLayoutSheet() },
         "分组管理" to todo("分组管理", "本应用没有书单分组"),
@@ -634,6 +636,33 @@ internal fun MainActivity.showShelfMenu() {
         "导入书单" to { rememberReturn(); showSources() },
         "日志" to { showLogs() },
     )).show()
+}
+
+// ══════════════════ 本地导入 ══════════════════
+
+/** 选择本地文件的请求码，与 [MainActivity.onActivityResult] 对齐。 */
+internal const val REQ_LOCAL_BOOK = 4101
+
+/**
+ * 「添加本地」：拉起系统文件选择器，让用户挑一个 txt / epub。
+ *
+ * 用通配类型加 [Intent.EXTRA_MIME_TYPES]，而不是直接写 text/plain：
+ * 部分 ROM 的文件选择器对单一 MIME 过滤得太死，txt 常被标成 `application/octet-stream`，
+ * 只给 text/plain 就选不中自己的文件。导入时按扩展名与文件头判格式，不靠 MIME。
+ *
+ * 拿不到选择器（手表上没装 DocumentsUI）时给出明确说法，不能静默失败。
+ */
+internal fun MainActivity.pickLocalBook() {
+    val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+        addCategory(Intent.CATEGORY_OPENABLE)
+        type = "*/*"
+        putExtra(
+            Intent.EXTRA_MIME_TYPES,
+            arrayOf("text/plain", "application/epub+zip", "application/octet-stream"),
+        )
+    }
+    runCatching { startActivityForResult(i, REQ_LOCAL_BOOK) }
+        .onFailure { toast("这台设备没有文件选择器，没法导入本地书") }
 }
 
 // ══════════════════ 新章计数 ══════════════════
@@ -786,8 +815,10 @@ internal fun MainActivity.showShelfLayoutSheet() {
  * 失败一本不影响别的：连载书里常有一两本源挂掉，用户要的是「能更的都更了」。
  */
 internal fun MainActivity.refreshShelfTocs() {
-    val rows = shelfRows()
-    if (rows.isEmpty()) { toast("书架是空的"); return }
+    // 本地书的目录来自导入时那个文件，没有「更新」这回事；
+    // 混在一起跑只会给它算一次失败。
+    val rows = shelfRows().filter { !LocalImport.isLocal(it.job.bookId) }
+    if (rows.isEmpty()) { toast("书架里没有需要联网更新目录的书"); return }
     ShelfUi.updating = "正在更新目录 0/${rows.size}"
     showShelf(keepScroll = true)
     bg(Screen.Shelf, {
@@ -842,6 +873,8 @@ internal fun MainActivity.refreshShelfTocs() {
  * 番茄源的构造依赖它。
  */
 private fun MainActivity.sourceForBook(bookId: String): BookSource? {
+    // 本地书没有源。不拦住的话会按「非 http」落到番茄，拿 local:xxx 去发请求。
+    if (LocalImport.isLocal(bookId)) return null
     val pool = runCatching { multi.allNamed() }.getOrNull().orEmpty()
     if (bookId.startsWith("http", ignoreCase = true)) {
         val host = pool.firstOrNull { ns ->

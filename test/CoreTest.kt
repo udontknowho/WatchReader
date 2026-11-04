@@ -157,5 +157,136 @@ fun main() {
     check("其余字段保留", after.contains("\"bookId\":\"bid1\""), after)
     tmp.deleteRecursively()
 
+    println("[本地导入] txt 分章")
+    run {
+        val txt = """
+            书名页免责声明
+
+            序章 引子
+
+            引子正文。
+
+            第一章 少年
+
+            少年正文第一段。
+            少年正文第二段。
+
+            第二章 起步
+
+            起步正文。
+        """.trimIndent()
+        val chs = com.watchdl.core.LocalImport.splitTxt(txt)
+        check("中文标题切成 3 章", chs.size == 3, "实际 ${chs.size}")
+        check("首章标题保留", chs[0].title == "序章 引子", chs[0].title)
+        check("标题行不进正文", chs[1].body.startsWith("少年正文第一段"), chs[1].body)
+        check("正文两段都在", chs[1].body.contains("少年正文第二段"), chs[1].body)
+        check("短章前导丢成开篇", chs.none { it.title == "开篇" }, chs.map { it.title }.toString())
+    }
+    run {
+        // 第一个标题之前的正文够长时要单独成章，不能默默吞掉。
+        val long = "前" + "言".repeat(300) + "\n\n第一章 起\n\n正文。"
+        val chs = com.watchdl.core.LocalImport.splitTxt(long)
+        check("长前导单独成章", chs.size == 2 && chs[0].title == "开篇", chs.map { it.title }.toString())
+    }
+    run {
+        val en = "Chapter 1 The Start\n\nHello there.\n\nChapter 2 Next\n\nAgain."
+        val chs = com.watchdl.core.LocalImport.splitTxt(en)
+        check("英文标题切两章", chs.size == 2, "实际 ${chs.size}: " + chs.map { it.title })
+        check("英文首章正文对", chs[0].body == "Hello there.", chs[0].body)
+    }
+    run {
+        val plain = "就是一段没有章节标题的文字。\n第二段也是。"
+        val chs = com.watchdl.core.LocalImport.splitTxt(plain)
+        check("无标题退化成一章", chs.size == 1 && chs[0].title == "全书", chs.map { it.title }.toString())
+        check("无标题正文完整", chs[0].body.contains("第二段也是"), chs[0].body)
+    }
+    run {
+        // 正文里出现「第三章」的句子不能被当成标题切碎。
+        val mid = "第一章 甲\n\n他翻到第三章就不再看了，那是后话。\n\n第二章 乙\n\n乙正文。"
+        val chs = com.watchdl.core.LocalImport.splitTxt(mid)
+        check("行内提到章号不误切", chs.size == 2, "实际 ${chs.size}")
+    }
+
+    println("[本地导入] 编码")
+    run {
+        val s = "第一章 开始\n\n这是一段简体中文正文，用来验证 GBK 识别。"
+        val gbk = s.toByteArray(charset("GB18030"))
+        check("GBK 字节能还原", com.watchdl.core.LocalImport.decodeText(gbk) == s,
+            com.watchdl.core.LocalImport.decodeText(gbk).take(20))
+        check("UTF-8 字节能还原", com.watchdl.core.LocalImport.decodeText(s.toByteArray()) == s)
+        val bom = byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()) + s.toByteArray()
+        check("带 BOM 的 UTF-8 不残留 BOM", com.watchdl.core.LocalImport.decodeText(bom) == s,
+            com.watchdl.core.LocalImport.decodeText(bom).take(3))
+    }
+
+    println("[本地导入] epub spine")
+    run {
+        val bos = java.io.ByteArrayOutputStream()
+        java.util.zip.ZipOutputStream(bos).use { z ->
+            fun put(name: String, body: String) {
+                z.putNextEntry(java.util.zip.ZipEntry(name))
+                z.write(body.toByteArray())
+                z.closeEntry()
+            }
+            put("META-INF/container.xml",
+                "<container><rootfiles><rootfile full-path=\"OEBPS/content.opf\"/></rootfiles></container>")
+            // manifest 故意把 c2 写在 c1 前面：顺序必须听 spine，不听 manifest。
+            put("OEBPS/content.opf",
+                "<package><manifest>" +
+                    "<item id=\"c2\" href=\"text/ch2.xhtml\" media-type=\"application/xhtml+xml\"/>" +
+                    "<item id=\"c1\" href=\"text/ch1.xhtml\" media-type=\"application/xhtml+xml\"/>" +
+                    "<item id=\"css\" href=\"s.css\" media-type=\"text/css\"/>" +
+                    "</manifest><spine><itemref idref=\"c1\"/><itemref idref=\"c2\"/></spine></package>")
+            put("OEBPS/text/ch1.xhtml",
+                "<html><body><h1>第一章 开始</h1><p>第一段正文。</p></body></html>")
+            put("OEBPS/text/ch2.xhtml",
+                "<html><body><h1>第二章 继续</h1><p>第二段正文。</p></body></html>")
+            put("OEBPS/s.css", "p{}")
+        }
+        val chs = com.watchdl.core.LocalImport.epubChapters(bos.toByteArray())
+        check("spine 顺序取到两章", chs.size == 2, "实际 ${chs.size}")
+        check("第一章在前", chs[0].title == "第一章 开始", chs[0].title)
+        check("第二章在后", chs.getOrNull(1)?.title == "第二章 继续", chs.getOrNull(1)?.title ?: "null")
+        check("XHTML 转成纯文本", chs[0].body.contains("第一段正文"), chs[0].body)
+    }
+
+    println("[本地导入] 落成作业")
+    run {
+        val dir = java.io.File(System.getProperty("java.io.tmpdir"), "local-import-test")
+        dir.deleteRecursively(); dir.mkdirs()
+        val store = com.watchdl.core.JobStore(java.io.File(dir, "books"))
+        val txt = "第一章 甲\n\n甲正文。\n\n第二章 乙\n\n乙正文。\n\n第三章 丙\n\n丙正文。"
+        val res = com.watchdl.core.LocalImport.importInto(store, "夜读测试.txt", txt.toByteArray())
+        check("bookId 带 local 前缀", com.watchdl.core.LocalImport.isLocal(res.bookId), res.bookId)
+        check("bookId 不是链接", !res.bookId.startsWith("http"), res.bookId)
+        check("书名取文件名", res.name == "夜读测试", res.name)
+        check("章数对得上", res.chapters == 3, "${res.chapters}")
+        val raw = store.readJob(res.bookId).orEmpty()
+        check("job 有书名", TinyJson.path(raw, "name") == "夜读测试", raw.take(80))
+        check("job 状态 DONE", TinyJson.path(raw, "state") == "DONE", TinyJson.path(raw, "state") ?: "null")
+        check("书源标签写成本地", TinyJson.path(raw, "originName") == "本地")
+        check("每章都是 DONE", raw.contains("\"status\":\"DONE\"") && !raw.contains("\"status\":\"PENDING\""))
+        val job = com.watchdl.core.Downloader.restoreLight(store, res.bookId)
+        check("书架能读出这本书", job != null && job.chapters.size == 3, "${job?.chapters?.size}")
+        check("已下数等于总章数", job?.count(com.watchdl.core.ChapterStatus.DONE) == 3,
+            "${job?.count(com.watchdl.core.ChapterStatus.DONE)}")
+        check("正文按章落盘", store.readChapters(res.bookId).size == 3,
+            "${store.readChapters(res.bookId).size}")
+        check("章 id 不重复", job!!.chapters.map { it.itemId }.toSet().size == 3)
+        // 睡眠不适用：restore 会按 300 字线判 DONE，本地书必须豁免，否则短章全变 FAILED。
+        val full = com.watchdl.core.Downloader.restore(store, res.bookId)
+        check("短章不被判失败", full?.count(com.watchdl.core.ChapterStatus.DONE) == 3,
+            "${full?.count(com.watchdl.core.ChapterStatus.DONE)}")
+
+        // 同名再导一次 = 覆盖同一本，不能多出一本、也不能留下旧正文。
+        val again = com.watchdl.core.LocalImport.importInto(store, "夜读测试.txt",
+            "第一章 甲\n\n新的甲正文。".toByteArray())
+        check("重导入仍是同一本", again.bookId == res.bookId)
+        check("重导入只剩一章", again.chapters == 1, "${again.chapters}")
+        check("旧正文不残留", store.readChapters(res.bookId).size == 1,
+            "${store.readChapters(res.bookId).size}")
+        dir.deleteRecursively()
+    }
+
     if (failures == 0) println("\n全部通过") else { println("\n失败 $failures 项"); kotlin.system.exitProcess(1) }
 }

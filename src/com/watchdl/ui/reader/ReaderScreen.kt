@@ -1515,10 +1515,13 @@ private fun MainActivity.showReaderMenu(
     // 行序照 legado 的 ReadMenuActionDefs：换源与刷新在前（读不下去时最常按的两个），
     // 目录与章内查找其次，工具与书签类收在后面。
     val marked = BookmarkStore.has(info.bookId, index)
-    row("换源", "swap") {
-        ReaderUi.swapReturnTitle = info.chapters.getOrNull(index)?.title.orEmpty()
-        ReaderUi.swapReturnAt = readerBody?.scrollY ?: 0
-        rememberReturn(); showSwap(info, src)
+    // 本地书没有第二个源，换源这一行不画：画出来也只是点一下弹一句话。
+    if (!LocalImport.isLocal(info.bookId)) {
+        row("换源", "swap") {
+            ReaderUi.swapReturnTitle = info.chapters.getOrNull(index)?.title.orEmpty()
+            ReaderUi.swapReturnAt = readerBody?.scrollY ?: 0
+            rememberReturn(); showSwap(info, src)
+        }
     }
     // legado 顶栏的刷新：重跑一次取正文，复用 preview 的本地缓存 + 在线兜底。
     row("刷新本章", "refresh") { preview(info, index) }
@@ -1709,7 +1712,9 @@ private fun MainActivity.loadOpening(
 ): String = try {
     val line = jobsStore().readChapters(info.bookId)[ch.itemId]
     val localHtml = line?.let { TinyJson.path(it, "content") }
-    val html = localHtml ?: (src ?: source).content(ch.itemId, info.bookId)
+    // 本地书缺章不联网：返回空串，拼接块自然跳过。
+    val html = localHtml ?: if (LocalImport.isLocal(info.bookId)) ""
+                          else (src ?: source).content(ch.itemId, info.bookId)
     val raw = Downloader.htmlToText(html).ifEmpty { html.replace(Regex("<[^>]+>"), "\n").trim() }
     spliceHead(ReplaceRuleStore.apply(raw, isTitle = false))
 } catch (e: Exception) {
@@ -1808,6 +1813,11 @@ internal fun MainActivity.preview(info: BookInfo, index: Int, atEnd: Boolean = f
         try {
             val line = jobsStore().readChapters(info.bookId)[ch.itemId]
             val localHtml = line?.let { TinyJson.path(it, "content") }
+            // 本地书没有网络源兜底：缺章就是缺章，说明白比拿 local:xxx 去发请求好。
+            if (localHtml == null && LocalImport.isLocal(info.bookId)) {
+                postAlive(owner) { if (token == ReaderUi.pageToken) toast("这一章没有正文，导入时丢了") }
+                return@thread
+            }
             val actualSrc = if (localHtml == null) (src ?: source) else src
             val html = localHtml ?: actualSrc!!.content(ch.itemId, info.bookId)
             val raw = Downloader.htmlToText(html).ifEmpty { html.replace(Regex("<[^>]+>"), "\n").trim() }
