@@ -763,7 +763,11 @@ class MainActivity : Activity() {
         }
 
         val free = info.chapters.count { !it.locked }
-        val job = Downloader.restore(jobsStore(), info.bookId)
+        // 只读 job.json：目录屏要的只是「哪章 DONE / FAILED」，persist 每章都写过了。
+        // restore 会把整本 chapters.jsonl 读进来逐行解析、还要剥 HTML 数字数 —— 本地那本
+        // 6191 章的书是 50MB，主线程上就是几秒的冻结。legado 的目录屏同样只查元数据
+        // （本地书直接标 DownloadState.LOCAL），从不在这里读正文。
+        val job = Downloader.restoreLight(jobsStore(), info.bookId)
         val done = job?.count(ChapterStatus.DONE) ?: 0
         val failed = job?.count(ChapterStatus.FAILED) ?: 0
 
@@ -1199,7 +1203,8 @@ class MainActivity : Activity() {
     internal fun openBook(bookId: String, name: String, author: String) {
         // 书架/最近下载进来的，返回时回到首页（对应 rememberReturn=null 的默认行为）。
         rememberReturn()
-        val job = Downloader.restore(jobsStore(), bookId)
+        // 同上：进目录只需要章节表与状态，restoreLight 只读 job.json。
+        val job = Downloader.restoreLight(jobsStore(), bookId)
         if (job != null) {
             showToc(BookInfo(bookId, job.name.ifBlank { name }, job.author.ifBlank { author }, job.chapters))
             return

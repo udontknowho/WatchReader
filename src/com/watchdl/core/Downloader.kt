@@ -505,6 +505,14 @@ class Downloader(
                     runCatching { statuses[i] = ChapterStatus.valueOf(s) }
                 }
             }
+            // 本地导入的书：正文就在本机，job.json 里每章都是 DONE，没有「规则坏了写进
+            // 21 字」这回事（正文是我们自己解析的）。所以整段正文复检都不必跑 ——
+            // 跳过 readChapters 与 bodyChars。50MB 的 jsonl 过一遍正则，在手表上是秒级。
+            // 对应 legado `TocViewModel`：`book.isLocal` 直接返回 DownloadState.LOCAL。
+            if (LocalImport.isLocal(bookId)) {
+                val recovered = if (state == JobState.RUNNING) JobState.PAUSED else state
+                return BookJob(bookId, name, author, chapters, recovered).withStatuses(statuses)
+            }
             // jsonl 里有的章，状态一定是 DONE
             // 但旧版本没校验正文字数：规则坏掉的源会写进 21 字一章还标 DONE，
             // 用户打开全书空白。这类必须当未下载重跑，否则永远修不好。
@@ -513,9 +521,7 @@ class Downloader(
                 val line = downloaded[ch.itemId] ?: return@forEachIndexed
                 val body = TinyJson.path(line, "content") ?: ""
                 val chars = bodyChars(body)
-                // 本地导入的书不套 300 字线：短章本来就是作者写的短，
-                // 套上会把好好的本地书在目录里标成一串失败（正文照旧能读）。
-                statuses[i] = if (chars >= MIN_BODY_CHARS || LocalImport.isLocal(bookId)) ChapterStatus.DONE
+                statuses[i] = if (chars >= MIN_BODY_CHARS) ChapterStatus.DONE
                               else ChapterStatus.FAILED
             }
             // 进程被杀时没有机会写 DONE。RUNNING 只能表示上次异常中断，不能继续冒充运行中。

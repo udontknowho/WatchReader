@@ -467,6 +467,16 @@ fun main() {
         val bad = runCatching { com.watchdl.core.LocalImport.importInto(store, "坏包.epub", badFile) }
         check("坏 epub 报错", bad.isFailure, "${bad.exceptionOrNull()}")
         check("坏 epub 不覆盖旧书", store.readChapters(streamed.bookId).size == before, "$before")
+
+        // 本地书在 restore 里短路：状态只看 job.json，不再把 chapters.jsonl 拉进来逐行解析。
+        // 把正文删掉仍应全是 DONE —— 否则「目录屏打开一本 50MB 的书」又要回到秒级卡顿。
+        val done1 = com.watchdl.core.ChapterStatus.DONE
+        store.chaptersFile(streamed.bookId).delete()
+        val after = com.watchdl.core.Downloader.restore(store, streamed.bookId)
+        check("本地书状态不看正文", after?.count(done1) == 1,
+            "${after?.count(done1)}")
+        check("目录屏读法（restoreLight）同样只认 job.json",
+            com.watchdl.core.Downloader.restoreLight(store, streamed.bookId)?.count(done1) == 1)
         dir.deleteRecursively()
     }
 
