@@ -1895,21 +1895,17 @@ private fun MainActivity.showReaderSettings(info: BookInfo, index: Int, text: St
         restyleReader(text)
     }
 
-    // 照 legado `ReadStyleSheet` 的四页签：全局主题 / 菜单系统 / 信息 / 更多设置。
-    // 我们把它压在一屏里（legado 是两个滑页 + 两个跳转页），但分组口径不变：
-    // 「正文 / 标题 / 页眉 / 页脚 / 边距」在 legado 属「信息」页下的分段，不是独立页签。
-    val tabs = listOf("主题", "菜单", "信息", "更多")
-    val tabRow = Md3.row(this)
+    // 结构：一列分段，不分页签。
+    //
+    // legado `ReadStyleSheet` 是「全局主题」「菜单系统」两个滑页 + 「信息」「更多设置」
+    // 两个跳转页，手机上按下时能左右滑。手表对话框只有 189×248 dp，四个页签先吃掉
+    // 24 dp，换来的却是「每页都得滚」和「一项在哪一页记不住」。所以按 legado 的**分组**
+    // （外观 / 版式 / 标题 / 页眉页脚 / 边距 / 杂项）排成一列，页签那 24 dp 让给内容。
     val page = ScrollView(this).apply { isVerticalScrollBarEnabled = false }
-    val tabViews = mutableListOf<TextView>()
-    var curTab = -1
-    /** 当前页的「选中态刷新」集合，切页即弃。 */
+    /** 重画整列：芯片选中态、恢复默认之后都要回头重排自己。 */
+    var rebuild: () -> Unit = {}
+    /** 「选中态刷新」集合：每档芯片登记一个，重排时统一刷一次高亮。 */
     var refreshers: List<() -> Unit> = emptyList()
-    /**
-     * 切页。声明成变量是因为「恢复默认」「背景」「护眼」都要回头重画当前页，
-     * 而它们自己的构建函数又在后面 —— Kotlin 的局部函数只能先声明后调用。
-     */
-    var showTab: (Int) -> Unit = {}
 
     /** 档位行：标签 + 若干等宽档。选中态沿用全局（浅紫填充 + 深字）。 */
     fun seg(col: LinearLayout, label: String, options: List<Pair<String, Any>>, get: () -> Any, set: (Any) -> Unit) {
@@ -2135,7 +2131,8 @@ private fun MainActivity.showReaderSettings(info: BookInfo, index: Int, text: St
             { listOf("弱", "中", "强")[it.toInt().coerceIn(0, 2)] }) {
             ReaderUi.eyeLevel = it.toInt()
         }
-        seg(col, "夜间", listOf("关" to false as Any, "开" to true),
+        // 原名「夜间」，做的其实是「按钟点自动开护眼」，与背景深浅无关，改名字以免误读。
+        seg(col, "护眼夜间", listOf("关" to false as Any, "开" to true),
             { ReaderUi.eyeAuto as Any }) { ReaderUi.eyeAuto = it as Boolean }
         // 翻页动画：legado 放在 GlobalThemePage（`page_anim`），两档（滚一屏 / 覆盖；
         // 仿真在手表上不必）。只影响章内翻屏，跳章仍是瞬间换页。
@@ -2200,7 +2197,7 @@ private fun MainActivity.showReaderSettings(info: BookInfo, index: Int, text: St
                 ReaderUi.marginLevel = 1
                 ReaderUi.bright = ReaderStyle.BRIGHT_MID
                 save()
-                showTab(curTab)
+                rebuild()
                 toast("排版已恢复默认")
             }
         }
@@ -2211,51 +2208,36 @@ private fun MainActivity.showReaderSettings(info: BookInfo, index: Int, text: St
         return col
     }
 
-    showTab = { i ->
-        curTab = i
+    // 分段顺序照 legado：外观（GlobalThemePage）→ 版式（TypographyPage 的正文 / 标题 /
+    // 页眉页脚 / 边距）→ 杂项（SystemMenuPage + MoreConfigSheet 里手表用得上的）。
+    fun buildAll(): View {
+        val col = Md3.column(this)
+        col.addView(Widgets.sectionLabel(this, "外观"))
+        col.addView(buildTheme())
+        col.addView(buildInfo())
+        col.addView(Widgets.sectionLabel(this, "菜单与杂项"))
+        col.addView(buildMenu())
+        col.addView(buildMore())
+        return col
+    }
+
+    rebuild = {
         refreshers = emptyList()
         page.removeAllViews()
-        val col = when (i) {
-            1 -> buildMenu()
-            2 -> buildInfo()
-            3 -> buildMore()
-            else -> buildTheme()
-        }
-        page.addView(col)
-        tabViews.forEachIndexed { k, v ->
-            val sel = k == i
-            v.setTextColor(if (sel) Md3.onPrimary else Md3.onSurfaceVariant)
-            v.setTypeface(null, if (sel) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
-            v.background = Md3.ripple(this, if (sel) Md3.primary else Color.TRANSPARENT,
-                Md3.dp(this, 13).toFloat(), if (sel) null else Md3.outlineVariant)
-        }
+        page.addView(buildAll())
         refreshers.forEach { r -> r() }
     }
 
-    tabs.forEachIndexed { i, name ->
-        val t = Md3.text(this, name, Md3.FS_SM, Md3.onSurfaceVariant).apply {
-            gravity = Gravity.CENTER
-            isClickable = true
-            setOnClickListener { showTab(i) }
-        }
-        tabViews.add(t)
-        tabRow.addView(t, LinearLayout.LayoutParams(0, Md3.dp(this, 24), 1f).apply {
-            leftMargin = if (i == 0) 0 else Md3.dp(this@showReaderSettings, 3)
-        })
-    }
-
+    // 内容区 120 dp（原 96 dp 一屏两行多，分段之后要能一次看见一整段）。
+    // 189×248 的预算：内边距 16×2 + 标题 28 + 间距 12 + 内容 120 + 按钮 40 = 232 dp，留 16 dp 余量。
     val holder = FrameLayout(this)
-    holder.addView(LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        addView(tabRow)
-        addView(page, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this@showReaderSettings, 96)))
-    })
+    holder.addView(page, ViewGroup.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, 120)))
 
     // 关窗不再重建页面：设置已经即时套在正文上了，重建只会把滚动位置打回章首。
     val dialog = Widgets.md3Dialog(this, "阅读设置", content = holder,
         confirm = null, dismiss = "完成")
     dialog.show()
-    // 重建默认页要在 dialog.show 之后：showTab 里要量高，视图得已经挂上窗。
-    showTab(0)
+    // 首绘在 show 之后：滑杆要量宽，视图得已经挂上窗。
+    rebuild()
 }
