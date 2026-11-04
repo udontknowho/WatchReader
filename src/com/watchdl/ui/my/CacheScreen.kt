@@ -3,9 +3,11 @@ package com.watchdl.ui.my
 import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
+import android.widget.TextView
 import com.watchdl.DownloadService
 import com.watchdl.MainActivity
 import com.watchdl.core.BookInfo
+import com.watchdl.core.BookJob
 import com.watchdl.core.CacheUsage
 import com.watchdl.core.ChapterCacheStatus
 import com.watchdl.core.ChapterRef
@@ -81,6 +83,10 @@ private object CacheUi {
     var open: String? = null
     /** 章级窗口起点。 */
     var win: Int = 0
+    /** 批量导出在跑；此时屏底那颗键变成「取消导出」。 */
+    @Volatile var exporting: Boolean = false
+    /** 取消标志。每本开跑前查一次，已导出的文件保留。 */
+    @Volatile var exportCancel: Boolean = false
 
     /** 当前筛选的中文名，给分组标题用。 */
     fun filterName(): String = when (filter) {
@@ -209,8 +215,14 @@ private fun MainActivity.addCacheQueueBar(rows: List<CacheUsage>) {
         setPadding(Md3.dp(this@addCacheQueueBar, Md3.PAD), Md3.dp(this@addCacheQueueBar, Md3.GAP / 2),
             Md3.dp(this@addCacheQueueBar, Md3.PAD), Md3.dp(this@addCacheQueueBar, Md3.GAP))
     }
-    if (DownloadService.runningBookId != null) {
-        bar.addView(Widgets.button(this, "全部停止", "tonal") {
+    val running = DownloadService.runningBookId != null
+    val missing = rows.filter { it.cached < it.total }
+    val queued = DownloadService.queueOf(filesDir).items().size
+    // 批量导出跟「全部开始」同一行；这一批里有下过的书就露出导出口。
+    val exportable = CacheUi.exporting || rows.any { it.cached > 0 }
+    if (!running && missing.isEmpty() && queued == 0 && !exportable) return
+    if (running) {
+        bar.addView(barButton("全部停止", "tonal") {
             DownloadService.cancel(this)
             toast("已要求停止，队列一并清空")
             // 服务先落盘再收工，过一会儿回来把按钮换回「全部开始」。
@@ -218,16 +230,104 @@ private fun MainActivity.addCacheQueueBar(rows: List<CacheUsage>) {
                 Thread.sleep(800)
                 postAlive(Screen.Cache) { showCache() }
             }
-        }, Md3.lpWeight(1f))
-    } else {
-        val missing = rows.filter { it.cached < it.total }
-        val queued = DownloadService.queueOf(filesDir).items().size
-        if (missing.isEmpty() && queued == 0) return
-        val label = if (missing.isNotEmpty()) "全部开始 · ${missing.size} 本" else "继续队列 · $queued 本"
-        bar.addView(Widgets.button(this, label, "filled") { startAllCache(missing) },
-            Md3.lpWeight(1f))
+        })
+    } else if (missing.isNotEmpty() || queued > 0) {
+        // 两颗并排时一颗只分到约 78dp，带数量的标签（「全部开始 · 3 本」共八字）
+        // 必被截成「全部开…」。并排时只留动词，数量上面的段标题已经写了。
+        val label = when {
+            missing.isNotEmpty() && exportable -> "全部开始"
+            missing.isNotEmpty() -> "全部开始 · ${missing.size} 本"
+            exportable -> "继续队列"
+            else -> "继续队列 · $queued 本"
+        }
+        bar.addView(barButton(label, "filled") { startAllCache(missing) })
+    }
+    if (exportable) {
+        // 范围由这张屏的筛选自己表达：导的是当前筛出来的这一批，不是全库。
+        val label = if (CacheUi.exporting) "取消导出" else "导出全部"
+        bar.addView(barButton(label, if (CacheUi.exporting) "tonal" else "outline") {
+            exportAllCache(rows)
+        })
     }
     root.addView(bar)
+}
+
+/**
+ * 屏底动作按钮。
+ *
+ * 与 [Widgets.button] 的差别只在宽度紧张时的三处：内边距 16 → 4 dp、不设最小宽、
+ * 单行截尾。[Md3.button] 默认左右各 16dp，189dp 上两颗并排时字面只剩 46dp，
+ * 四个字就顶出去了；而 [Md3.BTN] 高度固定，换行会被裁成半行字。
+ */
+private fun MainActivity.barButton(
+    label: CharSequence,
+    variant: String,
+    onClick: () -> Unit,
+): TextView = Widgets.button(this, label, variant) { onClick() }.apply {
+    setPadding(Md3.dp(this@barButton, 4), 0, Md3.dp(this@barButton, 4), 0)
+    minWidth = 0
+    isSingleLine = true
+    ellipsize = android.text.TextUtils.TruncateAt.END
+    layoutParams = Md3.lpWeight(1f)
+}
+
+/**
+ * 批量导出：把**当前筛选出的这一批**（屏底条拿到的 rows，即 shown）串行导成 TXT。
+ *
+ * 串行而不是并发：导出是 CPU 密集的（XHTML 转文本），并发只是把表盘风扇拉满，
+ * 写入还得靠 [MainActivity.exportLock] 排队，落点又都是同一个「文档」。
+ * 导出中再点同一颗键就是取消：每本开跑前查一次标志，已导出的文件留着。
+ */
+private fun MainActivity.exportAllCache(rows: List<CacheUsage>) {
+    if (CacheUi.exporting) {
+        CacheUi.exportCancel = true
+        toast("已要求取消，导完手上这本就停")
+        return
+    }
+    if (!ensureExportStorage()) return
+    val todo = rows.filter { it.cached > 0 }
+    if (todo.isEmpty()) {
+        toast("这一批里没有下过正文的书")
+        return
+    }
+    CacheUi.exporting = true
+    CacheUi.exportCancel = false
+    showCache()
+    thread {
+        var ok = 0
+        var fail = 0
+        var skip = 0
+        var stopped = false
+        for ((i, u) in todo.withIndex()) {
+            if (CacheUi.exportCancel) {
+                stopped = true
+                break
+            }
+            postAlive(Screen.Cache) { toast("导出 ${i + 1}/${todo.size} · ${u.name}") }
+            val job = Downloader.restoreLight(jobsStore(), u.bookId)
+            if (job == null || job.chapters.isEmpty()) {
+                fail++
+                continue
+            }
+            // order 靠 chapters：顺序错了导出的章序就是乱的。
+            val r = exportOneSync(BookInfo(job.bookId, job.name, job.author, job.chapters),
+                skipExisting = true)
+            when {
+                r.error != null -> fail++
+                r.skippedExisting -> skip++
+                else -> ok++
+            }
+        }
+        CacheUi.exporting = false
+        CacheUi.exportCancel = false
+        postAlive(Screen.Cache) {
+            val parts = mutableListOf(if (stopped) "已取消，导出 $ok 本" else "已导出 $ok 本")
+            if (fail > 0) parts += "失败 $fail 本"
+            if (skip > 0) parts += "跳过 $skip 本（已存在）"
+            toast(parts.joinToString("，"))
+            showCache()
+        }
+    }
 }
 
 /**
@@ -381,6 +481,21 @@ private fun MainActivity.cacheIcon(
     return v
 }
 
+/**
+ * 单本导出：后台线程调 [MainActivity.exportOneSync]，界面不卡。
+ *
+ * job 是展开时已读到的那份，拼 [BookInfo] 时 `order` 靠它的 chapters —— 顺序错了，
+ * 导出的章序就是乱的。没下全的书导完在回执里补一句「共 N 章，未下的不导」。
+ */
+private fun MainActivity.exportOneBook(u: CacheUsage, job: BookJob) {
+    if (!ensureExportStorage()) return
+    toast("正在导出《${u.name}》")
+    thread {
+        val r = exportOneSync(BookInfo(job.bookId, job.name, job.author, job.chapters))
+        postAlive(Screen.Cache) { toast(exportMessage(r, u.total)) }
+    }
+}
+
 /** 一章窗口的行数。手表屏一次只能扫过这么多行，跟目录同做法只画一窗。 */
 private const val CHAPTER_WINDOW = 30
 
@@ -419,6 +534,16 @@ private fun MainActivity.cacheChapterWindow(col: LinearLayout, u: CacheUsage) {
     if (job == null || job.chapters.isEmpty()) {
         col.addView(Md3.text(this, "读不到这本书的目录，先去书页重新取一次。", Md3.FS_SM, Md3.onSurfaceVariant))
         return
+    }
+    // 单本导出放在章列表之前：这一本书的动作，别让它跟在几十行章后面要翻到底。
+    if (u.cached <= 0) {
+        col.addView(Md3.ellipsize(Md3.text(this, "还没下到内容", Md3.FS_SM, Md3.onSurfaceVariant)).apply {
+            setPadding(Md3.dp(this@cacheChapterWindow, 4), Md3.dp(this@cacheChapterWindow, Md3.GAP / 2),
+                Md3.dp(this@cacheChapterWindow, 4), 0)
+        })
+    } else {
+        col.addView(Widgets.button(this, "导出 TXT · 已下 ${u.cached} 章", "tonal") { exportOneBook(u, job) },
+            Md3.lpDp(this, null, Md3.BTN).apply { topMargin = Md3.dp(this@cacheChapterWindow, Md3.GAP / 2) })
     }
     val cached = jobsStore().cachedItemIds(u.bookId)
     val last = job.chapters.lastIndex
