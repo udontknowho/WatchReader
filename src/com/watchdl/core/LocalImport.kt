@@ -35,7 +35,7 @@ object LocalImport {
     private const val ENTRY_CAP = 4 * 1024 * 1024
 
     /** epub 文本条目累计封顶。 */
-    private const val MAX_EPUB_TEXT = 48L * 1024 * 1024
+    private const val MAX_EPUB_TEXT = 64L * 1024 * 1024
 
     /** 读最多 [cap] 字节，不把流整个吃进内存。 */
     private fun readCapped(ins: InputStream, cap: Int): ByteArray {
@@ -92,10 +92,35 @@ object LocalImport {
         // 落在偶位，纯中文的 UTF-16LE 会被数成 BE。改成四种编码各解前 8KB，
         // 按「常见字占比」取高者 —— 解错端序或错编码得到的是随机汉字，几乎不含
         // 的/一/是/不/了 这类高频字，分数自然低。
-        val probe = bytes.copyOfRange(0, minOf(bytes.size, 8192))
-        val cs = pickCharset(probe)
-        return runCatching { String(bytes, cs) }.getOrDefault(String(bytes, Charsets.UTF_8))
-            .trim('\uFEFF', '\u0000')
+        // 只取开头会在「GBK 文件前面是一段英文版权页」时判错，所以首/中/尾各取一段。
+        val cs = pickCharset(sampleProbes(bytes))
+        val picked = runCatching { String(bytes, cs) }.getOrDefault(String(bytes, Charsets.UTF_8))
+        // 兜底：全文替换符谁少用谁。8KB 样本看不见的坏字节，靠这一步收。
+        val bad = picked.count { it == '\uFFFD' }
+        if (bad > 0) {
+            val gb = runCatching { String(bytes, charset("GB18030")) }.getOrNull()
+            if (gb != null && gb.count { it == '\uFFFD' } < bad) return gb.trim('\uFEFF', '\u0000')
+        }
+        return picked.trim('\uFEFF', '\u0000')
+    }
+
+    /** 首 / 中 / 尾各取 4KB，拼成一份用于判编码的样本。 */
+    private fun sampleProbes(bytes: ByteArray): ByteArray {
+        val n = 4096
+        if (bytes.size <= n * 3) return bytes
+        val out = ByteArrayOutputStream(n * 3)
+        out.write(bytes, 0, n)
+        out.write(bytes, (bytes.size - n) / 2, n)
+        out.write(bytes, bytes.size - n, n)
+        return out.toByteArray()
+    }
+
+    /** 后缀优先认 epub；后缀说不清时看 PK 头（SAF 常给没扩展名的名字）。 */
+    fun isEpub(fileName: String, head: ByteArray): Boolean {
+        val ext = fileName.substringAfterLast('.', "").lowercase(Locale.US)
+        if (ext == "epub") return true
+        if (ext == "txt") return false
+        return head.size > 4 && head[0] == 'P'.code.toByte() && head[1] == 'K'.code.toByte()
     }
 
     /** 高频汉字与常用标点。判「这段字节解出来像不像中文」。 */
@@ -103,32 +128,42 @@ object LocalImport {
         .toSet()
 
     private fun pickCharset(probe: ByteArray): java.nio.charset.Charset {
-        val cands = listOf(
-            Charsets.UTF_8,
-            runCatching { charset("GB18030") }.getOrDefault(Charsets.UTF_8),
-            Charsets.UTF_16LE,
-            Charsets.UTF_16BE,
-        )
+        val gbCs = runCatching { charset("GB18030") }.getOrDefault(Charsets.UTF_8)
+        val cands = listOf(Charsets.UTF_8, gbCs, Charsets.UTF_16LE, Charsets.UTF_16BE)
         var best = Charsets.UTF_8
         var bestScore = Double.NEGATIVE_INFINITY
         for (c in cands) {
             val t = runCatching { String(probe, c) }.getOrNull() ?: continue
             if (t.isEmpty()) continue
+            val utf16 = c == Charsets.UTF_16LE || c == Charsets.UTF_16BE
             var good = 0
             var bad = 0
             for (ch in t) {
+                // UTF-16 把两个可打印 ASCII 字节拼成一个「汉字」（`eg`=来、`/f`=是），
+                // 这正是纯 ASCII 文本被误判成 UTF-16 的来源。这类字符不给分。
+                val hi = ch.code ushr 8
+                val lo = ch.code and 0xFF
+                val asciiPair = hi in 0x20..0x7E && lo in 0x20..0x7E
                 when {
+                    ch == '\uFFFD' -> bad += 6
+                    ch < ' ' && ch != '\n' && ch != '\r' && ch != '\t' -> bad += 4
+                    utf16 && asciiPair -> bad += 3
                     ch in FREQ -> good += 3
                     ch in '\u4e00'..'\u9fff' -> good += 1
                     ch in 'a'..'z' || ch in 'A'..'Z' || ch in '0'..'9' -> good += 1
                     ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t' -> good += 1
                     ch in "，。！？、：；“”‘’（）《》…—·" -> good += 2
-                    ch == '\uFFFD' -> bad += 6
-                    ch < ' ' -> bad += 4
-                    else -> good += 0
                 }
             }
-            val score = (good - bad).toDouble() / t.length
+            var score = (good - bad).toDouble() / t.length
+            // 端序纠偏：UTF-16 的单字节字符把 0 挤在一侧。
+            if (utf16 && t.length <= probe.size / 2) {
+                var oddZ = 0
+                var evenZ = 0
+                probe.forEachIndexed { i, b -> if (b == 0.toByte()) { if (i % 2 == 0) evenZ++ else oddZ++ } }
+                val wantsLe = oddZ > evenZ
+                if ((c == Charsets.UTF_16LE) != wantsLe) score -= 0.5
+            }
             if (score > bestScore) { bestScore = score; best = c }
         }
         return best
@@ -348,10 +383,12 @@ object LocalImport {
 
     /** 文件名自然序：`ch2` 排在 `ch10` 前面。 */
     private fun naturalCompare(a: String, b: String): Int {
-        val ta = Regex("[0-9]+").findAll(a).map { it.value.toLongOrNull() ?: 0L }.toList()
-        val tb = Regex("[0-9]+").findAll(b).map { it.value.toLongOrNull() ?: 0L }.toList()
+        // 不能转 Long：20 位的流水号/时间戳会溢出成 0。数字先比有效长度再比字典序。
+        val ta = Regex("[0-9]+").findAll(a).map { it.value.trimStart('0') }.toList()
+        val tb = Regex("[0-9]+").findAll(b).map { it.value.trimStart('0') }.toList()
         for (i in 0 until minOf(ta.size, tb.size)) {
-            val c = ta[i].compareTo(tb[i])
+            val c = if (ta[i].length != tb[i].length) ta[i].length.compareTo(tb[i].length)
+                    else ta[i].compareTo(tb[i])
             if (c != 0) return c
         }
         if (ta.size != tb.size) return ta.size.compareTo(tb.size)
@@ -411,12 +448,14 @@ object LocalImport {
      */
     fun importInto(store: JobStore, fileName: String, bytes: ByteArray): Result {
         if (bytes.isEmpty()) throw IllegalArgumentException("文件是空的")
-        if (bytes.size > MAX_BYTES) {
-            throw IllegalArgumentException("文件太大（${bytes.size / 1024 / 1024}MB），上限 ${MAX_BYTES / 1024 / 1024}MB")
-        }
         val ext = fileName.substringAfterLast('.', "").lowercase(Locale.US)
-        val looksEpub = bytes.size > 4 && bytes[0] == 'P'.code.toByte() &&
-            bytes[1] == 'K'.code.toByte() && ext != "txt"
+        val looksEpub = isEpub(fileName, bytes)
+        // 上限按格式取：epub 的体积是图片字体，按 txt 的 12MB 卡会把正规 epub 挡在门外。
+        // 这里必须和 MainActivity 的预检同一口径，所以判据抽成 isEpub。
+        val limit = if (ext == "epub" || looksEpub) MAX_EPUB_BYTES else MAX_BYTES
+        if (bytes.size > limit) {
+            throw IllegalArgumentException("文件太大（${bytes.size / 1024 / 1024}MB），上限 ${limit / 1024 / 1024}MB")
+        }
         val format: String
         val chapters: List<Chapter>
         if (ext == "epub" || looksEpub) {

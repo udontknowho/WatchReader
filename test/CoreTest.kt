@@ -311,13 +311,36 @@ fun main() {
     println("[本地导入] 边界")
     run {
         // 无 BOM 的 UTF-16LE：只看替换符会判成 UTF-8，整本变带洞的乱码。
-        // 纯中文样本：「一」= U+4E00 低字节是 0x00，落在偶位，靠数零字节会判成 BE。
-        val pure = ("第一章 开始\n\n" + "他一步一步地走进那座大宅，心里想着家里的人。\n".repeat(40))
-        val dec = com.watchdl.core.LocalImport.decodeText(pure.toByteArray(Charsets.UTF_16LE))
-        check("纯中文 UTF-16LE 能认", dec.startsWith("第一章 开始") && dec.contains("大宅"),
-            dec.take(12))
-        val decBe = com.watchdl.core.LocalImport.decodeText(pure.toByteArray(Charsets.UTF_16BE))
-        check("纯中文 UTF-16BE 能认", decBe.startsWith("第一章 开始"), decBe.take(12))
+        // 「一」= U+4E00 低字节是 0x00、落在偶位；换行极少时靠数零字节会把 LE 判成 BE。
+        // 这个样本才打得穿旧判据（旧算法给出「NNNNNNNN」）。
+        val dash = "一".repeat(156) + "\n"
+        val dec = com.watchdl.core.LocalImport.decodeText(dash.repeat(40).toByteArray(Charsets.UTF_16LE))
+        check("全是「一」的 UTF-16LE 能认", dec.count { it == '一' } == 156 * 40,
+            "${dec.take(8)} / 一=${dec.count { it == '一' }}")
+        val decBe = com.watchdl.core.LocalImport.decodeText(dash.repeat(40).toByteArray(Charsets.UTF_16BE))
+        check("全是「一」的 UTF-16BE 能认", decBe.count { it == '一' } == 156 * 40,
+            "${decBe.take(8)} / 一=${decBe.count { it == '一' }}")
+
+        // 纯 ASCII 前后夹一段 GBK 中文：只取开头会判成 UTF-8，整本中文变替换符。
+        val ascii = ("Preface (c) 2024, all rights reserved.\n".repeat(300))
+        val gbkMix = ascii.toByteArray() +
+            "第一章 开始\n\n这是中文正文，用来验证取样覆盖中段与尾部。\n".repeat(200)
+                .toByteArray(charset("GB18030"))
+        val mixDec = com.watchdl.core.LocalImport.decodeText(gbkMix)
+        check("GBK 前面一大段英文也能认", mixDec.contains("这是中文正文") && !mixDec.contains('\uFFFD'),
+            mixDec.take(12))
+
+        // UTF-16 编码的纯英文：两个可打印 ASCII 字节不能拼成「汉字」把判定带偏。
+        val en = "The quick brown fox jumps over the lazy dog.\n".repeat(40)
+        val enDec = com.watchdl.core.LocalImport.decodeText(en.toByteArray(Charsets.UTF_8))
+        check("纯 ASCII 不被判成 UTF-16", enDec.startsWith("The quick brown fox"),
+            enDec.take(12))
+        // 不带空格的连续 ASCII 编码成 UTF-16BE：端序只能靠零字节奇偶位定。
+        val noSpace = "abcdefghijklmnopqrstuvwxyz0123456789".repeat(30)
+        val beDec = com.watchdl.core.LocalImport.decodeText(noSpace.toByteArray(Charsets.UTF_16BE))
+        check("UTF-16BE 连续 ASCII 不判成 LE", beDec == noSpace, beDec.take(12))
+        val leDec = com.watchdl.core.LocalImport.decodeText(noSpace.toByteArray(Charsets.UTF_16LE))
+        check("UTF-16LE 连续 ASCII 不判成 BE", leDec == noSpace, leDec.take(12))
 
         // 分章：全角数字、各种分隔符、番外、Chapter 无空格。
         val heads = listOf(
@@ -332,8 +355,11 @@ fun main() {
 
         // 逗号不能当标题分隔符：这条是正文，不是章节标题。
         val comma = "第一章，他终于明白自己错了，可是已经晚了。\n\n后面还有正文。"
-        check("逗号开头的正文不当标题", com.watchdl.core.LocalImport.splitTxt(comma).size == 1,
-            "${com.watchdl.core.LocalImport.splitTxt(comma).map { it.title }}")
+        val commaCh = com.watchdl.core.LocalImport.splitTxt(comma)
+        // 只断言 size==1 不够：把整句当标题也还是 1 章，测不出缺陷。
+        check("逗号开头的正文不当标题", commaCh.size == 1 && commaCh[0].title == "全书",
+            commaCh.map { it.title }.toString())
+        check("逗号那句仍在正文里", commaCh[0].body.contains("他终于明白"), commaCh[0].body.take(20))
 
         // 没有 spine 的包按文件名自然序，不能 1,10,11,2。
         val bosN = java.io.ByteArrayOutputStream()

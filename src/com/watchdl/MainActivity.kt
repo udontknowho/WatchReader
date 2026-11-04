@@ -515,7 +515,11 @@ class MainActivity : Activity() {
             val declared = localFileSize(uri)
             // epub 的体积几乎全是图片和字体，正文只有几百 KB。按 txt 的 12MB 卡，
             // 一本 27MB 的正规 epub 会被直接拒掉。正文大小交给累计上限管。
-            val limit = if (name.endsWith(".epub", ignoreCase = true)) LocalImport.MAX_EPUB_BYTES
+            // 判据与 LocalImport 同一份：SAF 常给出没扩展名的 `document`，
+            // 只看后缀会把 epub 按 12MB 卡掉。
+            val ext = name.substringAfterLast('.', "").lowercase()
+            val limit = if (ext == "epub" || (ext != "txt" && declared in 0..LocalImport.MAX_EPUB_BYTES &&
+                    declared > LocalImport.MAX_BYTES)) LocalImport.MAX_EPUB_BYTES
                         else LocalImport.MAX_BYTES
             if (declared > limit) {
                 throw IllegalArgumentException(
