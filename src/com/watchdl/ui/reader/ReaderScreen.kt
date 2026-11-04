@@ -113,15 +113,6 @@ internal object ReaderUi {
     var restoreKey = ""
     var restoreAt = -1
 
-    /** 页眉页脚总开关（legado readConfig 的 headerMode/footerMode 合成一个总闸）。 */
-    var stripsOn = false
-    /** 页眉显示项：chapter=章节名 / page=屏号。空列表 = 不显示页眉。 */
-    var headerParts: List<String> = listOf("chapter", "page")
-    /** 页脚显示项：book=书名 / pct=全书进度 / battery=电量。空列表 = 不显示页脚。 */
-    var footerParts: List<String> = listOf("book", "pct", "battery")
-    /** 页眉页脚的重画闭包，由当前阅读页挂上；改设置时就地重画，不重建页面。 */
-    var stripRefresh: (() -> Unit)? = null
-
     /**
      * 正在显示的正文与标题。
      *
@@ -188,8 +179,6 @@ internal object ReaderMenu {
         open = false
         onClose = null
         badgeRefresh = null
-        // 页眉页脚的重画闭包握着上一屏的 View，留着就会往已摘下的视图树里写字。
-        ReaderUi.stripRefresh = null
         // 正文/标题控件是上一屏的，留着就是泄漏旧视图树。
         ReaderUi.bodyView = null
         ReaderUi.titleView = null
@@ -313,29 +302,6 @@ private fun readerTools(csv: String?): List<String> {
     return if (ids.isEmpty()) READER_TOOLS_DEFAULT else ids
 }
 
-/** 页眉能显示的项，也是落盘顺序。 */
-private val STRIP_HEADER = listOf("chapter", "page")
-
-/** 页脚能显示的项，也是落盘顺序。 */
-private val STRIP_FOOTER = listOf("book", "pct", "battery")
-
-private val STRIP_HEADER_DEF = listOf("chapter", "page")
-private val STRIP_FOOTER_DEF = listOf("book", "pct", "battery")
-
-/**
- * 显示项 csv → 合法 id 列表。
- *
- * 空串是「用户主动把这一条全关掉」，要原样保留成空列表，**不能**退回默认；
- * 只有键不存在（null）或一个合法 id 都没剩下（全是脏值）时才用默认。
- * 顺序按 [allowed] 的固定序排，不按存入先后：页眉页脚的排布不该随点选顺序跳。
- */
-private fun readerParts(csv: String?, allowed: List<String>, def: List<String>): List<String> {
-    if (csv == null) return def
-    if (csv.isBlank()) return emptyList()
-    val ids = csv.split(',').map { it.trim() }.filter { it in allowed }.distinct()
-    return if (ids.isEmpty()) def else allowed.filter { it in ids }
-}
-
 /** 从 SharedPreferences("reader") 读扩展设置。重复调用无副作用。 */
 internal fun MainActivity.loadReaderExtras() {
     val p = getSharedPreferences("reader", android.content.Context.MODE_PRIVATE)
@@ -365,13 +331,6 @@ internal fun MainActivity.loadReaderExtras() {
     ReaderUi.marginLevel = p.getInt("margin", 1).coerceIn(0, 2)
     ReaderUi.keepOn = p.getBoolean("keepOn", false)
     ReaderUi.badgeOn = p.getBoolean("badge", true)
-    // 页眉页脚已从设置里去掉（用户要求），默认不显示；这里不再读旧键，
-    // 免得旧存档里开着的那两条 14 dp 条还在，却没有任何入口可关。
-    ReaderUi.stripsOn = false
-    ReaderUi.headerParts = readerParts(p.getString("headerParts", null),
-        STRIP_HEADER, STRIP_HEADER_DEF)
-    ReaderUi.footerParts = readerParts(p.getString("footerParts", null),
-        STRIP_FOOTER, STRIP_FOOTER_DEF)
 }
 
 /** 扩展设置落盘，与字号/行距/背景同一处，键名各占一个。 */
@@ -398,9 +357,6 @@ internal fun MainActivity.saveReaderExtras() {
         .putInt("margin", ReaderUi.marginLevel)
         .putBoolean("keepOn", ReaderUi.keepOn)
         .putBoolean("badge", ReaderUi.badgeOn)
-        .putBoolean("strips", ReaderUi.stripsOn)
-        .putString("headerParts", ReaderUi.headerParts.joinToString(","))
-        .putString("footerParts", ReaderUi.footerParts.joinToString(","))
         .apply()
 }
 
@@ -473,10 +429,10 @@ internal fun MainActivity.showReader(
     // 顶栏收走后首行会顶到表壳圆弧上：四边补回页边距（scrollBody 只给了左右下）。
     // 阅读边距按「边距」档走：legado 的边距是四边滑杆，手表三档就够。
     val pad = Md3.dp(this, ReaderStyle.marginDp(ReaderUi.marginLevel))
-    // 上下各让出 14 dp 页眉页脚，再加 2 dp 留白。高度账：
-    // 屏 248 dp；页眉页脚各 14 dp → 正文可视 248−28−4=216 dp；
+    // 四边同一条阅读边距。高度账：
+    // 屏 248 dp；上下各让出「边距」档 → 标准档正文可视 248−32=216 dp；
     // 菜单展开时顶栏 TOP_BAR 64 + 底栏 111 以浮层盖住，不参与挤压正文。
-    body.setPadding(pad, Md3.dp(this, 14 + 2), pad, Md3.dp(this, 14 + 2))
+    body.setPadding(pad, pad, pad, pad)
     val col = Widgets.contentColumn(body)
 
     // 标题：legado 把章节标题排正文之前（TypographyTitleTab 的「标题位置」）。
@@ -535,27 +491,6 @@ internal fun MainActivity.showReader(
     frame.addView(body, FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
-    // ── 页眉 / 页脚：各 14 dp 细条，压在菜单浮层之下 ─────────────
-    // 不进 ScrollView：放进去会跟着正文滚走。z 序：body → 页眉页脚 → 护眼遮罩 → 胶囊 → 菜单。
-    // 两头的小字都是 10 sp、readerMuted、includeFontPadding=false。
-    fun stripText(t: CharSequence, gravity: Int): TextView =
-        Md3.text(this, t, 10f, readerMuted).apply {
-            includeFontPadding = false
-            Md3.ellipsize(this)
-            this.gravity = gravity or Gravity.CENTER_VERTICAL
-        }
-
-    /** 本章共多少屏、现在第几屏。正文未排版时按 1/1。 */
-    fun pageOf(): Pair<Int, Int> {
-        val layout = tv.layout ?: return 1 to 1
-        val vh = (body.height - body.paddingTop - body.paddingBottom).coerceAtLeast(1)
-        val linesPerPage = (vh / tv.lineHeight.coerceAtLeast(1)).coerceAtLeast(1)
-        val totalPages = ((layout.lineCount + linesPerPage - 1) / linesPerPage).coerceAtLeast(1)
-        val textTop = childTopIn(body, tv) + tv.paddingTop
-        val line = layout.getLineForVertical((body.scrollY - textTop).coerceAtLeast(0))
-        return (line / linesPerPage + 1).coerceIn(1, totalPages) to totalPages
-    }
-
     /** 章内百分比：正文滚到哪算哪，0 是章首、100 是章末（有拼接块时按 [mainLimit] 算）。 */
     fun innerPct(): Int {
         val limit = mainLimit()
@@ -563,112 +498,6 @@ internal fun MainActivity.showReader(
         return (body.scrollY * 100 / limit).coerceIn(0, 100)
     }
     val total = info.chapters.size.coerceAtLeast(1)
-
-    // 两条 14 dp 的条各建一次，内容由 paintStripsChrome 清空重建 ——
-    // 页眉页脚的开关与显示项都在设置里改，改完就地重画，不重建整页（重建会打回章首）。
-    val header = Md3.column(this)
-    header.setBackgroundColor(readerBackground)
-    val headerRow = Md3.row(this)
-    header.addView(headerRow,
-        LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-    // 番茄档 headerMode=1 就是「页眉有线」，所以这根线常显，不做开关。
-    header.addView(View(this).apply { setBackgroundColor(hairline) }, Md3.lpDp(this, null, 1))
-    frame.addView(header, FrameLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, 14), Gravity.TOP))
-
-    // 页脚同样：左书名，中全书进度（与底栏滑条同一口径），右电量。
-    val footer = Md3.column(this)
-    footer.setBackgroundColor(readerBackground)
-    footer.addView(View(this).apply { setBackgroundColor(hairline) }, Md3.lpDp(this, null, 1))
-    val footerRow = Md3.row(this)
-    footer.addView(footerRow,
-        LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-    frame.addView(footer, FrameLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, 14), Gravity.BOTTOM))
-
-    // 电量表常驻一个实例：重画条内容只是换个父容器，不重复注册广播。
-    val battery = BatteryText(this).apply {
-        setTextColor(readerMuted)
-        setPadding(Md3.dp(this@showReader, 4), 0, 0, 0)
-    }
-    val chapterTitle = info.chapters.getOrNull(index)?.title.orEmpty()
-
-    /** 屏号 / 全书进度两个控件；显示项里没勾的那一项就是 null。 */
-    var pageTv: TextView? = null
-    var pctTv: TextView? = null
-
-    /** 页眉右字与页脚进度。两者只在滚动回调与重画时刷新。 */
-    fun paintStrips() {
-        val p = pageOf()
-        pageTv?.text = "${p.first}/${p.second}"
-        // 与底栏滑条同一口径：全书 = 章数 × 100，章内百分比落在余数里，取整到 0–100。
-        pctTv?.text = "${((index * 100 + innerPct()) / total).coerceIn(0, 100)}%"
-    }
-
-    /**
-     * 按当前配置重画页眉页脚。
-     *
-     * 清空两条的子控件再按 [ReaderUi.headerParts] / [ReaderUi.footerParts] 重建，
-     * 所以能重复调（设置里改一下就调一次）而不碰视图树的其余部分。
-     * 总开关关或某组显示项为空时，那一条 GONE，正文的上下内边距跟着退回 [pad] ——
-     * 条不在就不必让位（关掉后正文多两行）。
-     * 改内边距会改变可滚范围，滚动位置可能被 ScrollView 夹一下，这是允许的；
-     * 但这里绝不主动 scrollTo(0, 0)。
-     */
-    fun paintStripsChrome() {
-        val on = ReaderUi.stripsOn
-        val hp = if (on) ReaderUi.headerParts else emptyList()
-        val fp = if (on) ReaderUi.footerParts else emptyList()
-        pageTv = null
-        pctTv = null
-
-        headerRow.removeAllViews()
-        headerRow.setPadding(pad, 0, pad, 0)
-        // 章节名是伸缩区；没勾它时补一个占位，屏号才不会被挤到左边。
-        if ("chapter" !in hp) headerRow.addView(View(this),
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
-        for (id in hp) when (id) {
-            "chapter" -> headerRow.addView(stripText(chapterTitle, Gravity.START),
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
-            "page" -> {
-                val v = stripText("1/1", Gravity.END)
-                pageTv = v
-                headerRow.addView(v)
-            }
-        }
-        header.visibility = if (hp.isEmpty()) View.GONE else View.VISIBLE
-
-        footerRow.removeAllViews()
-        footerRow.setPadding(pad, 0, pad, 0)
-        if ("book" !in fp) footerRow.addView(View(this),
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
-        for (id in fp) when (id) {
-            "book" -> footerRow.addView(stripText(info.name, Gravity.START),
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
-            // 进度条只做「中偏右」：14 dp 里做精确居中要给两侧配重，书名可用宽度会被砍一半。
-            "pct" -> {
-                val v = stripText("", Gravity.CENTER)
-                pctTv = v
-                footerRow.addView(v)
-            }
-            "battery" -> {
-                (battery.parent as? ViewGroup)?.removeView(battery)
-                footerRow.addView(battery)
-            }
-        }
-        footer.visibility = if (fp.isEmpty()) View.GONE else View.VISIBLE
-
-        val top = if (header.visibility == View.VISIBLE) Md3.dp(this, 14 + 2) else pad
-        val bottom = if (footer.visibility == View.VISIBLE) Md3.dp(this, 14 + 2) else pad
-        if (body.paddingTop != top || body.paddingBottom != bottom) {
-            body.setPadding(pad, top, pad, bottom)
-        }
-        // 新控件刚建出来是空的：屏号与进度得再上一遍。
-        paintStrips()
-    }
-    paintStripsChrome()
-    // 设置面板改完显示项就地重画，不重建页面（重建会把滚动位置打回章首）。
-    ReaderUi.stripRefresh = { paintStripsChrome() }
 
     // ── 点击分区：上屏回滚一屏 / 中段出菜单 / 下屏前进一屏 ─────────────
     // 分区边界照 legado 九宫格的**行**分界（33% / 66%，`feature/reader/core/gesture/
@@ -746,9 +575,8 @@ internal fun MainActivity.showReader(
                 scaleType = ImageView.ScaleType.FIT_XY
                 isClickable = false
             }
-            // 压进页眉之下：页眉页脚不能被这层盖住。header 是帧内第一层浮条，
-            // 插在它前面就位于 body 之上、页眉与页脚之下。
-            frame.addView(iv, frame.indexOfChild(header),
+            // 插在 body 之后（index 1）：压住正文，又不盖住后面建的菜单浮层。
+            frame.addView(iv, 1,
                 FrameLayout.LayoutParams(body.width, vh, Gravity.TOP))
             coverBusy = true
             iv.animate().translationY((if (forward) -vh else vh).toFloat())
@@ -1035,8 +863,7 @@ internal fun MainActivity.showReader(
     if (index <= 0) { prev.alpha = 0.35f; prev.isClickable = false }
     foot.addView(prev, LinearLayout.LayoutParams(Md3.dp(this, 28), Md3.dp(this, 28)))
 
-    // 页眉屏号、页脚进度与章内百分比都在上方页眉页脚段（paintStrips / innerPct），
-    // 它们要先于这一段声明：重画条内容的 paintStripsChrome 也要用到。
+    // 章内百分比在上方声明（innerPct），底栏进度行要用它当起点。
     val atStart = index * 100 + innerPct()
     val seek = android.widget.SeekBar(this)
     seek.max = 100 * total
@@ -1227,8 +1054,6 @@ internal fun MainActivity.showReader(
             val pct = if (limit > 0) (y * 100 / limit).coerceIn(0, 100) else 0
             seek.progress = index * 100 + pct
         }
-        // 页眉的屏号与页脚的进度跟着正文走。
-        paintStrips()
         scrollSave?.let { body.removeCallbacks(it) }
         val task = Runnable {
             // 偏移只记到「本章读完」为止：存进拼接块，下次进这一章会落在下一章的字里。
@@ -1286,7 +1111,6 @@ internal fun MainActivity.showReader(
             spliceChars = nx.length()
             // 新标题也得跟上「标题位置 / 字号」设置：它就是一个章标题。
             restyleTitle(readerInk)
-            paintStrips()
             // 从下一章退上来、这一页本应落在「章末」：有拼接块时章末是正文底边。
             if (atEnd) body.post { body.scrollTo(0, mainLimit()) }
         }
@@ -1421,60 +1245,6 @@ private fun MainActivity.applyParaSpacing(tv: TextView, text: CharSequence) {
         sp.setSpan(ParaSpan(extra), i, i + 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
     }
     tv.setText(sp, TextView.BufferType.SPANNABLE)
-}
-
-/**
- * 页脚电量：读系统电池广播。
- *
- * 先不注册就读一次粘性广播：读到了才挂接收器；读不到就显示「—」且不注册 ——
- * 为一个永远不更新的数字挂着广播接收器没有意义。
- */
-private class BatteryText(ctx: android.content.Context) : TextView(ctx) {
-    private val filter =
-        android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED)
-    private var registered = false
-
-    /** 广播里的 level / scale 折成 0–100；读不到给 null。 */
-    private fun pct(i: android.content.Intent?): Int? {
-        if (i == null) return null
-        val level = i.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1)
-        val scale = i.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1)
-        if (level < 0 || scale <= 0) return null
-        return (level * 100 / scale).coerceIn(0, 100)
-    }
-
-    private val rx = object : android.content.BroadcastReceiver() {
-        override fun onReceive(c: android.content.Context?, i: android.content.Intent?) {
-            pct(i)?.let { text = "$it%" }
-        }
-    }
-
-    /** 粘性广播的初值；null 表示这台设备读不到电量。 */
-    private val sticky: Int? =
-        runCatching { pct(context.registerReceiver(null, filter)) }.getOrNull()
-
-    init {
-        setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 10f)
-        includeFontPadding = false
-        setSingleLine(true)
-        gravity = Gravity.END or Gravity.CENTER_VERTICAL
-        text = sticky?.let { "$it%" } ?: "—"
-    }
-
-    override fun onAttachedToWindow() {
-        super.onAttachedToWindow()
-        if (sticky == null || registered) return
-        // 注册失败也不影响显示：初值已经画上了。
-        registered = runCatching { context.registerReceiver(rx, filter) }.isSuccess
-    }
-
-    override fun onDetachedFromWindow() {
-        if (registered) {
-            runCatching { context.unregisterReceiver(rx) }
-            registered = false
-        }
-        super.onDetachedFromWindow()
-    }
 }
 
 /** 段末行高。chooseHeight 每行会被调两次，加一次就够。 */
