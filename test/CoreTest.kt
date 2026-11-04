@@ -250,6 +250,97 @@ fun main() {
         check("XHTML 转成纯文本", chs[0].body.contains("第一段正文"), chs[0].body)
     }
 
+    println("[本地导入] epub 路径与退化包")
+    run {
+        fun zip(build: (java.util.zip.ZipOutputStream) -> Unit): ByteArray {
+            val bos = java.io.ByteArrayOutputStream()
+            java.util.zip.ZipOutputStream(bos).use { build(it) }
+            return bos.toByteArray()
+        }
+        fun put(z: java.util.zip.ZipOutputStream, name: String, body: String) {
+            z.putNextEntry(java.util.zip.ZipEntry(name)); z.write(body.toByteArray()); z.closeEntry()
+        }
+
+        // container 写成 ./OEBPS/content.opf：不归一化就查不到 OPF。
+        val dotted = zip { z ->
+            put(z, "META-INF/container.xml",
+                "<container><rootfiles><rootfile full-path=\"./OEBPS/content.opf\"/></rootfiles></container>")
+            put(z, "OEBPS/content.opf",
+                "<package><manifest><item id=\"c1\" href=\"text/ch1.xhtml\"/></manifest>" +
+                    "<spine><itemref idref=\"c1\"/></spine></package>")
+            put(z, "OEBPS/text/ch1.xhtml", "<html><body><h1>第一章 点</h1><p>点号路径正文。</p></body></html>")
+        }
+        val d = com.watchdl.core.LocalImport.epubChapters(dotted)
+        check("full-path 带 ./ 也读得到", d.size == 1, "实际 ${d.size}")
+
+        // href 是百分号编码的中文文件名。
+        val encoded = zip { z ->
+            put(z, "META-INF/container.xml",
+                "<container><rootfiles><rootfile full-path=\"content.opf\"/></rootfiles></container>")
+            put(z, "content.opf",
+                "<package><manifest><item id=\"c1\" href=\"%E7%AC%AC%E4%B8%80%E7%AB%A0.xhtml\"/></manifest>" +
+                    "<spine><itemref idref=\"c1\"/></spine></package>")
+            put(z, "第一章.xhtml", "<html><body><h1>第一章 码</h1><p>百分号路径正文。</p></body></html>")
+        }
+        val e = com.watchdl.core.LocalImport.epubChapters(encoded)
+        check("href 百分号编码能解", e.size == 1 && e[0].body.contains("百分号路径正文"), "实际 ${e.size}")
+
+        // 没有 OPF 的自制包：按扩展名扫 XHTML，不能直接抛。
+        val noOpf = zip { z ->
+            put(z, "a.xhtml", "<html><body><h1>第一章 无包</h1><p>没有 OPF 的正文。</p></body></html>")
+        }
+        val n = com.watchdl.core.LocalImport.epubChapters(noOpf)
+        check("缺 OPF 也扫得出正文", n.size == 1, "实际 ${n.size}")
+
+        // 章标题不能同时留在正文首行。
+        val dup = zip { z ->
+            put(z, "META-INF/container.xml",
+                "<container><rootfiles><rootfile full-path=\"content.opf\"/></rootfiles></container>")
+            put(z, "content.opf",
+                "<package><manifest><item id=\"c1\" href=\"ch1.xhtml\"/></manifest>" +
+                    "<spine><itemref idref=\"c1\"/></spine></package>")
+            put(z, "ch1.xhtml",
+                "<html><body><h1>第一章 重</h1><p>第一章 重</p>" +
+                    "<p>真正的正文在这里，字数要够过十字线。</p></body></html>")
+        }
+        val dupCh = com.watchdl.core.LocalImport.epubChapters(dup)
+        check("标题不在正文里重复", !dupCh[0].body.startsWith("第一章 重"), dupCh[0].body.take(20))
+        check("正文还在", dupCh[0].body.contains("真正的正文"), dupCh[0].body.take(20))
+    }
+
+    println("[本地导入] 边界")
+    run {
+        // 无 BOM 的 UTF-16LE：只看替换符会判成 UTF-8，整本变带洞的乱码。
+        val u16 = "第一章 开始\n\nUTF-16LE 正文。".toByteArray(Charsets.UTF_16LE)
+        val dec = com.watchdl.core.LocalImport.decodeText(u16)
+        check("无 BOM 的 UTF-16LE 能认", dec.contains("UTF-16LE 正文") && !dec.contains('\u0000'),
+            dec.take(12))
+
+        // 分章：全角数字、各种分隔符、番外、Chapter 无空格。
+        val heads = listOf(
+            "第１２章 全角", "第一章，逗号", "第一章【方括号】", "第一章（一）",
+            "番外篇 婚礼", "番外一", "Chapter One", "Chapter12",
+        )
+        for (h in heads) {
+            val txt = "$h\n\n正文内容。\n\n第二章 后\n\n后文。"
+            val chs = com.watchdl.core.LocalImport.splitTxt(txt)
+            check("认得出「$h」", chs.size == 2, "切成 ${chs.size} 章：${chs.map { it.title }}")
+        }
+
+        val dir = java.io.File(System.getProperty("java.io.tmpdir"), "local-edge-test")
+        dir.deleteRecursively(); dir.mkdirs()
+        val store = com.watchdl.core.JobStore(java.io.File(dir, "books"))
+        val body = "第一章 甲\n\n甲正文。"
+        val t = com.watchdl.core.LocalImport.importInto(store, "同名.txt", body.toByteArray())
+        val p = com.watchdl.core.LocalImport.importInto(store, "同名.epub",
+            epudBytes("第一章 甲\n\n这是一段足够长的甲正文内容，用来凑够十字。"))
+        check("同名不同格式不撞库", t.bookId != p.bookId, "${t.bookId} / ${p.bookId}")
+        check("空文件报错", runCatching {
+            com.watchdl.core.LocalImport.importInto(store, "空.txt", ByteArray(0))
+        }.isFailure)
+        dir.deleteRecursively()
+    }
+
     println("[本地导入] 落成作业")
     run {
         val dir = java.io.File(System.getProperty("java.io.tmpdir"), "local-import-test")
@@ -289,4 +380,21 @@ fun main() {
     }
 
     if (failures == 0) println("\n全部通过") else { println("\n失败 $failures 项"); kotlin.system.exitProcess(1) }
+}
+
+/** 造一个最小 epub：一章 XHTML。给边界测试用。 */
+private fun epudBytes(text: String): ByteArray {
+    val bos = java.io.ByteArrayOutputStream()
+    java.util.zip.ZipOutputStream(bos).use { z ->
+        fun put(name: String, body: String) {
+            z.putNextEntry(java.util.zip.ZipEntry(name)); z.write(body.toByteArray()); z.closeEntry()
+        }
+        put("META-INF/container.xml",
+            "<container><rootfiles><rootfile full-path=\"content.opf\"/></rootfiles></container>")
+        put("content.opf",
+            "<package><manifest><item id=\"c1\" href=\"ch1.xhtml\"/></manifest>" +
+                "<spine><itemref idref=\"c1\"/></spine></package>")
+        put("ch1.xhtml", "<html><body>" + text.replace("\n", "<br/>") + "</body></html>")
+    }
+    return bos.toByteArray()
 }

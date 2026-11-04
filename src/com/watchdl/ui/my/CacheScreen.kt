@@ -7,7 +7,6 @@ import android.widget.TextView
 import com.watchdl.DownloadService
 import com.watchdl.MainActivity
 import com.watchdl.core.BookInfo
-import com.watchdl.core.BookJob
 import com.watchdl.core.CacheUsage
 import com.watchdl.core.ChapterCacheStatus
 import com.watchdl.core.ChapterRef
@@ -281,7 +280,9 @@ private fun cacheBookSummary(u: CacheUsage): String {
     val downloading = if (running) 1 else 0
     val waiting = if (running) (u.pending - 1).coerceAtLeast(0) else 0
     val paused = if (pausedBook) u.pending else 0
-    return "下载中 $downloading · 等待 $waiting · 暂停 $paused · 失败 ${u.failed}"
+    // 卡内可用宽只有 128dp（189 − 页边 − 卡内边），「下载中 0 · 等待 0 · 暂停 0 · 失败 0」
+    // 是 144dp，必被截，而截掉的正好是最要紧的「失败 N」。用单字标签压到 60dp 出头。
+    return "下 $downloading · 等 $waiting · 停 $paused · 失 ${u.failed}"
 }
 
 /**
@@ -667,7 +668,12 @@ private fun MainActivity.deleteCacheBook(u: CacheUsage) {
     Widgets.md3Dialog(this,
         title = "删除《${u.name}》",
         body = "正文、目录、下载进度一起删，约 ${humanBytes(u.bytes)}。\n" +
-            "书源还在，想离线读再下一次。",
+            if (com.watchdl.core.LocalImport.isLocal(u.bookId)) {
+                // 本地书没有源，删了只能重新导入，不能照抄网络书那句。
+                "本地书删了就没了，要读得重新导入。"
+            } else {
+                "书源还在，想离线读再下一次。"
+            },
         confirm = "删除",
         onConfirm = {
             if (DownloadService.runningBookId == u.bookId) DownloadService.cancel(this)

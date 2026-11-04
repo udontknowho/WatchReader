@@ -1715,10 +1715,22 @@ private fun MainActivity.loadOpening(
     // 本地书缺章不联网：返回空串，拼接块自然跳过。
     val html = localHtml ?: if (LocalImport.isLocal(info.bookId)) ""
                           else (src ?: source).content(ch.itemId, info.bookId)
-    val raw = Downloader.htmlToText(html).ifEmpty { html.replace(Regex("<[^>]+>"), "\n").trim() }
+    val raw = bodyText(html, LocalImport.isLocal(info.bookId))
     spliceHead(ReplaceRuleStore.apply(raw, isTitle = false))
 } catch (e: Exception) {
     ""
+}
+
+/**
+ * 正文的纯文本化。
+ *
+ * 本地 txt 是**纯文本**，不能过 [Downloader.htmlToText]：它会把 `<` `>` 当标签删掉、
+ * 把 `&amp;` 还成 `&`、每段强加全角缩进（叠加「缩进」设置变四字宽）。
+ */
+private fun bodyText(s: String, isLocal: Boolean): String = if (isLocal) {
+    s.replace("\r\n", "\n").replace('\r', '\n').trim()
+} else {
+    Downloader.htmlToText(s).ifEmpty { s.replace(Regex("<[^>]+>"), "\n").trim() }
 }
 
 /**
@@ -1820,7 +1832,7 @@ internal fun MainActivity.preview(info: BookInfo, index: Int, atEnd: Boolean = f
             }
             val actualSrc = if (localHtml == null) (src ?: source) else src
             val html = localHtml ?: actualSrc!!.content(ch.itemId, info.bookId)
-            val raw = Downloader.htmlToText(html).ifEmpty { html.replace(Regex("<[^>]+>"), "\n").trim() }
+            val raw = bodyText(html, LocalImport.isLocal(info.bookId))
             // 只过滤正文，章标题**不过滤**：目录里的标题一旦被规则吃掉，用户就找不到章，
             // 这个代价比「标题里的广告尾巴没去掉」大得多。所以在 preview 这一处做，
             // 不在目录、不在 showReader。

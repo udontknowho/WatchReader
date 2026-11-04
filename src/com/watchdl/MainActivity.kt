@@ -506,17 +506,51 @@ class MainActivity : Activity() {
      */
     private fun importLocalBook(uri: android.net.Uri) {
         toast("正在导入…")
-        bg(Screen.Shelf, {
+        // 不用 bg(Screen.Shelf, …)：切屏会 cancel 且 postAlive 丢弃回调，
+        // 而导入是已经把文件写进书架的动作，回调丢了就成了「没回执、书架也不重画」。
+        thread(start = true, isDaemon = true) {
+          val res = runCatching {
             val name = localFileName(uri)
-            val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                ?: throw IllegalStateException("读不到这个文件")
+            // 先查大小再读：先整读后判上限，上限永远来不及生效。
+            val declared = localFileSize(uri)
+            if (declared > LocalImport.MAX_BYTES) {
+                throw IllegalArgumentException(
+                    "文件太大（${declared / 1024 / 1024}MB），上限 ${LocalImport.MAX_BYTES / 1024 / 1024}MB",
+                )
+            }
+            val bytes = contentResolver.openInputStream(uri)?.use { ins ->
+                // 有的 provider 不报 SIZE，边读边卡，最多多读 1 字节用来判超。
+                val buf = java.io.ByteArrayOutputStream()
+                val chunk = ByteArray(64 * 1024)
+                var total = 0L
+                while (true) {
+                    val n = ins.read(chunk)
+                    if (n <= 0) break
+                    total += n
+                    if (total > LocalImport.MAX_BYTES) {
+                        throw IllegalArgumentException("文件太大，上限 ${LocalImport.MAX_BYTES / 1024 / 1024}MB")
+                    }
+                    buf.write(chunk, 0, n)
+                }
+                buf.toByteArray()
+            } ?: throw IllegalStateException("读不到这个文件")
             LocalImport.importInto(jobsStore(), name, bytes)
-        }) { res ->
+          }
+          runOnUiThread {
             res.onSuccess { toast("已导入《${it.name}》（${it.format}）${it.chapters} 章") }
                 .onFailure { toast("导入失败：${it.message ?: "未知原因"}") }
-            showShelf(keepScroll = true)
+            // 还在书架就重画；已经走开了只提示一句，回来刷新时能看到。
+            if (screenId(screen) == screenId(Screen.Shelf)) showShelf(keepScroll = true)
+            else toast("已导入，回书架能看到")
+          }
         }
     }
+
+    /** 选择器给的文件字节数，查不到就返回 -1（交给边读边卡）。 */
+    private fun localFileSize(uri: android.net.Uri): Long = runCatching {
+        contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)
+            ?.use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else -1L }
+    }.getOrNull() ?: -1L
 
     /** 选择器给的文件名。查不到才退到 URI 末段。 */
     private fun localFileName(uri: android.net.Uri): String {
@@ -1233,6 +1267,11 @@ class MainActivity : Activity() {
      * 这样单章下载也不会撞 Binder 的 1 MB 限（同缓存页的补一章）。
      */
     private fun downloadTocFrom(info: BookInfo, index: Int, fromHere: Boolean) {
+        // 本地书没有源：现在就拦，否则 runJob 里 resolveSource 会退到番茄并 persist，
+        // 拿本地书的名字去联网重写 job.json。
+        if (LocalImport.isLocal(info.bookId)) {
+            toast("本地书不联网，正文已从文件导入"); return
+        }
         val running = DownloadService.runningBookId
         if (running != null && running != info.bookId) {
             toast("正在下载另一本，等它下完再试"); return
@@ -1630,17 +1669,13 @@ class MainActivity : Activity() {
     }
 
     /**
-     * 一次导出的结果。给缓存页用：成功几章、落到哪里、是不是跳过、错在哪。
-     *
-     * [skippedExisting] 只可能来自 [exportOneSync] 的 `skipExisting = true`：
-     * 系统「文档」里已有同名文件时整本跳过，不再堆 `(2)(3)` 副本。
+     * 一次导出的结果。给缓存页用：成功几章、落到哪里、错在哪。
      */
     internal class ExportResult(
         val chapters: Int = 0,
         /** 落点，如「文档/书名 - 作者.txt」或应用目录下的文件名；失败为空串。 */
         val landed: String = "",
         val inDocuments: Boolean = false,
-        val skippedExisting: Boolean = false,
         val error: String? = null,
     )
 
@@ -1651,7 +1686,7 @@ class MainActivity : Activity() {
      * 缓存页的单本与批量导出直接调这里，好在批里循环与中途取消。
      * 调用方负责先过 [ensureExportStorage]。
      */
-    internal fun exportOneSync(info: BookInfo, skipExisting: Boolean = false): ExportResult {
+    internal fun exportOneSync(info: BookInfo): ExportResult {
         return try {
             val dir = exportDir().apply { mkdirs() }
             val safe = info.name.replace(Regex("[^\\w\\u4e00-\\u9fa5]"), "_").trim('_')
@@ -1660,16 +1695,15 @@ class MainActivity : Activity() {
             // 带戳的话同一本反复导出会堆出很多副本，同名也认不出是同一本。
             val author = info.author.replace(Regex("[^\\w\\u4e00-\\u9fa5]"), "_").trim('_').take(30)
             val base = if (author.isBlank()) safe else "$safe - $author"
-            // 批量导出时同名即跳过；单本导出仍自动加 (2) (3)，不静默覆盖已有文件。
-            if (skipExisting && documentsHas("$base.txt")) {
-                return ExportResult(skippedExisting = true, landed = "文档/$base.txt", inDocuments = true)
-            }
             var out = File(dir, "$base.txt")
-            var k = 2
-            while (out.exists() && k < 1000) { out = File(dir, "$base ($k).txt"); k++ }
             val header = listOf(info.name.ifBlank { "未命名" }, info.author)
                 .filter { it.isNotBlank() }.joinToString("\n").ifBlank { null }
             val n = synchronized(exportLock) {
+                // 选文件名也必须在锁里：在锁外选，连点两下会起两条线程、选中同一个名字，
+                // 后一条把前一条覆盖掉，(2)(3) 去重完全失效。
+                var k = 2
+                while (out.exists() && k < 1000) { out = File(dir, "$base ($k).txt"); k++ }
+                out.createNewFile()
                 // 传目录顺序，否则导出文件按并发落盘顺序排，章节会乱。
                 Downloader.exportText(
                     jobsStore(), info.bookId, out, header,
@@ -1680,7 +1714,7 @@ class MainActivity : Activity() {
             val moved = if (n > 0) publishToDocuments(out) else null
             if (moved != null) out.delete()
             when {
-                n == 0 -> ExportResult(error = "还没下到内容，先下载")
+                n == 0 -> { out.delete(); ExportResult(error = "还没下到内容，先下载") }
                 moved != null -> ExportResult(n, "文档/$moved", inDocuments = true)
                 else -> ExportResult(n, out.name)
             }
@@ -1689,26 +1723,9 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 系统「文档」里是否已有同名文件。[publishToDocuments] 的查询口径。 */
-    private fun documentsHas(name: String): Boolean {
-        val uri = android.provider.MediaStore.Files.getContentUri("external")
-        val relPath = android.os.Environment.DIRECTORY_DOCUMENTS + "/"
-        return try {
-            contentResolver.query(
-                uri, arrayOf(android.provider.MediaStore.MediaColumns._ID),
-                "${android.provider.MediaStore.MediaColumns.RELATIVE_PATH}=? AND " +
-                    "${android.provider.MediaStore.MediaColumns.DISPLAY_NAME}=?",
-                arrayOf(relPath, name), null,
-            )?.use { it.moveToFirst() } ?: false
-        } catch (e: Exception) {
-            false
-        }
-    }
-
     /** 单本导出的一句话回执。缓存页补「未下的不导」时传 total。 */
     internal fun exportMessage(r: ExportResult, total: Int = 0): String {
         r.error?.let { return it }
-        if (r.skippedExisting) return "文档里已有同名文件，这本跳过"
         val base = if (r.inDocuments) "已导出 ${r.chapters} 章到 ${r.landed}"
         else "已导出 ${r.chapters} 章（应用目录）：${r.landed}"
         return if (total > r.chapters) "$base · 共 $total 章，未下的不导" else base

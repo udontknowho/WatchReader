@@ -1,6 +1,8 @@
 package com.watchdl.core
 
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.util.Locale
 import java.util.zip.ZipInputStream
 
@@ -23,8 +25,28 @@ object LocalImport {
     /** 本地书的 bookId 前缀。 */
     const val PREFIX = "local:"
 
-    /** 导入文件的大小上限。手表内存小，整本读进内存要有封顶。 */
-    const val MAX_BYTES: Long = 64L * 1024 * 1024
+    /** 导入文件的大小上限。手表内存小，整本读进内存要有封顶（解码后还要再翻一倍）。 */
+    const val MAX_BYTES: Long = 12L * 1024 * 1024
+
+    /** epub 单个条目封顶。 */
+    private const val ENTRY_CAP = 4 * 1024 * 1024
+
+    /** epub 文本条目累计封顶。 */
+    private const val MAX_EPUB_TEXT = 48L * 1024 * 1024
+
+    /** 读最多 [cap] 字节，不把流整个吃进内存。 */
+    private fun readCapped(ins: InputStream, cap: Int): ByteArray {
+        val buf = ByteArray(16 * 1024)
+        val out = ByteArrayOutputStream(minOf(cap, 64 * 1024))
+        var total = 0
+        while (total < cap) {
+            val n = ins.read(buf, 0, minOf(buf.size, cap - total))
+            if (n <= 0) break
+            out.write(buf, 0, n)
+            total += n
+        }
+        return out.toByteArray()
+    }
 
     /** 是不是本地书。 */
     fun isLocal(bookId: String): Boolean = bookId.startsWith(PREFIX)
@@ -63,6 +85,25 @@ object LocalImport {
         if (bytes.size >= 2 && bytes[0] == 0xFE.toByte() && bytes[1] == 0xFF.toByte())
             return String(bytes, 2, bytes.size - 2, Charsets.UTF_16BE)
 
+        // 无 BOM 的 UTF-16：单字节字符的高字节是 0，按 UTF-8 解会得到一串 \u0000，
+        // 而替换符为 0，会被当成合法 UTF-8 —— 整本变成带洞的乱码书。
+        // 只看替换符不够，还要看 0 字节密度（前 4KB 就够判了）。
+        val head = bytes.copyOfRange(0, minOf(bytes.size, 4096))
+        val oddZ = head.withIndex().count { (i, b) -> i % 2 == 1 && b == 0.toByte() }
+        val evenZ = head.withIndex().count { (i, b) -> i % 2 == 0 && b == 0.toByte() }
+        // 逐字节看奇偶位：UTF-16 的单字节字符把 0 全挤在一侧，GB18030 中文几乎没有 0。
+        val utf16Le = head.size >= 16 && oddZ >= 4 && oddZ * 3 > evenZ
+        val utf16Be = head.size >= 16 && evenZ >= 4 && evenZ * 3 > oddZ
+        if (utf16Le || utf16Be) {
+            // LE / BE 各解一次，哪种的控制字符少就用哪种。
+            val cands = listOfNotNull(
+                if (utf16Le) runCatching { String(bytes, Charsets.UTF_16LE) }.getOrNull() else null,
+                if (utf16Be) runCatching { String(bytes, Charsets.UTF_16BE) }.getOrNull() else null,
+            )
+            cands.minByOrNull { s -> s.count { it < ' ' && it != '\n' && it != '\r' && it != '\t' } }
+                ?.let { return it.trim('\uFEFF') }
+        }
+
         val utf8 = String(bytes, Charsets.UTF_8)
         val bad = utf8.count { it == '\uFFFD' }
         if (bad == 0) return utf8
@@ -87,8 +128,8 @@ object LocalImport {
      * 不这样卡的话，「第一章的少年时代」这种句子会被当成标题。
      */
     private val NUM_HEAD = Regex(
-        "^第[ 　\\t]{0,6}[0-9零〇一二三四五六七八九十百千万两]{1,12}[ 　\\t]{0,6}[章回节卷集部篇幕]" +
-            "(?:$|[ 　\\t：:·.、]{1,4}[^\\n]{0,40}$)",
+        "^第[ 　\\t]{0,6}[0-9０１２３４５６７８９零〇一二三四五六七八九十百千万两]{1,12}[ 　\\t]{0,6}[章回节卷集部篇幕]" +
+            "(?:$|[ 　\\t：:·.、，,（(【［「]{1,4}[^\\n]{0,40}$)",
     )
 
     /**
@@ -99,13 +140,15 @@ object LocalImport {
      * 识别标题宁可漏一个，也不能把正文当标题吃掉。
      */
     private val WORD_HEAD = Regex(
-        "^(?:序章|序言|楔子|引子|前言|后记|尾声|终章|完本感言|番外|正文)" +
-            "(?:$|[ 　\\t：:·.、（(【\\[]{1,4}[^\\n]{0,40}$)",
+        "^(?:序章|序言|楔子|引子|前言|后记|尾声|终章|完本感言|正文|番外(?:篇|章|[0-9０-９一二三四五六七八九十]{1,3})?)" +
+            "(?:$|[ 　\\t：:·.、，,（(【［「]{1,4}[^\\n]{0,40}$)",
     )
 
-    /** 英文标题：`Chapter 12 The End` / `CHAPTER 3`。 */
+    /** 英文标题：`Chapter 12 The End` / `CHAPTER 3` / `Chapter One` / `Chapter12`。 */
     private val EN_HEAD = Regex(
-        "^(?i:chapter|part|book)[ 　\\t]{1,4}[0-9IVXLCivxlc]{1,6}(?:[ 　.:：-]{0,3}[^\\n]{0,40})?$",
+        "^(?i:chapter|part|book)[ 　\\t]{0,4}" +
+            "(?:[0-9]{1,4}|[IVXLCivxlc]{1,6}|[A-Za-z]{1,10})" +
+            "(?:[ 　.:：-]{0,3}[^\\n]{0,40})?$",
     )
 
     /** 这一行是不是章节标题。 */
@@ -166,14 +209,19 @@ object LocalImport {
      */
     fun epubChapters(bytes: ByteArray): List<Chapter> {
         val entries = LinkedHashMap<String, ByteArray>()
+        var total = 0L
         ZipInputStream(ByteArrayInputStream(bytes)).use { zis ->
             while (true) {
                 val e = zis.nextEntry ?: break
                 if (e.isDirectory) continue
                 val path = e.name.replace('\\', '/')
                 if (!isTextEntry(path) || entries.containsKey(path)) continue
-                // 单个条目封顶：坏包里一个巨型 xml 能把内存吃光。
-                entries[path] = runCatching { zis.readBytes() }.getOrElse { ByteArray(0) }
+                // 上限真的要有：坏包里一个巨型 xml 能把内存吃光（注释写了、代码没写）。
+                if (total > MAX_EPUB_TEXT) continue
+                val one = runCatching { readCapped(zis, ENTRY_CAP) }.getOrElse { ByteArray(0) }
+                if (one.isEmpty()) continue
+                total += one.size
+                entries[path] = one
             }
         }
         if (entries.isEmpty()) throw IllegalStateException("EPUB 里没有文本文件")
@@ -183,20 +231,24 @@ object LocalImport {
         val fromContainer = container?.let { b ->
             Regex("full-path\\s*=\\s*[\"']([^\"']+)[\"']").find(decodeText(b))?.groupValues?.get(1)
         }
-        val opfPath = fromContainer ?: entries.keys.firstOrNull { it.lowercase(Locale.US).endsWith(".opf") }
-            ?: throw IllegalStateException("EPUB 里找不到 OPF")
-        val opfBytes = entries[opfPath] ?: throw IllegalStateException("EPUB 里读不到 $opfPath")
-        val opf = decodeText(opfBytes)
-        val base = opfPath.substringBeforeLast('/', "")
+        // container 里的 full-path 常写成 `./OEBPS/content.opf`，不归一化就查不到。
+        val opfPath = fromContainer?.let { resolveHref("", it) }
+            ?: entries.keys.firstOrNull { it.lowercase(Locale.US).endsWith(".opf") }
+        // 没有 OPF 不是错：自制包很常见，直接按扩展名扫 XHTML。
+        val opf = opfPath?.let { p ->
+            (entries[p] ?: entries.entries
+                .firstOrNull { it.key.equals(p, ignoreCase = true) }?.value)?.let { decodeText(it) }
+        }
+        val base = opfPath?.substringBeforeLast('/', "") ?: ""
 
         val manifest = HashMap<String, String>()
-        for (m in Regex("<item\\b[^>]*>").findAll(opf)) {
+        for (m in Regex("<item\\b[^>]*>").findAll(opf ?: "")) {
             val tag = m.value
             val id = attr(tag, "id") ?: continue
             val href = attr(tag, "href") ?: continue
             manifest[id] = resolveHref(base, href)
         }
-        val order = Regex("<itemref\\b[^>]*>").findAll(opf)
+        val order = Regex("<itemref\\b[^>]*>").findAll(opf ?: "")
             .mapNotNull { attr(it.value, "idref") }
             .mapNotNull { manifest[it] }
             .toList()
@@ -213,13 +265,26 @@ object LocalImport {
             val raw = entries[path] ?: lowered[path.lowercase(Locale.US)]?.value ?: continue
             val html = decodeText(raw)
             val body = Downloader.htmlToText(html)
+            val title = epubTitle(html)
             // 导航页、版权页、只有一张图的页：正文少于 10 个有效字就跳过。
             if (body.count { it.isLetterOrDigit() } < 10) continue
             seq++
-            out.add(Chapter(epubTitle(html) ?: "第${seq}章", body))
+            out.add(Chapter(title ?: "第${seq}章", dropLeadingTitle(body, title)))
         }
         if (out.isEmpty()) throw IllegalStateException("EPUB 里没有可读的正文")
         return out
+    }
+
+    /** 正文首行与章节标题相同时删掉，否则阅读页顶栏与正文第一行重复。 */
+    private fun dropLeadingTitle(body: String, title: String?): String {
+        if (title.isNullOrBlank()) return body
+        val nl = body.indexOf('\n')
+        val firstLine = (if (nl < 0) body else body.substring(0, nl)).trim()
+        if (firstLine.isEmpty()) return body
+        val a = firstLine.replace(Regex("[\\s　]"), "")
+        val b = title.replace(Regex("[\\s　]"), "")
+        if (a != b && !a.startsWith(b)) return body
+        return if (nl < 0) "" else body.substring(nl + 1).trimStart()
     }
 
     /** 一章的标题：`<h1>`–`<h3>` 优先，其次 `<title>`。 */
@@ -263,23 +328,23 @@ object LocalImport {
 
     private fun percentDecode(s: String): String {
         if (!s.contains('%')) return s
-        val out = StringBuilder(s.length)
+        // 按 UTF-8 字节序列解，不能一个字节转一个 char：%E7%AC%AC 是「第」。
+        val out = ByteArrayOutputStream(s.length)
         var i = 0
         while (i < s.length) {
             val c = s[i]
             if (c == '%' && i + 2 < s.length) {
-                val hex = s.substring(i + 1, i + 3)
-                val v = hex.toIntOrNull(16)
+                val v = s.substring(i + 1, i + 3).toIntOrNull(16)
                 if (v != null) {
-                    out.append(v.toChar())
+                    out.write(v)
                     i += 3
                     continue
                 }
             }
-            out.append(c)
+            out.write(c.toString().toByteArray(Charsets.UTF_8))
             i++
         }
-        return out.toString()
+        return String(out.toByteArray(), Charsets.UTF_8)
     }
 
     // ══════════════════ 落成一本作业 ══════════════════
@@ -296,7 +361,7 @@ object LocalImport {
     fun importInto(store: JobStore, fileName: String, bytes: ByteArray): Result {
         if (bytes.isEmpty()) throw IllegalArgumentException("文件是空的")
         if (bytes.size > MAX_BYTES) {
-            throw IllegalArgumentException("文件太大（${bytes.size / 1024 / 1024}MB），上限 64MB")
+            throw IllegalArgumentException("文件太大（${bytes.size / 1024 / 1024}MB），上限 ${MAX_BYTES / 1024 / 1024}MB")
         }
         val ext = fileName.substringAfterLast('.', "").lowercase(Locale.US)
         val looksEpub = bytes.size > 4 && bytes[0] == 'P'.code.toByte() &&
@@ -313,7 +378,10 @@ object LocalImport {
         if (chapters.isEmpty()) throw IllegalStateException("分不出任何章节，可能不是文本文件")
 
         val name = fileName.substringBeforeLast('.').trim().ifBlank { "本地书" }.take(60)
-        val bookId = PREFIX + JobStore.safeDirName(name)
+        // bookId 只取书名会撞：`三体.txt` 与 `三体.epub` 会落成同一个目录，静默覆盖。
+        // 带上格式；字节数不能进 id —— 同名重导要落在同一本书上（覆盖旧正文），
+        // 进了 id 就变成「每改一次文件多一本」。
+        val bookId = PREFIX + JobStore.safeDirName(name) + "_" + format.lowercase(Locale.US)
         // 重导入：先清掉旧目录（同一本），否则正文会与旧章节混在一起。
         store.markDeleted(bookId)
         store.clearDeleted(bookId)
