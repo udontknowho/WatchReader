@@ -192,6 +192,63 @@ class JobStore(private val root: File) {
     }
 
     /**
+     * 流式写整本正文：一章写完立刻落盘，内存只留当前章。
+     *
+     * 本地导入原来是「整本解成 List、再拼 JSON、再一次性写」，峰值是文件的 5–6 倍：
+     * 55MB 正文要 185MB 堆，手表直接 OOM。改成边解析边写之后，峰值只剩单章。
+     *
+     * 仍然先写 tmp 再 rename，中途失败或进程被杀都不会留下半本正文。
+     * 生命周期：`openChapters` → `add` × N → `commit`（或 `abort`）。
+     */
+    inner class ChapterSink internal constructor(private val bookId: String) {
+        private val tmp = File(dirOf(bookId), "chapters.jsonl.tmp")
+        private var raf: RandomAccessFile? = null
+
+        /** 已写章数。 */
+        var count = 0
+            private set
+
+        internal fun open() {
+            dirOf(bookId).mkdirs()
+            tmp.parentFile?.mkdirs()
+            raf = RandomAccessFile(tmp, "rw").also { it.setLength(0) }
+        }
+
+        /** 追加一行（已编码好的 JSON 对象）。调用方负责转义。 */
+        fun add(line: String) {
+            val r = raf ?: error("sink 已关闭")
+            r.write((line + "\n").toByteArray(Charsets.UTF_8))
+            count++
+        }
+
+        /** 落定：一次 fsync + 改名。之后的 add 会抛。 */
+        fun commit() {
+            val r = raf ?: return
+            raf = null
+            r.fd.sync()
+            r.close()
+            synchronized(lockFor(bookId)) {
+                val f = chaptersFile(bookId)
+                if (!tmp.renameTo(f)) {
+                    tmp.copyTo(f, overwrite = true)
+                    tmp.delete()
+                }
+            }
+        }
+
+        /** 放弃：删掉半截 tmp，主文件保持原样。 */
+        fun abort() {
+            val r = raf ?: return
+            raf = null
+            runCatching { r.close() }
+            tmp.delete()
+        }
+    }
+
+    /** 开一个流式正文写入器。 */
+    fun openChapters(bookId: String): ChapterSink = ChapterSink(bookId).also { it.open() }
+
+    /**
      * 已缓存章的 itemId 集合。
      *
      * **只取 itemId，不留正文**：3000 章的书正文能到几十 MB，

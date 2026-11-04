@@ -451,6 +451,22 @@ fun main() {
         check("重导入只剩一章", again.chapters == 1, "${again.chapters}")
         check("旧正文不残留", store.readChapters(res.bookId).size == 1,
             "${store.readChapters(res.bookId).size}")
+
+        // 真机走的是「文件 → ZipFile 按需读 → 边解析边落盘」，这条路不能没人测。
+        val epubFile = java.io.File(dir, "流式.epub")
+        epubFile.writeBytes(epudBytes("第一章 甲\n\n这是一段足够长的甲正文内容，用来凑够十字。"))
+        val streamed = com.watchdl.core.LocalImport.importInto(store, "流式.epub", epubFile)
+        check("按文件导入 epub", streamed.chapters == 1 && streamed.format == "EPUB", "${streamed.chapters}")
+        check("流式正文落盘", store.readChapters(streamed.bookId).size == 1,
+            "${store.readChapters(streamed.bookId).size}")
+
+        // 失败要回滚：半截 tmp 不能留下，旧正文也不能被换掉。
+        val before = store.readChapters(streamed.bookId).size
+        val badFile = java.io.File(dir, "坏包.epub")
+        badFile.writeBytes(byteArrayOf(0x50, 0x4B, 0x03, 0x04, 1, 2, 3))
+        val bad = runCatching { com.watchdl.core.LocalImport.importInto(store, "坏包.epub", badFile) }
+        check("坏 epub 报错", bad.isFailure, "${bad.exceptionOrNull()}")
+        check("坏 epub 不覆盖旧书", store.readChapters(streamed.bookId).size == before, "$before")
         dir.deleteRecursively()
     }
 

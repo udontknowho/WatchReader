@@ -2,8 +2,10 @@ package com.watchdl.core
 
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.InputStream
 import java.util.Locale
+import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
 
 /**
@@ -40,15 +42,10 @@ object LocalImport {
     /**
      * 正文累计上限的实际取值。
      *
-     * [MAX_EPUB_TEXT] 是 64MB 的天花板，但整本正文在 importInto 里是**一次性**解成
-     * List<Chapter> 再落盘的，实测 55MB 正文要 185MB 堆。手表给不了这么多，所以取
-     * 四分之一堆为上限：真机上这个数才是能兑现的承诺。想吃到 64MB 得先把解析改成
-     * 边解析边落盘。
+     * 解析已改成边解析边落盘（每章写完就丢引用），峰值只剩单章，所以这个数不再
+     * 受堆大小约束，只当作「这本书大得不像话」的兜底。
      */
-    private fun textCap(): Long {
-        val quarter = Runtime.getRuntime().maxMemory() / 4
-        return if (quarter < MAX_EPUB_TEXT) quarter else MAX_EPUB_TEXT
-    }
+    private fun textCap(): Long = MAX_EPUB_TEXT
 
     /** 读最多 [cap] 字节，不把流整个吃进内存。 */
     private fun readCapped(ins: InputStream, cap: Int): ByteArray {
@@ -269,25 +266,59 @@ object LocalImport {
      * - 正文为空的章丢掉：很多 txt 把目录抄在正文前，那些「第N章 xxx」后面紧跟下一个标题。
      */
     fun splitTxt(text: String): List<Chapter> {
-        val normalized = text.replace("\r\n", "\n").replace('\r', '\n')
-        if (normalized.isBlank()) return emptyList()
-        val lines = normalized.split('\n')
-        val heads = ArrayList<Int>()
-        for (i in lines.indices) if (isChapterHead(lines[i])) heads.add(i)
-        if (heads.isEmpty()) return listOf(Chapter("全书", normalized.trim()))
-
-        val out = ArrayList<Chapter>(heads.size + 1)
-        val pre = lines.subList(0, heads[0]).joinToString("\n").trim()
-        if (pre.count { it.isLetterOrDigit() } >= 200) out.add(Chapter("开篇", pre))
-        for ((n, at) in heads.withIndex()) {
-            val end = if (n + 1 < heads.size) heads[n + 1] else lines.size
-            val title = lines[at].trim().take(60)
-            val body = lines.subList(at + 1, end).joinToString("\n").trim()
-            if (body.isNotEmpty()) out.add(Chapter(title, body))
-        }
-        // 全书只有一个空标题、正文全被当标题吃掉了 —— 退回整篇一章，宁可章名难看也不能空书。
-        if (out.isEmpty()) return listOf(Chapter("全书", normalized.trim()))
+        val out = ArrayList<Chapter>()
+        splitTxtTo(text) { out.add(it) }
         return out
+    }
+
+    /**
+     * 逐行切章并立刻交给 [emit]，不在内存里攒整本。
+     *
+     * 老写法 `text.split('\n')` 会为 12MB 的正文一次性造出几十万个行字符串，
+     * 之后还有 heads 下标表、每章的 join 中间串。手表上这本书的导入峰值到过 74MB。
+     * 这里只有「当前章」一个 StringBuilder 在长大，加上开头那段候选「开篇」。
+     */
+    fun splitTxtTo(text: String, emit: (Chapter) -> Unit) {
+        val normalized = text.replace("\r\n", "\n").replace('\r', '\n')
+        if (normalized.isBlank()) return
+        var emitted = 0
+        var title: String? = null
+        val cur = StringBuilder()
+        val pre = StringBuilder()
+
+        fun flush() {
+            val t = title ?: return
+            val body = cur.toString().trim()
+            if (body.isNotEmpty()) {
+                emit(Chapter(t, body))
+                emitted++
+            }
+            cur.setLength(0)
+        }
+
+        for (line in normalized.lineSequence()) {
+            if (isChapterHead(line)) {
+                val prev = title
+                if (prev != null) {
+                    flush()
+                } else {
+                    // 第一个标题之前的内容：够长才算「开篇」，太短的当页眉噪音丢掉。
+                    val p = pre.toString().trim()
+                    if (p.count { it.isLetterOrDigit() } >= 200) {
+                        emit(Chapter("开篇", p))
+                        emitted++
+                    }
+                    pre.setLength(0)
+                }
+                title = line.trim().take(60)
+                cur.setLength(0)
+            } else {
+                if (title != null) cur.append(line).append('\n') else pre.append(line).append('\n')
+            }
+        }
+        flush()
+        // 全书只有一个空标题、正文全被当标题吃掉了 —— 退回整篇一章，宁可章名难看也不能空书。
+        if (emitted == 0) emit(Chapter("全书", normalized.trim()))
     }
 
     // ══════════════════ epub ══════════════════
@@ -308,7 +339,57 @@ object LocalImport {
      * 标题取 `<h1>`…`<h3>`（优先，书里通常就是这个），没有再用 `<title>`，
      * 都没有就写「第N章」。
      */
+    /** epub 条目来源。真机走 [ZipFile] 按需读，测试走内存表。 */
+    interface EpubSource {
+        /** 全部条目的原始路径（已把反斜杠换成斜杠）。 */
+        val names: List<String>
+
+        /** 读一个条目；不存在返回 null。 */
+        fun read(name: String): ByteArray?
+    }
+
+    private class ZipSource(private val zf: ZipFile) : EpubSource {
+        override val names: List<String> =
+            zf.entries().asSequence().filter { !it.isDirectory }
+                .map { it.name.replace('\\', '/') }.toList()
+        private val byLower = HashMap<String, String>().also { m ->
+            for (n in names) m[n.lowercase(Locale.US)] = n
+        }
+
+        override fun read(name: String): ByteArray? {
+            val real = if (zf.getEntry(name) != null) name else byLower[name.lowercase(Locale.US)]
+                ?: return null
+            val e = zf.getEntry(real) ?: return null
+            if (e.size > ENTRY_CAP) {
+                throw IllegalStateException("EPUB 里有超过 ${ENTRY_CAP / 1024 / 1024}MB 的单章")
+            }
+            return zf.getInputStream(e).use { readCapped(it, ENTRY_CAP + 1) }
+        }
+    }
+
+    private class MapSource(private val m: Map<String, ByteArray>) : EpubSource {
+        override val names: List<String> = m.keys.toList()
+        private val byLower = HashMap<String, ByteArray>().also { x ->
+            for ((k, v) in m) x[k.lowercase(Locale.US)] = v
+        }
+
+        override fun read(name: String): ByteArray? =
+            m[name] ?: byLower[name.lowercase(Locale.US)]
+    }
+
+    /** 字节 → 章节表。测试与小的调用点用；正式导入走 [epubTo] 的按需读。 */
     fun epubChapters(bytes: ByteArray): List<Chapter> {
+        val out = ArrayList<Chapter>()
+        epubTo(readTextEntries(bytes), { out.add(it) })
+        return out
+    }
+
+    /**
+     * 把 epub 的文本条目按 spine 顺序读出来（内存里全留一份）。
+     *
+     * 只有走字节数组的路径用它：真机导入用 [ZipSource]，读一章丢一章。
+     */
+    private fun readTextEntries(bytes: ByteArray): EpubSource {
         val entries = LinkedHashMap<String, ByteArray>()
         var total = 0L
         ZipInputStream(ByteArrayInputStream(bytes)).use { zis ->
@@ -317,17 +398,13 @@ object LocalImport {
                 if (e.isDirectory) continue
                 val path = e.name.replace('\\', '/')
                 if (!isTextEntry(path) || entries.containsKey(path)) continue
-                // 上限真的要有：坏包里一个巨型 xml 能把内存吃光（注释写了、代码没写）。
                 // 多读 1 字节：恰好 4MB 的合法条目不该被当成超限。
                 val one = runCatching { readCapped(zis, ENTRY_CAP + 1) }.getOrElse { ByteArray(0) }
                 if (one.size > ENTRY_CAP) {
-                    // 单章 4MB 以上基本是解析错了（或整本塞一个 XHTML），截半句比报错更糟。
                     throw IllegalStateException("EPUB 里有超过 ${ENTRY_CAP / 1024 / 1024}MB 的单章")
                 }
                 if (one.isEmpty()) continue
                 total += one.size
-                // 判在累加之后：否则「47MB + 一个 4MB 条目」会越过上限放行。
-                // 静默跳过更糟 —— 用户永远不知道结尾丢了几百章，宁可报错让他换个版本。
                 if (total > textCap()) {
                     throw IllegalStateException(
                         "这本书正文超过 ${textCap() / 1024 / 1024}MB，手机/电脑上拆分后再导入",
@@ -337,20 +414,30 @@ object LocalImport {
             }
         }
         if (entries.isEmpty()) throw IllegalStateException("EPUB 里没有文本文件")
+        return MapSource(entries)
+    }
 
-        val container = entries.entries
-            .firstOrNull { it.key.equals("META-INF/container.xml", ignoreCase = true) }?.value
+    /**
+     * 按 spine 顺序逐章解析并 [emit]。
+     *
+     * 流程：`META-INF/container.xml` → rootfile（OPF）→ manifest 建 id→href → spine 的
+     * itemref 顺序 → 逐个读 XHTML。没有 container.xml 时按扩展名找 `.opf` 兜底。
+     *
+     * 每章读完就交给调用方落盘，本地变量里不留全书正文。
+     */
+    fun epubTo(src: EpubSource, emit: (Chapter) -> Unit) {
+        val names = src.names
+        if (names.isEmpty()) throw IllegalStateException("EPUB 里没有文本文件")
+
+        val container = src.read("META-INF/container.xml")
         val fromContainer = container?.let { b ->
             Regex("full-path\\s*=\\s*[\"']([^\"']+)[\"']").find(decodeText(b))?.groupValues?.get(1)
         }
         // container 里的 full-path 常写成 `./OEBPS/content.opf`，不归一化就查不到。
         val opfPath = fromContainer?.let { resolveHref("", it) }
-            ?: entries.keys.firstOrNull { it.lowercase(Locale.US).endsWith(".opf") }
+            ?: names.firstOrNull { it.lowercase(Locale.US).endsWith(".opf") }
         // 没有 OPF 不是错：自制包很常见，直接按扩展名扫 XHTML。
-        val opf = opfPath?.let { p ->
-            (entries[p] ?: entries.entries
-                .firstOrNull { it.key.equals(p, ignoreCase = true) }?.value)?.let { decodeText(it) }
-        }
+        val opf = opfPath?.let { src.read(it)?.let { b -> decodeText(b) } }
         val base = opfPath?.substringBeforeLast('/', "") ?: ""
 
         val manifest = HashMap<String, String>()
@@ -366,16 +453,23 @@ object LocalImport {
             .toList()
 
         // 没有 spine 的包（自制 epub 常见）按文件名顺序把 XHTML 全读一遍。
-        val reads = if (order.isNotEmpty()) order else entries.keys
+        val reads = if (order.isNotEmpty()) order else names
             .filter { it.lowercase(Locale.US).let { p -> p.endsWith(".xhtml") || p.endsWith(".html") || p.endsWith(".htm") } }
             // 字典序会把 1,10,11,2 排在一起。没有 spine 的包只能靠文件名，必须自然序。
             .sortedWith { a, b -> naturalCompare(a, b) }
 
-        val lowered = entries.entries.associateBy { it.key.lowercase(Locale.US) }
-        val out = ArrayList<Chapter>(reads.size)
+        var total = 0L
         var seq = 0
         for (path in reads) {
-            val raw = entries[path] ?: lowered[path.lowercase(Locale.US)]?.value ?: continue
+            val raw = src.read(path) ?: continue
+            total += raw.size
+            // 判在累加之后：否则「47MB + 一个 4MB 条目」会越过上限放行。
+            // 静默跳过更糟 —— 用户永远不知道结尾丢了几百章，宁可报错让他换个版本。
+            if (total > textCap()) {
+                throw IllegalStateException(
+                    "这本书正文超过 ${textCap() / 1024 / 1024}MB，手机/电脑上拆分后再导入",
+                )
+            }
             val html = decodeText(raw)
             // htmlToText 会给每段写死「　　」；阅读页的「缩进」档位还会再加一层，
             // 叠起来是四字宽。入库前剥掉，缩进只由 ReaderStyle 决定（与本地 txt 一致）。
@@ -385,10 +479,9 @@ object LocalImport {
             // 导航页、版权页、只有一张图的页：正文少于 10 个有效字就跳过。
             if (body.count { it.isLetterOrDigit() } < 10) continue
             seq++
-            out.add(Chapter(title ?: "第${seq}章", dropLeadingTitle(body, title)))
+            emit(Chapter(title ?: "第${seq}章", dropLeadingTitle(body, title)))
         }
-        if (out.isEmpty()) throw IllegalStateException("EPUB 里没有可读的正文")
-        return out
+        if (seq == 0) throw IllegalStateException("EPUB 里没有可读的正文")
     }
 
     /** 正文首行与章节标题相同时删掉，否则阅读页顶栏与正文第一行重复。 */
@@ -493,28 +586,71 @@ object LocalImport {
      */
     fun importInto(store: JobStore, fileName: String, bytes: ByteArray): Result {
         if (bytes.isEmpty()) throw IllegalArgumentException("文件是空的")
-        val ext = fileName.substringAfterLast('.', "").lowercase(Locale.US)
-        val looksEpub = isEpub(fileName, bytes)
+        val epub = isEpub(fileName, bytes)
+        checkSize(bytes.size.toLong(), epub)
+        // 字节数组这条路只有测试和小调用点在用：epub 仍然整包解进内存。
+        return writeBook(store, fileName, if (epub) "EPUB" else "TXT") { emit ->
+            if (epub) epubTo(readTextEntries(bytes), emit) else splitTxtTo(decodeText(bytes), emit)
+        }
+    }
+
+    /**
+     * 从文件导入。**真机走这条**：epub 用 [ZipFile] 按需读条目，
+     * 每章解析完立刻落盘，内存峰值只有一章，不再随书大小线性增长。
+     */
+    fun importInto(store: JobStore, fileName: String, file: File): Result {
+        if (!file.isFile) throw IllegalArgumentException("文件不存在")
+        if (file.length() == 0L) throw IllegalArgumentException("文件是空的")
+        val head = head4(file)
+        val epub = isEpub(fileName, head)
+        checkSize(file.length(), epub)
+        return writeBook(store, fileName, if (epub) "EPUB" else "TXT") { emit ->
+            if (epub) {
+                java.util.zip.ZipFile(file).use { zf -> epubTo(ZipSource(zf), emit) }
+            } else {
+                val bytes = file.inputStream().use { readCapped(it, MAX_BYTES.toInt()) }
+                splitTxtTo(decodeText(bytes), emit)
+            }
+        }
+    }
+
+    /** 文件前 4 字节，用来判 PK 头。 */
+    private fun head4(file: File): ByteArray = runCatching {
+        file.inputStream().use { ins ->
+            val b = ByteArray(4)
+            var n = 0
+            while (n < 4) {
+                val r = ins.read(b, n, 4 - n)
+                if (r <= 0) break
+                n += r
+            }
+            if (n == 4) b else b.copyOf(n)
+        }
+    }.getOrDefault(ByteArray(0))
+
+    private fun checkSize(size: Long, epub: Boolean) {
         // 上限按格式取：epub 的体积是图片字体，按 txt 的 12MB 卡会把正规 epub 挡在门外。
-        // 这里必须和 MainActivity 的预检同一口径，所以判据抽成 isEpub。
-        val limit = if (looksEpub) MAX_EPUB_BYTES else MAX_BYTES
-        if (bytes.size > limit) {
+        val limit = if (epub) MAX_EPUB_BYTES else MAX_BYTES
+        if (size > limit) {
             // 向上取整：12.5MB 的文件报「（12MB），上限 12MB」读起来像自相矛盾。
             throw IllegalArgumentException(
-                "文件太大（${(bytes.size + 1048575L) / 1048576}MB），上限 ${limit / 1024 / 1024}MB",
+                "文件太大（${(size + 1048575L) / 1048576}MB），上限 ${limit / 1024 / 1024}MB",
             )
         }
-        val format: String
-        val chapters: List<Chapter>
-        if (ext == "epub" || looksEpub) {
-            format = "EPUB"
-            chapters = epubChapters(bytes)
-        } else {
-            format = "TXT"
-            chapters = splitTxt(decodeText(bytes))
-        }
-        if (chapters.isEmpty()) throw IllegalStateException("分不出任何章节，可能不是文本文件")
+    }
 
+    /**
+     * 边收章节边落盘。
+     *
+     * 原来先把整本解成 `List<Chapter>`，再拼 `List<String>`，再一次性写 —— 同一份正文
+     * 在内存里存在四遍，55MB 的书要 185MB 堆。现在只留章标题（几百 KB）和当前章。
+     */
+    private fun writeBook(
+        store: JobStore,
+        fileName: String,
+        format: String,
+        produce: (((Chapter) -> Unit) -> Unit),
+    ): Result {
         val name = fileName.substringBeforeLast('.').trim().ifBlank { "本地书" }.take(60)
         // bookId 只取书名会撞：`三体.txt` 与 `三体.epub` 会落成同一个目录，静默覆盖。
         // 带上格式；字节数不能进 id —— 同名重导要落在同一本书上（覆盖旧正文），
@@ -524,29 +660,47 @@ object LocalImport {
         store.markDeleted(bookId)
         store.clearDeleted(bookId)
 
-        val lines = chapters.mapIndexed { i, c ->
-            "{\"itemId\":${Downloader.quote(itemId(i))},\"title\":${Downloader.quote(c.title)}," +
-                "\"content\":${Downloader.quote(c.body)}}"
+        val titles = ArrayList<String>()
+        val sink = store.openChapters(bookId)
+        try {
+            produce { c ->
+                val i = titles.size
+                titles.add(c.title)
+                sink.add(
+                    "{\"itemId\":${Downloader.quote(itemId(i))}," +
+                        "\"title\":${Downloader.quote(c.title)}," +
+                        "\"content\":${Downloader.quote(c.body)}}",
+                )
+            }
+            if (titles.isEmpty()) {
+                throw IllegalStateException(
+                    if (format == "EPUB") "EPUB 里没有可读的正文" else "分不出任何章节，可能不是文本文件",
+                )
+            }
+            sink.commit()
+        } catch (t: Throwable) {
+            // 失败就把半截 tmp 删掉，旧正文原样保留 —— 用户重导失败的后果只是「没变」。
+            sink.abort()
+            throw t
         }
-        store.writeChapters(bookId, lines)
 
-        val json = StringBuilder(64 + chapters.size * 96)
+        val json = StringBuilder(64 + titles.size * 96)
             .append("{\"bookId\":").append(Downloader.quote(bookId))
             .append(",\"name\":").append(Downloader.quote(name))
             .append(",\"author\":\"\"")
             // 书架封面左下角标签读 originName；空着会落到「本地」，这里显式写出来。
             .append(",\"originName\":\"本地\"")
-            .append(",\"state\":\"DONE\",\"total\":").append(chapters.size)
+            .append(",\"state\":\"DONE\",\"total\":").append(titles.size)
             .append(",\"updatedAt\":").append(System.currentTimeMillis())
             .append(",\"chapters\":[")
             .toString()
-        val chapterJson = chapters.mapIndexed { i, c ->
-            "{\"itemId\":${Downloader.quote(itemId(i))},\"title\":${Downloader.quote(c.title)}," +
+        val chapterJson = titles.mapIndexed { i, t ->
+            "{\"itemId\":${Downloader.quote(itemId(i))},\"title\":${Downloader.quote(t)}," +
                 "\"locked\":false,\"status\":\"DONE\"}"
         }.joinToString(",")
         store.writeJob(bookId, json + chapterJson + "]}", isCancelled = { false }, resume = { true })
 
-        return Result(bookId, name, chapters.size, format)
+        return Result(bookId, name, titles.size, format)
     }
 
     /** 章 id。本地书只在自己这一本的目录里，序号就够，不必造 URL。 */

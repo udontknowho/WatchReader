@@ -534,23 +534,35 @@ class MainActivity : Activity() {
                     "文件太大（${(declared + 1048575) / 1048576}MB），上限 ${limit / 1024 / 1024}MB",
                 )
             }
-            val bytes = contentResolver.openInputStream(uri)?.use { ins ->
-                // 有的 provider 不报 SIZE，边读边卡，最多多读 1 字节用来判超。
-                val buf = java.io.ByteArrayOutputStream()
-                val chunk = ByteArray(64 * 1024)
-                var total = 0L
-                while (true) {
-                    val n = ins.read(chunk)
-                    if (n <= 0) break
-                    total += n
-                    if (total > limit) {
-                        throw IllegalArgumentException("文件太大，上限 ${limit / 1024 / 1024}MB")
+            // 先落到临时文件再导入：epub 要按需读条目（ZipFile 需要一个可随机访问的文件），
+            // 而且整包读进 ByteArray 会让内存峰值随书线性涨 —— 27MB 的 epub 光这一步就 27MB。
+            // 临时文件放 cacheDir，导完就删。
+            val tmp = java.io.File(cacheDir, "import.tmp")
+            try {
+                contentResolver.openInputStream(uri)?.use { ins ->
+                    // 有的 provider 不报 SIZE，边读边卡，最多多读 1 字节用来判超。
+                    java.io.FileOutputStream(tmp).use { out ->
+                        val chunk = ByteArray(64 * 1024)
+                        var total = 0L
+                        while (true) {
+                            val n = ins.read(chunk)
+                            if (n <= 0) break
+                            total += n
+                            if (total > limit) {
+                                throw IllegalArgumentException("文件太大，上限 ${limit / 1024 / 1024}MB")
+                            }
+                            out.write(chunk, 0, n)
+                        }
                     }
-                    buf.write(chunk, 0, n)
-                }
-                buf.toByteArray()
-            } ?: throw IllegalStateException("读不到这个文件")
-            LocalImport.importInto(jobsStore(), name, bytes)
+                } ?: throw IllegalStateException("读不到这个文件")
+                // 名字不带扩展名（SAF 常给 `document`）时，按文件头补一个，别让分章走错路。
+                val realName = if (name.substringAfterLast('.', "").isEmpty()) {
+                    if (LocalImport.isEpub(name, head)) "$name.epub" else "$name.txt"
+                } else name
+                LocalImport.importInto(jobsStore(), realName, tmp)
+            } finally {
+                tmp.delete()
+            }
           }
           runOnUiThread {
             // 失败分支不能再走到「已导入」那句：否则用户看到「文件太大」紧跟
