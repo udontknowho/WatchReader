@@ -311,14 +311,17 @@ fun main() {
     println("[本地导入] 边界")
     run {
         // 无 BOM 的 UTF-16LE：只看替换符会判成 UTF-8，整本变带洞的乱码。
-        val u16 = "第一章 开始\n\nUTF-16LE 正文。".toByteArray(Charsets.UTF_16LE)
-        val dec = com.watchdl.core.LocalImport.decodeText(u16)
-        check("无 BOM 的 UTF-16LE 能认", dec.contains("UTF-16LE 正文") && !dec.contains('\u0000'),
+        // 纯中文样本：「一」= U+4E00 低字节是 0x00，落在偶位，靠数零字节会判成 BE。
+        val pure = ("第一章 开始\n\n" + "他一步一步地走进那座大宅，心里想着家里的人。\n".repeat(40))
+        val dec = com.watchdl.core.LocalImport.decodeText(pure.toByteArray(Charsets.UTF_16LE))
+        check("纯中文 UTF-16LE 能认", dec.startsWith("第一章 开始") && dec.contains("大宅"),
             dec.take(12))
+        val decBe = com.watchdl.core.LocalImport.decodeText(pure.toByteArray(Charsets.UTF_16BE))
+        check("纯中文 UTF-16BE 能认", decBe.startsWith("第一章 开始"), decBe.take(12))
 
         // 分章：全角数字、各种分隔符、番外、Chapter 无空格。
         val heads = listOf(
-            "第１２章 全角", "第一章，逗号", "第一章【方括号】", "第一章（一）",
+            "第１２章 全角", "第一章【方括号】", "第一章（一）",
             "番外篇 婚礼", "番外一", "Chapter One", "Chapter12",
         )
         for (h in heads) {
@@ -326,6 +329,25 @@ fun main() {
             val chs = com.watchdl.core.LocalImport.splitTxt(txt)
             check("认得出「$h」", chs.size == 2, "切成 ${chs.size} 章：${chs.map { it.title }}")
         }
+
+        // 逗号不能当标题分隔符：这条是正文，不是章节标题。
+        val comma = "第一章，他终于明白自己错了，可是已经晚了。\n\n后面还有正文。"
+        check("逗号开头的正文不当标题", com.watchdl.core.LocalImport.splitTxt(comma).size == 1,
+            "${com.watchdl.core.LocalImport.splitTxt(comma).map { it.title }}")
+
+        // 没有 spine 的包按文件名自然序，不能 1,10,11,2。
+        val bosN = java.io.ByteArrayOutputStream()
+        java.util.zip.ZipOutputStream(bosN).use { z ->
+            for (i in listOf(1, 2, 10, 11)) {
+                z.putNextEntry(java.util.zip.ZipEntry("ch$i.xhtml"))
+                z.write(("<html><body><h1>第${i}章</h1><p>这是第${i}章的正文内容，够十个字。</p></body></html>")
+                    .toByteArray())
+                z.closeEntry()
+            }
+        }
+        val nat = com.watchdl.core.LocalImport.epubChapters(bosN.toByteArray())
+        check("无 spine 按自然序", nat.map { it.title } == listOf("第1章", "第2章", "第10章", "第11章"),
+            nat.map { it.title }.toString())
 
         val dir = java.io.File(System.getProperty("java.io.tmpdir"), "local-edge-test")
         dir.deleteRecursively(); dir.mkdirs()

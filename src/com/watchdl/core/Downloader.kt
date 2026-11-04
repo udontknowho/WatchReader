@@ -595,14 +595,15 @@ class Downloader(
             // htmlToText 是纯 CPU（多次正则替换），整本导出时是瓶颈。
             // 并行转换、按原顺序落盘 —— 分隔与书名都要保持章节顺序，不能边并行边写。
             val items = chapters.entries.toList()
+            val plain = com.watchdl.core.LocalImport.isLocal(bookId)
             val workers = minOf(Runtime.getRuntime().availableProcessors(), 4).coerceAtLeast(1)
             val blocks = if (items.size < 32 || workers == 1) {
-                items.mapIndexed { i, (_, line) -> convert(line, i + 1) }
+                items.mapIndexed { i, (_, line) -> convert(line, i + 1, plain) }
             } else {
                 val pool = java.util.concurrent.Executors.newFixedThreadPool(workers)
                 try {
                     val futures = items.mapIndexed { i, (_, line) ->
-                        pool.submit(java.util.concurrent.Callable { convert(line, i + 1) })
+                        pool.submit(java.util.concurrent.Callable { convert(line, i + 1, plain) })
                     }
                     futures.map { it.get() }
                 } finally {
@@ -640,10 +641,14 @@ class Downloader(
          * [seq] 是章节序号（从 1 起）。标题里已写「第N章」的**不重复加**，
          * 否则会出现「第3章 第3章 xxx」。
          */
-        private fun convert(line: String, seq: Int): String? {
+        private fun convert(line: String, seq: Int, plain: Boolean = false): String? {
             val title = TinyJson.path(line, "title") ?: ""
             val content = TinyJson.path(line, "content") ?: return null
-            return "${chapterHead(title, seq)}\n\n${htmlToText(content)}\n\n"
+            // 本地书存的是纯文本：再走 htmlToText 会把 `<` `>` 当标签删掉、把 `&amp;`
+            // 还原、每段强加全角缩进 —— 阅读页刚修掉的三个问题会在导出里复现。
+            val body = if (plain) content.replace("\r\n", "\n").replace('\r', '\n').trim()
+                       else htmlToText(content)
+            return "${chapterHead(title, seq)}\n\n$body\n\n"
         }
 
         /** 「第 N 章」「第 5 节」这类章节号。 */

@@ -513,9 +513,13 @@ class MainActivity : Activity() {
             val name = localFileName(uri)
             // 先查大小再读：先整读后判上限，上限永远来不及生效。
             val declared = localFileSize(uri)
-            if (declared > LocalImport.MAX_BYTES) {
+            // epub 的体积几乎全是图片和字体，正文只有几百 KB。按 txt 的 12MB 卡，
+            // 一本 27MB 的正规 epub 会被直接拒掉。正文大小交给累计上限管。
+            val limit = if (name.endsWith(".epub", ignoreCase = true)) LocalImport.MAX_EPUB_BYTES
+                        else LocalImport.MAX_BYTES
+            if (declared > limit) {
                 throw IllegalArgumentException(
-                    "文件太大（${declared / 1024 / 1024}MB），上限 ${LocalImport.MAX_BYTES / 1024 / 1024}MB",
+                    "文件太大（${declared / 1024 / 1024}MB），上限 ${limit / 1024 / 1024}MB",
                 )
             }
             val bytes = contentResolver.openInputStream(uri)?.use { ins ->
@@ -527,8 +531,8 @@ class MainActivity : Activity() {
                     val n = ins.read(chunk)
                     if (n <= 0) break
                     total += n
-                    if (total > LocalImport.MAX_BYTES) {
-                        throw IllegalArgumentException("文件太大，上限 ${LocalImport.MAX_BYTES / 1024 / 1024}MB")
+                    if (total > limit) {
+                        throw IllegalArgumentException("文件太大，上限 ${limit / 1024 / 1024}MB")
                     }
                     buf.write(chunk, 0, n)
                 }
@@ -537,11 +541,15 @@ class MainActivity : Activity() {
             LocalImport.importInto(jobsStore(), name, bytes)
           }
           runOnUiThread {
-            res.onSuccess { toast("已导入《${it.name}》（${it.format}）${it.chapters} 章") }
-                .onFailure { toast("导入失败：${it.message ?: "未知原因"}") }
-            // 还在书架就重画；已经走开了只提示一句，回来刷新时能看到。
-            if (screenId(screen) == screenId(Screen.Shelf)) showShelf(keepScroll = true)
-            else toast("已导入，回书架能看到")
+            // 失败分支不能再走到「已导入」那句：否则用户看到「文件太大」紧跟
+            // 「已导入，回书架能看到」，去书架找不到，反手再导一遍。
+            if (isGone()) return@runOnUiThread
+            res.onSuccess {
+                toast("已导入《${it.name}》（${it.format}）${it.chapters} 章")
+                // 还在书架就重画；已经走开了只提示一句，回来刷新时能看到。
+                if (screenId(screen) == screenId(Screen.Shelf)) showShelf(keepScroll = true)
+                else toast("已导入，回书架能看到")
+            }.onFailure { toast("导入失败：${it.message ?: "未知原因"}") }
           }
         }
     }
