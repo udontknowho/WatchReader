@@ -1897,6 +1897,7 @@ class MainActivity : Activity() {
         when (val s = screen) {
             is Screen.Toc -> showToc(s.info)
             is Screen.Reader -> showReader(s.info, s.index, s.text, s.src)
+            is Screen.ReaderSettings -> showReaderSettings(s.info, s.index, s.text, s.src)
             // 传 null 会丢掉批次信息，「换一批源」按钮就没了；
             // 但 Result 需要真实统计，屏上只记了批次大小，
             // 所以改用 batch 参数直接传。
@@ -1937,6 +1938,8 @@ class MainActivity : Activity() {
             is Screen.Hits -> goBackToPrevious()
             // 菜单是浮层不是新的一屏：展开时先收菜单，收起时再回目录。
             is Screen.Reader -> if (!ReaderMenu.consumeBack()) showToc(s.info)
+            // 设置页是一屏，不是浮层：返回直接回阅读页（设置已即时生效，不必再确认）。
+            is Screen.ReaderSettings -> showReader(s.info, s.index, s.text, s.src)
             is Screen.Sources -> goBackToPrevious()
             is Screen.Market -> showSources()
             is Screen.Progress -> showToc(s.info)

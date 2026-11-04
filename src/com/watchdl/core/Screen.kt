@@ -33,6 +33,18 @@ sealed interface Screen {
         val text: String,
         val src: BookSource? = null,
     ) : Screen
+    /**
+     * 阅读设置页。原先是一个对话框，189×248 dp 里减去标题与按钮只剩 120 dp，
+     * 排版十来项挤在两行多的窗口里滚，分段一多就分不清哪儿是哪儿。改成独立一屏。
+     *
+     * 带 [text]：返回阅读页时不必重新解析正文。
+     */
+    data class ReaderSettings(
+        val info: BookInfo,
+        val index: Int,
+        val text: String,
+        val src: BookSource? = null,
+    ) : Screen
     object Sources : Screen
     /**
      * 设置。一页拆成两页（照 legado `ui/config/ConfigNavScreen`）：首屏是入口列表，
@@ -167,6 +179,7 @@ fun screenId(s: Screen?): String = when (s) {
     // 每条源返回的 id 不同），拿 bookId 做身份会让回调认不出自己。
     is Screen.Toc -> "toc:${s.info.name}${s.info.author}"
     is Screen.Reader -> "reader:${s.info.bookId}"
+    is Screen.ReaderSettings -> "readerSettings:${s.info.bookId}"
     is Screen.Progress -> "progress:${s.info.bookId}"
     is Screen.Marks -> "marks:${s.info.bookId}"
     Screen.MarksAll -> "marksAll"

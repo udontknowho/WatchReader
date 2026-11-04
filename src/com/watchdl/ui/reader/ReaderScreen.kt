@@ -114,7 +114,7 @@ internal object ReaderUi {
     var restoreAt = -1
 
     /** 页眉页脚总开关（legado readConfig 的 headerMode/footerMode 合成一个总闸）。 */
-    var stripsOn = true
+    var stripsOn = false
     /** 页眉显示项：chapter=章节名 / page=屏号。空列表 = 不显示页眉。 */
     var headerParts: List<String> = listOf("chapter", "page")
     /** 页脚显示项：book=书名 / pct=全书进度 / battery=电量。空列表 = 不显示页脚。 */
@@ -291,7 +291,7 @@ private fun readerToolGlyph(id: String): String = when (id) {
 }
 
 /** 工具格 id → 文案。 */
-private fun readerToolTitle(id: String): String = when (id) {
+internal fun readerToolTitle(id: String): String = when (id) {
     "catalog" -> "目录"
     "setting" -> "设置"
     "change_source" -> "换源"
@@ -343,9 +343,11 @@ internal fun MainActivity.loadReaderExtras() {
     ReaderUi.brightAuto = p.getBoolean("brightAuto", false)
     ReaderUi.tools = readerTools(p.getString("tools", null))
     ReaderUi.autoPageSec = p.getInt("autoPageSec", 10).coerceIn(1, 60)
-    ReaderUi.eyeCare = p.getBoolean("eye", false)
+    // 护眼整组已下线（用户要求）。旧存档里可能还留着 eye=true，
+    // 这里不再读：没有入口能关掉，留着就永远蒙一层黄。
+    ReaderUi.eyeCare = false
     ReaderUi.eyeLevel = p.getInt("eyeLevel", 1).coerceIn(0, 2)
-    ReaderUi.eyeAuto = p.getBoolean("eyeAuto", false)
+    ReaderUi.eyeAuto = false
     ReaderUi.paraLevel = p.getInt("para", 0).coerceIn(0, 2)
     // 旧键 "indent" 是布尔（有/无 2 字），新键 "indentLevel" 是 0–2 档。
     // 读旧键时 getInt 会抛类型异常，所以先取布尔再折算，不能两把键混用一个名。
@@ -363,7 +365,9 @@ internal fun MainActivity.loadReaderExtras() {
     ReaderUi.marginLevel = p.getInt("margin", 1).coerceIn(0, 2)
     ReaderUi.keepOn = p.getBoolean("keepOn", false)
     ReaderUi.badgeOn = p.getBoolean("badge", true)
-    ReaderUi.stripsOn = p.getBoolean("strips", true)
+    // 页眉页脚已从设置里去掉（用户要求），默认不显示；这里不再读旧键，
+    // 免得旧存档里开着的那两条 14 dp 条还在，却没有任何入口可关。
+    ReaderUi.stripsOn = false
     ReaderUi.headerParts = readerParts(p.getString("headerParts", null),
         STRIP_HEADER, STRIP_HEADER_DEF)
     ReaderUi.footerParts = readerParts(p.getString("footerParts", null),
@@ -401,7 +405,7 @@ internal fun MainActivity.saveReaderExtras() {
 }
 
 /** 把亮度档写到当前窗口，顺手按「屏幕常亮」加减 FLAG_KEEP_SCREEN_ON。 */
-private fun MainActivity.applyBright() {
+internal fun MainActivity.applyBright() {
     val w = window ?: return
     val attrs = w.attributes ?: return
     // 跟随系统时交回 -1f（BRIGHTNESS_OVERRIDE_NONE）：系统按环境光自己调，比锁死一档舒服。
@@ -1342,7 +1346,7 @@ internal fun MainActivity.showReader(
  * 「关窗就跳章首」比设置不同步还刺眼。
  * 字重/斜体/字距/缩进这几项 legado 都有，原先一律写死，现在由这里统一上。
  */
-private fun MainActivity.restyleReader(raw: String) {
+internal fun MainActivity.restyleReader(raw: String) {
     val tv = ReaderUi.bodyView ?: return
     val ink = ReaderStyle.inkOverride(readerBackground)
         ?: if (Color.red(readerBackground) > 100) Color.rgb(28, 27, 31) else Md3.onSurface
@@ -1594,7 +1598,7 @@ private fun MainActivity.showReaderMenu(
  * 建页面时按列表排的，就地改要拆视图树，反而比重建更容易打回章首。
  * 至少留一个：全空的底栏既看不出是什么，也没了回正文的入口。
  */
-private fun MainActivity.showToolsDialog(
+internal fun MainActivity.showToolsDialog(
     info: BookInfo, index: Int, text: String, src: BookSource?,
 ) {
     val chosen = ReaderUi.tools.toMutableList()
@@ -1876,368 +1880,4 @@ private fun MainActivity.nextChapter(info: BookInfo, index: Int) {
         if (free == null) { toast("后面都是付费章"); return }
         preview(info, free)
     } else preview(info, next)
-}
-/**
- * 阅读设置。分页照 legado 的 `ReadStyleSheet`：正文 / 标题 / 主题 / 更多。
- *
- * 每一项都照 legado 的 `TypographyTabs` / `BgTextConfigSheet` / `MoreConfigSheet` 取，
- * 连续量用滑杆（legado 的 `TinySliderSettingItem` 也是滑杆），离散量用档位段。
- * 改一项就套到正文上（[restyleReader]），关窗不再重建页面 —— 重建会把滚动位置打回章首。
- *
- * 高度预算：189×248 dp 上，对话框内边距 16×2 + 标题 28 + 间距 12 + 内容 120 + 按钮 40 = 244 dp，
- * 内容里页签占 24 dp、滚动区占 96 dp（约两行滑杆或三行档位）。再高就把按钮挤出屏。
- */
-private fun MainActivity.showReaderSettings(info: BookInfo, index: Int, text: String, src: BookSource?) {
-    fun save() {
-        saveReaderPrefs(readerSize, readerSpacing, readerBackground)
-        saveReaderExtras()
-        applyBright()
-        restyleReader(text)
-    }
-
-    // 结构：一列分段，不分页签。
-    //
-    // legado `ReadStyleSheet` 是「全局主题」「菜单系统」两个滑页 + 「信息」「更多设置」
-    // 两个跳转页，手机上按下时能左右滑。手表对话框只有 189×248 dp，四个页签先吃掉
-    // 24 dp，换来的却是「每页都得滚」和「一项在哪一页记不住」。所以按 legado 的**分组**
-    // （外观 / 版式 / 标题 / 页眉页脚 / 边距 / 杂项）排成一列，页签那 24 dp 让给内容。
-    val page = ScrollView(this).apply { isVerticalScrollBarEnabled = false }
-    /** 重画整列：芯片选中态、恢复默认之后都要回头重排自己。 */
-    var rebuild: () -> Unit = {}
-    /** 「选中态刷新」集合：每档芯片登记一个，重排时统一刷一次高亮。 */
-    var refreshers: List<() -> Unit> = emptyList()
-
-    /** 档位行：标签 + 若干等宽档。选中态沿用全局（浅紫填充 + 深字）。 */
-    fun seg(col: LinearLayout, label: String, options: List<Pair<String, Any>>, get: () -> Any, set: (Any) -> Unit) {
-        val row = Md3.row(this).apply { setPadding(0, Md3.dp(this@showReaderSettings, 3), 0, 0) }
-        row.addView(Md3.text(this, label, Md3.FS_SM, Md3.onSurfaceVariant),
-            LinearLayout.LayoutParams(Md3.dp(this, 30), ViewGroup.LayoutParams.WRAP_CONTENT))
-        val chips = mutableListOf<Pair<TextView, Any>>()
-        options.forEachIndexed { i, opt ->
-            val chip = Md3.text(this, opt.first, Md3.FS_SM, Md3.onSurfaceVariant).apply {
-                gravity = Gravity.CENTER
-                isClickable = true
-                setOnClickListener {
-                    set(opt.second)
-                    save()
-                    refreshers.forEach { r -> r() }
-                }
-            }
-            chips.add(chip to opt.second)
-            row.addView(chip, LinearLayout.LayoutParams(0, Md3.dp(this, 26), 1f).apply {
-                leftMargin = if (i == 0) 0 else Md3.dp(this@showReaderSettings, 4)
-            })
-        }
-        col.addView(row)
-        refreshers = refreshers + {
-            val cur = get()
-            chips.forEach { pair ->
-                val sel = pair.second == cur
-                pair.first.setTypeface(null,
-                    if (sel) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
-                pair.first.setTextColor(if (sel) Md3.onPrimary else Md3.onSurfaceVariant)
-                pair.first.background = Md3.ripple(this,
-                    if (sel) Md3.primary else Color.TRANSPARENT,
-                    Md3.dp(this, 13).toFloat(),
-                    if (sel) null else Md3.outlineVariant)
-            }
-        }
-    }
-
-    /** 滑杆行：标签与数值一行、滑杆一行（与 legado 的滑杆项同构，见 Widgets.sliderRow）。 */
-    fun slider(
-        col: LinearLayout, label: String, min: Float, max: Float, steps: Int,
-        value: Float, fmt: (Float) -> String, set: (Float) -> Unit,
-    ) {
-        col.addView(Widgets.sliderRow(this, label, min, max, value, steps, fmt) { v ->
-            set(v)
-            save()
-        })
-    }
-
-    // ── 页眉页脚：总开关 + 各自显示什么 ───────────────
-    /**
-     * 页眉页脚的配置对话框。
-     *
-     * 改一下就地重画那两条 14 dp 细条（[ReaderUi.stripRefresh]），不重建页面 ——
-     * 重建会把滚动位置打回章首。
-     */
-    fun showStripsDialog() {
-        val box = Md3.column(this)
-        /** 立即生效：落盘 + 重画页眉页脚。 */
-        fun commit() {
-            saveReaderExtras()
-            ReaderUi.stripRefresh?.invoke()
-        }
-        /** 重画对话框本体。声明成变量是因为多选行点完要回头重画自己（同 showToolsDialog）。 */
-        var render: () -> Unit = {}
-        /** 多选一行：点一下加入或移除，存盘顺序按固定表，不按点选先后。 */
-        fun partRow(id: String, label: String, allowed: List<String>,
-                    cur: () -> List<String>, set: (List<String>) -> Unit) {
-            val on = id in cur()
-            box.addView(
-                Widgets.listItem(this, label,
-                    trailing = if (on) "check" else null,
-                    onClick = {
-                        val ids = cur().toMutableList()
-                        if (on) ids.remove(id) else ids.add(id)
-                        set(allowed.filter { it in ids })
-                        commit()
-                        render()
-                    },
-                ),
-                Md3.lpDp(this, null, Md3.TAP),
-            )
-        }
-        render = {
-            box.removeAllViews()
-            box.addView(
-                Widgets.listItem(this, "显示页眉页脚",
-                    subtitle = if (ReaderUi.stripsOn) "开：上下各让出 14 dp" else "关：正文多两行",
-                    trailing = if (ReaderUi.stripsOn) "check" else null,
-                    onClick = {
-                        ReaderUi.stripsOn = !ReaderUi.stripsOn
-                        commit()
-                        render()
-                    },
-                ),
-                Md3.lpDp(this, null, Md3.ITEM_TALL),
-            )
-            box.addView(Md3.text(this, "页眉显示", Md3.FS_SM, Md3.onSurfaceVariant)
-                .apply { setPadding(Md3.dp(this@showReaderSettings, Md3.PAD), 0, 0, 0) })
-            partRow("chapter", "章节名", STRIP_HEADER,
-                { ReaderUi.headerParts }, { ReaderUi.headerParts = it })
-            partRow("page", "屏号", STRIP_HEADER,
-                { ReaderUi.headerParts }, { ReaderUi.headerParts = it })
-            box.addView(Md3.text(this, "页脚显示", Md3.FS_SM, Md3.onSurfaceVariant)
-                .apply { setPadding(Md3.dp(this@showReaderSettings, Md3.PAD), 0, 0, 0) })
-            partRow("book", "书名", STRIP_FOOTER,
-                { ReaderUi.footerParts }, { ReaderUi.footerParts = it })
-            partRow("pct", "进度", STRIP_FOOTER,
-                { ReaderUi.footerParts }, { ReaderUi.footerParts = it })
-            partRow("battery", "电量", STRIP_FOOTER,
-                { ReaderUi.footerParts }, { ReaderUi.footerParts = it })
-        }
-        render()
-        val sv = ScrollView(this).apply {
-            isVerticalScrollBarEnabled = false
-            addView(box)
-        }
-        // 关窗不重建页面：改一项已经就地重画过了。
-        Widgets.md3Dialog(this, "页眉页脚",
-            body = "页眉页脚各占 14 dp，关掉后正文多两行。两项可留空，也能关两项里的某一项。",
-            content = sv,
-            confirm = null, dismiss = "完成",
-        ).show()
-    }
-
-    // ── 信息：legado TypographyPage（正文 / 标题 / 页眉 / 页脚 / 边距）──
-    /**
-     * legado 的「信息」页是一个纵向滚动的面板，五段各带小标题。
-     * 我们照这个分组，把原来的「正文」「标题」两个页签并回同一页的分段 ——
-     * 正文与标题本来就是排版的同一件事，分成两页只是手表屏幕窄留下的历史。
-     *
-     * 翻页动画移到「主题」页：legado 的 `page_anim` 就在 GlobalThemePage 里。
-     */
-    fun buildInfo(): View {
-        val col = Md3.column(this)
-
-        col.addView(Widgets.sectionLabel(this, "正文"))
-        slider(col, "字号", 10f, 24f, 14, readerSize, { "${it.toInt()}" }) { readerSize = it }
-        slider(col, "行距", 1.2f, 2.4f, 12, readerSpacing, { String.format("%.1f", it) }) { readerSpacing = it }
-        slider(col, "段距", 0f, 2f, 2, ReaderUi.paraLevel.toFloat(),
-            { listOf("无", "半行", "一行")[it.toInt().coerceIn(0, 2)] }) {
-            ReaderUi.paraLevel = it.toInt()
-        }
-        slider(col, "缩进", 0f, 2f, 2, ReaderUi.indentLevel.toFloat(),
-            { listOf("无", "1 字", "2 字")[it.toInt().coerceIn(0, 2)] }) {
-            ReaderUi.indentLevel = it.toInt()
-        }
-        slider(col, "字距", -0.05f, 0.10f, 15, ReaderUi.letterEm,
-            { String.format("%.2f", it) }) { ReaderUi.letterEm = it }
-        seg(col, "字重", listOf("常规" to 0 as Any, "中粗" to 1, "粗" to 2),
-            { ReaderUi.weightLevel as Any }) { ReaderUi.weightLevel = it as Int }
-        seg(col, "斜体", listOf("关" to false as Any, "开" to true),
-            { ReaderUi.italic as Any }) { ReaderUi.italic = it as Boolean }
-        seg(col, "两端", listOf("关" to false as Any, "开" to true),
-            { ReaderUi.justify as Any }) { ReaderUi.justify = it as Boolean }
-
-        col.addView(Widgets.sectionLabel(this, "标题"))
-        seg(col, "位置", listOf("居左" to 0 as Any, "居中" to 1, "隐藏" to 2),
-            { ReaderUi.titleMode as Any }) { ReaderUi.titleMode = it as Int }
-        slider(col, "字号", 0f, 8f, 4, ReaderUi.titleAdd.toFloat(),
-            { "+${it.toInt()}" }) { ReaderUi.titleAdd = it.toInt() }
-        slider(col, "间距", 0f, 12f, 3, (ReaderUi.titleGap * 4).toFloat(),
-            { "${it.toInt()} dp" }) { ReaderUi.titleGap = (it / 4f).toInt() }
-        seg(col, "字重", listOf("常规" to false as Any, "加粗" to true),
-            { ReaderUi.titleBold as Any }) { ReaderUi.titleBold = it as Boolean }
-
-        // 页眉 / 页脚：legado 信息页里是两段各自带勾选项，我们共用一个对话框，
-        // 因为手表上两段合成一屏才看得全。
-        col.addView(Widgets.sectionLabel(this, "页眉页脚"))
-        col.addView(
-            Widgets.listItem(this, "显示项",
-                if (ReaderUi.stripsOn) "开：上下各让出 14 dp" else "关：正文多两行",
-                twoLine = true, onClick = { showStripsDialog() }),
-            Md3.lpDp(this, null, Md3.ITEM_TALL),
-        )
-
-        col.addView(Widgets.sectionLabel(this, "边距"))
-        slider(col, "边距", 0f, 2f, 2, ReaderUi.marginLevel.toFloat(),
-            { listOf("窄", "标准", "宽")[it.toInt().coerceIn(0, 2)] }) {
-            ReaderUi.marginLevel = it.toInt()
-        }
-        return col
-    }
-
-    // ── 主题：legado GlobalThemePage + BgTextConfigSheet + EyeProtection ──
-    fun buildTheme(): View {
-        val col = Md3.column(this)
-        // 5 个 chip 等宽挤在 189 dp 里（每个约 23 dp），两字的「番茄」会被截断，
-        // 所以与前四档一样取单字「茄」。底色与字色取自 legado readConfig 样本。
-        // 番茄档日/夜两套（legado readConfig 的 bgStr / bgStrNight）：点「茄」时按**当前**底色深浅
-        // 自动取，深底给夜茄、浅底给日茄 —— 多一格就多一次选择，用户已经说了只要一个「茄」。
-        val darkNow = Color.red(readerBackground) <= 100
-        val bgs = listOf(
-            "深" to DARK_BG,
-            "浅" to Color.WHITE,
-            "暖" to Color.rgb(255, 248, 230),
-            "米" to Color.rgb(232, 225, 210),
-            "茄" to if (darkNow) ReaderStyle.BG_FANQIE_NIGHT else ReaderStyle.BG_FANQIE_DAY,
-        )
-        // 已知限：芯片选中态靠 `pair.second == cur` 判，而「茄」的取值是建这一页时算定的。
-        // 在「茄」上点一下会把底色切到另一套（日↔夜），于是「茄」自己不再高亮，
-        // 用户要切回去得再点一次「茄」，而不是点那一格高亮的。只多一步，不另加一格。
-        // 字色仍由 ReaderStyle.inkOverride 负责。
-        seg(col, "背景", bgs.map { it.first to (it.second as Any) }, { readerBackground as Any }) {
-            val wasLight = Color.red(readerBackground) > 100
-            readerBackground = it as Int
-            // 深浅互换时，在新页底留一条「切换到深色 / 浅色模式」的浮动胶囊（legado 的主题提醒）。
-            if (wasLight != (Color.red(readerBackground) > 100)) ReaderUi.themeHint = true
-            // 底色一变，整套前景色（顶栏、按钮、进度）都要跟着换，只能重建页面。
-            // 其余项都只重排正文，所以这一个开关允许重建。
-            save()
-            showReader(info, index, text, src)
-        }
-        slider(col, "亮度", 0.15f, 1f, 17, ReaderUi.bright,
-            { "${(it * 100).toInt()}%" }) {
-            // 与底栏亮度滑条同源：手动改亮度就退出跟随系统。
-            ReaderUi.bright = it
-            ReaderUi.brightAuto = false
-        }
-        seg(col, "护眼", listOf("关" to false as Any, "开" to true),
-            { ReaderUi.eyeCare as Any }) { ReaderUi.eyeCare = it as Boolean; save(); showReader(info, index, text, src) }
-        slider(col, "强度", 0f, 2f, 2, ReaderUi.eyeLevel.toFloat(),
-            { listOf("弱", "中", "强")[it.toInt().coerceIn(0, 2)] }) {
-            ReaderUi.eyeLevel = it.toInt()
-        }
-        // 原名「夜间」，做的其实是「按钟点自动开护眼」，与背景深浅无关，改名字以免误读。
-        seg(col, "护眼夜间", listOf("关" to false as Any, "开" to true),
-            { ReaderUi.eyeAuto as Any }) { ReaderUi.eyeAuto = it as Boolean }
-        // 翻页动画：legado 放在 GlobalThemePage（`page_anim`），两档（滚一屏 / 覆盖；
-        // 仿真在手表上不必）。只影响章内翻屏，跳章仍是瞬间换页。
-        seg(col, "翻页", listOf("滚一屏" to 0 as Any, "覆盖" to 1),
-            { ReaderUi.pageAnim as Any }) { ReaderUi.pageAnim = it as Int }
-        return col
-    }
-
-    // ── 菜单：legado SystemMenuPage（菜单/底栏长什么样）────
-    /**
-     * legado 的「菜单系统」页管的是菜单本身的形态：栏位布局、图标风格、底栏按钮、
-     * 徽标。手表上能落地的只有两项：工具格放哪些按钮、书签徽标显不显示。
-     * 背景模糊、液态玻璃那些要 RenderEffect，不在手搓流水线里。
-     */
-    fun buildMenu(): View {
-        val col = Md3.column(this)
-        col.addView(Widgets.sectionLabel(this, "底栏"))
-        col.addView(
-            Widgets.listItem(this, "工具格按钮",
-                ReaderUi.tools.joinToString(" · ") { readerToolTitle(it) },
-                twoLine = true, onClick = { showToolsDialog(info, index, text, src) }),
-            Md3.lpDp(this, null, Md3.ITEM_TALL),
-        )
-        // 徽标：开时本章有书签就把顶栏 ⋮ 染成主色（legado 的 bookmarkBadge）。
-        // 染色在建顶栏时定下，所以这一个开关仍然重建页面。
-        seg(col, "徽标", listOf("隐藏" to false as Any, "显示" to true),
-            { ReaderUi.badgeOn as Any }) {
-            ReaderUi.badgeOn = it as Boolean
-            save()
-            showReader(info, index, text, src)
-        }
-        return col
-    }
-
-    // ── 更多：legado MoreConfigSheet 里手表用得上的那几项 ────
-    fun buildMore(): View {
-        val col = Md3.column(this)
-        seg(col, "常亮", listOf("关" to false as Any, "开" to true),
-            { ReaderUi.keepOn as Any }) { ReaderUi.keepOn = it as Boolean }
-        // 自动翻页间隔：legado 的 autoReadSpeed（手机 1–120），手表 1–60 够用。
-        slider(col, "自动翻页", 1f, 60f, 59, ReaderUi.autoPageSec.toFloat(),
-            { "${it.toInt()} s" }) { ReaderUi.autoPageSec = it.toInt().coerceIn(1, 60) }
-        // 恢复默认：正文各项回出厂值。书源与进度不动，只动排版。
-        val reset = Md3.text(this, "恢复默认排版", Md3.FS_SM, Md3.onSurfaceVariant).apply {
-            gravity = Gravity.CENTER
-            isClickable = true
-            background = Md3.ripple(this@showReaderSettings, Color.TRANSPARENT,
-                Md3.dp(this@showReaderSettings, 13).toFloat(), Md3.outlineVariant)
-            setOnClickListener {
-                readerSize = Md3.FS_READ
-                readerSpacing = 1.75f
-                ReaderUi.paraLevel = 0
-                ReaderUi.indentLevel = 0
-                ReaderUi.letterEm = 0f
-                ReaderUi.weightLevel = 0
-                ReaderUi.italic = false
-                ReaderUi.justify = true
-                ReaderUi.titleMode = 0
-                ReaderUi.titleAdd = 2
-                ReaderUi.titleBold = true
-                ReaderUi.titleGap = 1
-                ReaderUi.marginLevel = 1
-                ReaderUi.bright = ReaderStyle.BRIGHT_MID
-                save()
-                rebuild()
-                toast("排版已恢复默认")
-            }
-        }
-        col.addView(reset, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, 30)).apply {
-            topMargin = Md3.dp(this@showReaderSettings, 4)
-        })
-        return col
-    }
-
-    // 分段顺序照 legado：外观（GlobalThemePage）→ 版式（TypographyPage 的正文 / 标题 /
-    // 页眉页脚 / 边距）→ 杂项（SystemMenuPage + MoreConfigSheet 里手表用得上的）。
-    fun buildAll(): View {
-        val col = Md3.column(this)
-        col.addView(Widgets.sectionLabel(this, "外观"))
-        col.addView(buildTheme())
-        col.addView(buildInfo())
-        col.addView(Widgets.sectionLabel(this, "菜单与杂项"))
-        col.addView(buildMenu())
-        col.addView(buildMore())
-        return col
-    }
-
-    rebuild = {
-        refreshers = emptyList()
-        page.removeAllViews()
-        page.addView(buildAll())
-        refreshers.forEach { r -> r() }
-    }
-
-    // 内容区 120 dp（原 96 dp 一屏两行多，分段之后要能一次看见一整段）。
-    // 189×248 的预算：内边距 16×2 + 标题 28 + 间距 12 + 内容 120 + 按钮 40 = 232 dp，留 16 dp 余量。
-    val holder = FrameLayout(this)
-    holder.addView(page, ViewGroup.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, 120)))
-
-    // 关窗不再重建页面：设置已经即时套在正文上了，重建只会把滚动位置打回章首。
-    val dialog = Widgets.md3Dialog(this, "阅读设置", content = holder,
-        confirm = null, dismiss = "完成")
-    dialog.show()
-    // 首绘在 show 之后：滑杆要量宽，视图得已经挂上窗。
-    rebuild()
 }
