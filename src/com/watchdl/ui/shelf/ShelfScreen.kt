@@ -12,6 +12,7 @@ import android.widget.TextView
 import com.watchdl.MainActivity
 import com.watchdl.core.*
 import com.watchdl.ui.attachTabs
+import com.watchdl.ui.reader.preview
 import com.watchdl.ui.my.showCache
 import com.watchdl.ui.my.showExportList
 import com.watchdl.ui.my.showLogs
@@ -655,10 +656,30 @@ internal fun MainActivity.setShelfNewCount(bookId: String, n: Int) {
         .putInt("new_$bookId", n.coerceAtLeast(0)).apply()
 }
 
-/** 点卡片进目录。顺手清掉新章圆点 —— legado 翻开书也清 `lastCheckCount`。 */
+/** 点卡片直接进正文。顺手清掉新章圆点 —— legado 翻开书也清 `lastCheckCount`。 */
 private fun MainActivity.openShelfBook(bookId: String, name: String, author: String) {
     if (shelfNewCount(bookId) > 0) setShelfNewCount(bookId, 0)
-    openBook(bookId, name, author)
+    readShelfBook(bookId, name, author)
+}
+
+/**
+ * 点书架进正文，照 legado：`onOpenBookshelfBook` 直接 `MainRouteReadBook`，
+ * 中间没有目录、也没有书详情。
+ *
+ * 章节表在 job.json 里（restoreLight 只读它），从上次读到的章续上。
+ * 还没取过目录的书没有正文可读，退回旧行为进目录去取。
+ *
+ * 返回落点交给 [com.watchdl.ui.reader.ReaderUi.fromShelf]：从书架进来的退回书架，
+ * 从目录进来的退回目录，不再一律跳目录。
+ */
+internal fun MainActivity.readShelfBook(bookId: String, name: String, author: String) {
+    val job = Downloader.restoreLight(jobsStore(), bookId)
+    if (job == null || job.chapters.isEmpty()) { openBook(bookId, name, author); return }
+    val info = BookInfo(bookId, job.name.ifBlank { name }, job.author.ifBlank { author }, job.chapters)
+    val at = readProgress(bookId).coerceIn(0, job.chapters.size - 1)
+    com.watchdl.ui.reader.ReaderUi.fromShelf = true
+    rememberReturn()
+    preview(info, at)
 }
 
 // ══════════════════ 布局设置 ══════════════════

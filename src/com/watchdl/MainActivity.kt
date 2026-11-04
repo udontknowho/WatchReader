@@ -715,6 +715,8 @@ class MainActivity : Activity() {
 
     /** ③ 目录 + 下载。 */
     internal fun showToc(info: BookInfo, src: BookSource? = null) {
+        // 到这一步说明是「目录 → 阅读」这条路，返回落点回到目录。
+        com.watchdl.ui.reader.ReaderUi.fromShelf = false
         // 源跟着屏幕走：预览/下载要从同一个源取正文，否则多源下会串源。
         val useSrc = src ?: tocSrc
         tocSrc = useSrc
