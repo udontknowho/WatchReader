@@ -5,6 +5,8 @@ import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.watchdl.CROWN_STEP_MAX
+import com.watchdl.CROWN_STEP_MIN
 import com.watchdl.MainActivity
 import com.watchdl.core.DevLog
 import com.watchdl.core.Palette
@@ -286,8 +288,10 @@ private fun MainActivity.settingsRead(col: LinearLayout) {
  * 不套 legado 的列表形态：两个滑杆本身已经是最短路径。
  */
 private fun MainActivity.settingsCrown(col: LinearLayout) {
-    col.addView(Widgets.sliderRow(this, "每格位移", 20f, 200f, crownStep, 0,
-        { "%d px".format(it.toInt()) }) { v ->
+    // 0–30 px。原来 20–200：上限 200 意味着轻转一格就过半屏，下限 20 实测仍然偏快。
+    // 现在整条都在可用区内，按 1 px 取档。0 是“表冠不滚动”，也留着 —— 有人就只用触摸。
+    col.addView(Widgets.sliderRow(this, "每格位移", CROWN_STEP_MIN, CROWN_STEP_MAX, crownStep,
+        30, { "%d px".format(it.toInt()) }) { v ->
         crownStep = v
         saveCrownPrefs()
     }, LinearLayout.LayoutParams(

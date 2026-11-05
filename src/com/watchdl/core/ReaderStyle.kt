@@ -8,6 +8,15 @@ package com.watchdl.core
  */
 object ReaderStyle {
 
+    /**
+     * 一屏滚动的基准时长（ms）。
+     *
+     * legado 的手机基准是 360 ms（`ReaderPageTurnSpeed.kt:41`），照搬到 248 dp 的表屏
+     * 上就显得拖：一屏才十来行，眼扫完动画还在跑。240 ms 是实测“跟手但不跳”的值，
+     * 与覆盖翻页的同档 220 ms（`COVER_MS`）接近。
+     */
+    const val PAGE_BASE_MS = 240L
+
     // ── 亮度：legado 是 0–100 滑杆，手表屏只够三档 ──────────
     const val BRIGHT_DIM = 0.35f
     const val BRIGHT_MID = 0.6f
@@ -137,13 +146,14 @@ object ReaderStyle {
     /**
      * 一屏滚动要花多少毫秒。
      *
-     * 照 legado 的「360 × 距离 / 视口」（`ReaderScrollState.kt:83-91`，基准常量
-     * `BASE_DURATION_MILLIS = 360`，见 `core/transition/ReaderPageTurnSpeed.kt:41`）。
+     * 照 legado 的「基准 × 距离 / 视口」（`ReaderScrollState.kt:83-91`，
+     * `core/transition/ReaderPageTurnSpeed.kt:41`）。基准从 legado 的 360 ms 降到
+     * [PAGE_BASE_MS]：表屏只有 248 dp，一屏十来行，眼扫完了动画还在跑就显得拖。
      * 下限 1 ms：距离为 0 时不能让动画库收到 0 时长。
      */
-    fun pageDuration(distancePx: Int, viewportPx: Int): Long {
+    fun pageDuration(distancePx: Int, viewportPx: Int, base: Long = PAGE_BASE_MS): Long {
         if (viewportPx <= 0) return 1L
-        return (360L * kotlin.math.abs(distancePx) / viewportPx).coerceIn(1L, 360L)
+        return (base * kotlin.math.abs(distancePx) / viewportPx).coerceIn(1L, base)
     }
 
     /**

@@ -531,7 +531,16 @@ internal fun MainActivity.showReader(
         } else nextChapter(info, index)
     }
 
-    /** 平滑滚一屏。步距按行算，到章末 / 章首才换章。 */
+    /**
+     * 平滑滚一屏。步距按行算，到章末 / 章首才换章。
+     *
+     * 章末会让下一章的开头接在同一屏（拼接块 [tvNext]），所以滚动内容里有**两套行号**：
+     * tv 是本章，tvNext 是下一章开头。两块用的是同一条 [styleBody]，但 layout 互相独立。
+     * 以前一律用本章的 layout 换算：一旦滚进拼接块，`getLineForVertical` 拿到越界偏移
+     * 会夹到本章最后一行，落点跑到当前视口上方 —— 点下半屏变成往回弹，而且永远
+     * 到不了 `from >= limit` 的换章分支，人就被卡在拼接块里出不去。
+     * 现在按“视口顶落在哪一块”分别算，走出边界才交接。
+     */
     fun scrollPage(forward: Boolean) {
         val limit = scrollLimit(body)
         val from = body.scrollY
@@ -539,17 +548,41 @@ internal fun MainActivity.showReader(
         if (forward && from >= limit) { toNext(); return }
         if (!forward && from <= 0) { prevChapter(info, index, atEnd = true); return }
         val vp = (body.height - body.paddingTop - body.paddingBottom).coerceAtLeast(1)
-        val layout = tv.layout
-        val target = if (layout == null) {
-            // 刚换章那一帧还没排版：退回整屏，至少这一下是动的。
-            (if (forward) from + vp else from - vp).coerceIn(0, limit)
-        } else {
-            // 正文行顶 = 正文控件在滚动内容里的顶边 + 自身 paddingTop，与章内查找同一套算法。
-            val textTop = childTopIn(body, tv) + tv.paddingTop
-            val perPage = (vp / tv.lineHeight.coerceAtLeast(1)).coerceAtLeast(2)
-            val first = layout.getLineForVertical((from - textTop).coerceAtLeast(0))
+
+        // 两块的行顶：控件在滚动内容里的顶边 + 自身 paddingTop，与章内查找同一套算法。
+        val mainTop = childTopIn(body, tv) + tv.paddingTop
+        val nx = tvNext
+        val nxTop = if (nx == null) 0 else childTopIn(body, nx) + nx.paddingTop
+
+        /** 在 [layout] 里按一屏行走，返回落点 y；[top] 是这一块的行顶。未排版时给 null。 */
+        fun stepIn(layout: android.text.Layout?, top: Int, linePx: Int): Int? {
+            if (layout == null || linePx <= 0) return null
+            val perPage = (vp / linePx).coerceAtLeast(2)
+            val first = layout.getLineForVertical((from - top).coerceAtLeast(0))
             val line = ReaderStyle.pageFirstLine(first, perPage, layout.lineCount, forward)
-            (textTop + layout.getLineTop(line)).coerceIn(0, limit)
+            return top + layout.getLineTop(line)
+        }
+
+        val target = if (nx != null && from >= nxTop) {
+            // 视口已经在下一章的开头里：按拼接块自己的行号走。
+            val t = stepIn(nx.layout, nxTop, nx.lineHeight)
+            when {
+                // 走到拼接块末尾：交给换章，新页落在预览结束处（版式相同，接着读）。
+                t == null || (forward && t <= from) -> { toNext(); return }
+                // 往回退到拼接块首行之外：退回本章末屏，不在缝隙里卡住。
+                !forward && t <= nxTop -> mainTop + (tv.layout?.lastLineTop() ?: 0)
+                else -> t.coerceIn(nxTop, limit)
+            }
+        } else {
+            val t = stepIn(tv.layout, mainTop, tv.lineHeight)
+            when {
+                // 刚换章那一帧还没排版：退回整屏，至少这一下是动的。
+                t == null -> (if (forward) from + vp else from - vp).coerceIn(0, limit)
+                // 本章读完但下面还接着下一章开头：接着滚进拼接块，不整章跳过去。
+                forward && t <= from && nx != null -> nxTop
+                forward && t <= from -> { toNext(); return }
+                else -> t.coerceIn(0, limit)
+            }
         }
         if (target == from) {
             // 只剩不足一行可见：当作到边界。
@@ -1528,10 +1561,18 @@ private fun bodyText(s: String, isLocal: Boolean): String = if (isLocal) {
  * ScrollView 的滚动范围是「子控件高 + 上下内边距 − 视口高」（clipToPadding=false 时
  * 内边距也算在内容里），不是简单的「子控件高 − 视口高」。
  */
-private fun scrollLimit(body: ScrollView): Int {
-    val child = body.getChildAt(0) ?: return 0
+private fun scrollLimit(body: ScrollView): Int {    val child = body.getChildAt(0) ?: return 0
     return (child.height - body.height + body.paddingTop + body.paddingBottom).coerceAtLeast(0)
 }
+
+/**
+ * 一段已排版的文字里最后一行的行顶。未排版（[android.text.Layout] 为空）时由调用方处理。
+ *
+ * 拼接块往回退时要落回本章末屏：直接拿最后一行的行顶，比“当前视口减一屏”稳 ——
+ * 后者会被本章正文比拼接块短这一事实带偏。
+ */
+private fun android.text.Layout.lastLineTop(): Int =
+    getLineTop((lineCount - 1).coerceAtLeast(0))
 
 /**
  * [v] 顶边在 [body] 滚动内容坐标系里的 y。

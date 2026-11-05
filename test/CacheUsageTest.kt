@@ -490,8 +490,9 @@ fun main() {
     check("不足一屏时就到末尾行", ReaderStyle.pageFirstLine(0, 10, 5, true) == 4)
     check("一屏只有一行也要走一行", ReaderStyle.pageFirstLine(0, 1, 100, true) == 1)
     check("没有行就不动", ReaderStyle.pageFirstLine(0, 10, 0, true) == 0)
-    check("翻屏时长按距离比例", ReaderStyle.pageDuration(1000, 1000) == 360L &&
-        ReaderStyle.pageDuration(500, 1000) == 180L)
+    check("翻屏时长按距离比例", ReaderStyle.pageDuration(1000, 1000) == ReaderStyle.PAGE_BASE_MS &&
+        ReaderStyle.pageDuration(500, 1000) == ReaderStyle.PAGE_BASE_MS / 2)
+    check("翻屏基准与表屏相符", ReaderStyle.PAGE_BASE_MS == 240L)
     check("零距离与零视口都给 1 ms", ReaderStyle.pageDuration(0, 1000) == 1L &&
         ReaderStyle.pageDuration(300, 0) == 1L)
     check("下一处首尾循环", ReaderStyle.step(2, 1, 3) == 0)

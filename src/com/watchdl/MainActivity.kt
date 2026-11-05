@@ -35,6 +35,10 @@ import java.util.Date
 import java.util.Locale
 import kotlin.concurrent.thread
 
+/** 表冠每格位移的可调区间（px）。设置页滑杆与读档夹取共用同一对数。 */
+internal const val CROWN_STEP_MIN = 0f
+internal const val CROWN_STEP_MAX = 30f
+
 /**
  * 主界面。按 `ui/md3-final.html` 的定稿实现（189 × 248 dp）。
  *
@@ -306,8 +310,14 @@ class MainActivity : Activity() {
     internal var readerOffset = 0
     internal var scrollSave: Runnable? = null
 
-    /** 表冠灵敏度：每格位移（px）。表冠一格系统只给 1 个单位，必须放大才看得出。 */
-    internal var crownStep = 60f
+    /**
+     * 表冠灵敏度：每格位移（px）。表冠一格系统只给 1 个单位，必须放大才看得出。
+     *
+     * 默认给 12：屏是 378 × 496 px、正文视口约 432 px，12 px 一格约 2.8% 一屏，
+     * 一次轻转（系统常拆成 5–10 个事件）也就十几到二十几个百分点，不至于一滑一大截。
+     * 上限 30 是实测上限，再往上轻转一下就过半屏，没有可用区间。
+     */
+    internal var crownStep = 12f
 
     /** 表冠跟手时长（ms）。越短越跟手，太短会抖。 */
     internal var crownGlide = 50
@@ -337,8 +347,10 @@ class MainActivity : Activity() {
         readerSize = p.getFloat("size", Md3.FS_READ)
         readerSpacing = p.getFloat("spacing", 1.75f)
         readerBackground = p.getInt("bg", Color.rgb(20, 18, 24))
-        crownStep = p.getFloat("crownStep", 60f)
-        crownGlide = p.getInt("crownGlide", 50)
+        // 旧存档里可能是 60 甚至更大（那时滑杆上限 200）：夹回 0–30，
+        // 否则滑杆位置会顶在右端、显示值与实际手感对不上。
+        crownStep = p.getFloat("crownStep", 12f).coerceIn(CROWN_STEP_MIN, CROWN_STEP_MAX)
+        crownGlide = p.getInt("crownGlide", 50).coerceIn(0, 200)
     }
 
     /**
