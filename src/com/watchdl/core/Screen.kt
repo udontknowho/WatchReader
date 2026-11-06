@@ -94,20 +94,6 @@ sealed interface Screen {
      */
     data class Swap(val info: BookInfo, val src: BookSource? = null) : Screen
     /**
-     * 全文搜索：搜已下载正文（#23）。
-     *
-     * [query] 空串表示还没输入，进屏先要关键词；[hits] 是扫到的命中，
-     * [scanned] 是已扫过的书数，[done] 区分「扫完了没命中」和「还没开始扫」。
-     */
-    data class Find(
-        val query: String = "",
-        val hits: List<FindText.Hit> = emptyList(),
-        val scanned: Int = 0,
-        val done: Boolean = false,
-        // 正则开关要跟着屏一起重放：返回这一屏时得按原来的匹配方式重新扫。
-        val useRegex: Boolean = false,
-    ) : Screen
-    /**
      * 阅读记录（#25）：不分书，把所有读过的书按最后阅读时间排一屏。
      *
      * 不带数据 —— 进度在 SharedPreferences 里，每次进屏现读，读一章回来就是新的。
@@ -131,13 +117,6 @@ sealed interface Screen {
      * 不带数据 —— 规则存在 replace.json，每次进屏现读，改完回来不会看到旧值。
      */
     object Replace : Screen
-    /**
-     * 导出书单（#29）：把书架上的书列成一份纯文本清单。
-     *
-     * 不带数据 —— 「最近生成的是哪份」按 export/ 里最新的 `书单-*` 文件现算，
-     * 不另存状态：屏被重建（进程回收、配置变更）后照样能显示对。
-     */
-    object ExportList : Screen
     /**
      * 日志（#30）：开关状态、dev.log 体积与行数、最后 40 行。
      *
@@ -187,14 +166,11 @@ fun screenId(s: Screen?): String = when (s) {
     Screen.Cache -> "cache"
     Screen.Files -> "files"
     Screen.Replace -> "replace"
-    Screen.ExportList -> "exportList"
     Screen.Logs -> "logs"
     Screen.About -> "about"
     is Screen.Swap -> "swap:" + s.info.bookId.ifBlank { s.info.name + s.info.author }
     is Screen.Discover -> "discover:${s.rankKey}"
     is Screen.Market -> "market:${s.page}"
-    // 只比关键词，不比结果：边扫边上屏时结果一直在变，带上结果回调永远认不出自己。
-    is Screen.Find -> "find:${s.query}"
     // 搜索命中时 bookId 可能为空（个别源不返回），退回书名+作者做身份。
     is Screen.Detail -> "detail:" + s.info.bookId.ifBlank { s.info.name + s.info.author }
 }

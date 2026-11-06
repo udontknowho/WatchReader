@@ -1,5 +1,6 @@
 package com.watchdl.ui
 
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ScrollView
@@ -12,37 +13,118 @@ import com.watchdl.ui.theme.Widgets
 /**
  * 底部三栏，照 legado `ui/main/MainDestination`：书架 / 发现 / 我的。
  *
- * legado 是一个 Scaffold 共用底部导航，主体按当前栏切换。我们的每一屏都是
- * `root.removeAllViews()` 后现搭，所以底部导航就在三屏各自收尾时挂上去 ——
- * 每屏加一行 `attachTabs(n)`，比再包一层容器改动小，也不会打乱各屏自己的滚动区。
+ * 2026-11-05 改版（用户判词）：底栏 64 dp 太大、三栏要能滑动切。现在底栏只剩 8 dp 的
+ * 三个指示点，主入口是左右滑动；顶栏同时接上自动收起（25 dp 下滚消失、上滚拉回）。
  *
  * 参数是当前栏下标：0 书架、1 发现、2 我的。
  */
 internal fun MainActivity.attachTabs(active: Int) {
-    root.addView(Widgets.navBar(this, listOf(
-        Triple("shelf", "书架", active == 0),
-        Triple("explore", "发现", active == 1),
-        Triple("mine", "我的", active == 2),
-    )) { i ->
+    val rootTab = isRootTabScreen()
+    // 顶栏自动收起只挂三根屏：子页（书源市场、榜单内容）的顶栏带返回箭头，
+    // 收起来会把唯一出口一起收走。
+    if (rootTab) Widgets.autoHideHeader(this, root)
+
+    root.addView(Widgets.navDots(this, listOf("书架", "发现", "我的"), active) { i ->
         when (i) {
-            // 重复点当前栏：legado `handleMainDestinationClick` 只给书架做
-            // 「回到顶部」（`requestBookshelfScrollToTop`），发现 / 我的 再点无动作。
-            // 书架滚远了点底栏回顶，是这块屏上唯一一个不用转表冠就能回到开头的手势。
+            // 重复点当前栏：书架回到顶部，发现 / 我的再点无动作（legado 同款）。
             0 -> if (active == 0) scrollToTop(root) else showShelf()
             1 -> if (active != 1) showDiscover()
             else -> if (active != 2) showMy()
         }
     })
+    // 横滑只在三根屏上生效；子页返回 -1，手势直接放行给子控件。
+    tabActive = if (rootTab) active else -1
 }
 
 /** 把屏里第一个纵向滚动区拉回顶部。找不到就不动 —— 空屏也是合法状态。 */
 private fun scrollToTop(from: View) {
-    firstScrollView(from)?.smoothScrollTo(0, 0)
+    Widgets.firstScroll(from)?.smoothScrollTo(0, 0)
 }
 
-private fun firstScrollView(v: View): ScrollView? {
-    if (v is ScrollView) return v
-    if (v !is ViewGroup) return null
-    for (i in 0 until v.childCount) firstScrollView(v.getChildAt(i))?.let { return it }
-    return null
+// ══════════════════ 左右滑动切栏 ══════════════════
+
+/**
+ * 跟手横向滑动：拖动时整屏跟着手指走，松手按位移决定切栏还是弹回。
+ *
+ * 为什么不改成常驻三页的 ViewPager：三屏各自 `root.removeAllViews()` 现搭，
+ * 改成常驻要重写每屏的搭建时机与返回栈。这里用「拖动位移 + 换屏后从另一侧滑入」
+ * 近似同一手感，改动只在手势与收尾动画两处。
+ *
+ * 松手阈值取屏宽 1/3。位移不到就弹回，不让「轻轻一划」把屏换掉。
+ */
+private var swiping = false
+private var claimed = false
+private var gaveUp = false
+private var startX = 0f
+private var startY = 0f
+
+internal fun MainActivity.handleTabSwipe(ev: MotionEvent): Boolean {
+    val active = tabActive
+    if (active !in 0..2) return false
+    val slop = 12f
+    when (ev.actionMasked) {
+        MotionEvent.ACTION_DOWN -> {
+            swiping = true
+            claimed = false
+            gaveUp = false
+            startX = ev.rawX
+            startY = ev.rawY
+        }
+
+        MotionEvent.ACTION_MOVE -> {
+            if (!swiping || gaveUp) return false
+            val dx = ev.rawX - startX
+            val dy = ev.rawY - startY
+            if (!claimed) {
+                // 先判方向：竖向占优就彻底让开，别跟列表抢纵向滚动。
+                if (Math.abs(dy) > slop && Math.abs(dy) > Math.abs(dx)) {
+                    gaveUp = true
+                    return false
+                }
+                if (Math.abs(dx) <= slop || Math.abs(dx) <= Math.abs(dy) * 1.6f) return false
+                claimed = true
+            }
+            // 到头了给阻尼，拉不动太多 —— 否则第一栏往右滑会露出整片空白。
+            var d = dx
+            if ((active == 0 && d > 0) || (active == 2 && d < 0)) d *= 0.3f
+            root.translationX = d
+            return true
+        }
+
+        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+            if (!swiping) return false
+            swiping = false
+            if (!claimed) return false
+            settle(active, ev.actionMasked == MotionEvent.ACTION_CANCEL)
+            return true
+        }
+    }
+    return false
+}
+
+/** 松手后的收尾：够远就滑出去换屏，不够远弹回。 */
+private fun MainActivity.settle(active: Int, cancelled: Boolean) {
+    val w = resources.displayMetrics.widthPixels.toFloat()
+    val dx = root.translationX
+    val target = when {
+        cancelled -> -1
+        dx <= -w * 0.33f -> active + 1
+        dx >= w * 0.33f -> active - 1
+        else -> -1
+    }
+    if (target !in 0..2) {
+        root.animate().translationX(0f).setDuration(160).start()
+        return
+    }
+    val dir = if (target > active) -1f else 1f
+    root.animate().translationX(dir * w).setDuration(150).withEndAction {
+        when (target) {
+            0 -> showShelf()
+            1 -> showDiscover()
+            else -> showMy()
+        }
+        // 新屏从另一侧滑进来，两段动画接上才像一页推一页。
+        root.translationX = -dir * w
+        root.animate().translationX(0f).setDuration(200).start()
+    }.start()
 }

@@ -740,12 +740,27 @@ internal fun MainActivity.showDiscover(rankKey: String = "") {
     for (g in groups) {
         val group = all.filter { it.site == g.site && it.gender == g.gender }
         if (group.isEmpty()) continue
-        col.addView(Widgets.groupCard(this, g.title) { card ->
-            for (r in group) {
-                card.addView(Widgets.groupItem(this, r.listLabel(),
-                    onClick = { showDiscover(r.key) }))
-            }
+        // 分组标题降成小字说明，不再画卡片：卡片会再吃掉一圈内外边距。
+        col.addView(Md3.text(this, g.title, Md3.FS_SM, Md3.onSurfaceVariant).apply {
+            setPadding(Md3.dp(this@showDiscover, 4), Md3.dp(this@showDiscover, 6),
+                0, Md3.dp(this@showDiscover, 2))
         })
+        // 两列。一列时 20 个榜排下来是 20 × 48 dp = 960 dp，四屏才能到底；
+        // 两列 × 32 dp 压到 341 dp，一屏半就完。
+        group.chunked(2).forEach { pair ->
+            val row = Md3.row(this)
+            pair.forEachIndexed { i, r ->
+                row.addView(rankChip(r), LinearLayout.LayoutParams(
+                    0, Md3.dp(this, 32), 1f).apply {
+                    if (i > 0) leftMargin = Md3.dp(this@showDiscover, 4)
+                    topMargin = Md3.dp(this@showDiscover, 4)
+                })
+            }
+            // 落单的最后一格补一个空位，撑住半列宽度，不让它变成整行宽。
+            if (pair.size == 1) row.addView(View(this), LinearLayout.LayoutParams(
+                0, Md3.dp(this, 1), 1f).apply { leftMargin = Md3.dp(this@showDiscover, 4) })
+            col.addView(row)
+        }
     }
     if (col.childCount == 0) {
         // legado `explore_empty`：「当前没有发现源！」。我们没有发现源，只有榜。
@@ -845,6 +860,22 @@ private fun MainActivity.endOfListNote(): TextView =
  * 内置名带前缀：番茄是「西方奇幻 · 阅读」，起点是「起点女频月票榜」。
  * 分组标题已经写明站点与频道，行里只留分类名，189dp 的屏才放得下。
  */
+/**
+ * 发现页的一个榜：32 dp 高的两列按钮。
+ *
+ * 文字 13 sp 单行截断 —— 榜名最长的「西方奇幻」四个字，两列各 76 dp 放得下。
+ */
+private fun MainActivity.rankChip(r: RankConfig.Rank): View =
+    Md3.text(this, r.listLabel(), 13f, Md3.onSurface).apply {
+        gravity = Gravity.CENTER
+        maxLines = 1
+        ellipsize = android.text.TextUtils.TruncateAt.END
+        background = Md3.ripple(this@rankChip, Md3.surface2, 10f)
+        isClickable = true
+        contentDescription = r.name
+        setOnClickListener { showDiscover(r.key) }
+    }
+
 private fun RankConfig.Rank.listLabel(): String =
     if (site == RankConfig.Site.QIDIAN) name.removePrefix("起点").removePrefix("女频")
     else name.substringBefore(" · ")

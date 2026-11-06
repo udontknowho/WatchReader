@@ -30,25 +30,6 @@ fun shelfSubtitle(bookCount: Int, readingCount: Int): String {
     return "$n 本 · 在读 $m"
 }
 
-/** 选择模式标题，照 legado `bookshelf_selected_count`「已选%1$d本」的措辞。 */
-fun shelfSelectTitle(count: Int): String = "已选 ${count.coerceAtLeast(0)}"
-
-/** 选择模式副标题，照 legado `bookshelf_total_count`「共%1$d本」。 */
-fun shelfSelectSubtitle(total: Int): String = "共 ${total.coerceAtLeast(0)} 本"
-
-/**
- * 删除确认的正文。
- *
- * legado 的 DeleteBooksConfirmDialog 标题是「删除选中」、正文是「已选 N 本」，
- * 具体删什么交给下面那排勾选。我们没有「删源文件」的分叉（正文就是源），
- * 所以把后果直接写进正文 —— 手表上一句话讲不清后果，用户就真会误删。
- */
-fun shelfDeleteMessage(names: List<String>): String = when (names.size) {
-    0 -> "没有选中任何书"
-    1 -> "删除《${names[0]}》的缓存与目录，不可恢复"
-    else -> "删除 ${names.size} 本书的缓存与目录，不可恢复"
-}
-
 /**
  * 封面左下角标签：书源名截到 4 字，没有书源给「本地」。
  *
@@ -59,32 +40,6 @@ fun shelfDeleteMessage(names: List<String>): String = when (names.size) {
 fun shelfSourceTag(sourceName: String?): String {
     val s = sourceName?.trim().orEmpty()
     return if (s.isEmpty()) "本地" else s.take(4)
-}
-
-/**
- * 点一下卡片：已在选中集合里就移出，否则加入。返回操作后是否仍选中。
- *
- * 集合用 LinkedHashSet：腿上的顺序按点击先后，删除确认里列书名时顺序稳定。
- */
-fun shelfToggle(selected: MutableSet<String>, bookId: String): Boolean =
-    if (selected.remove(bookId)) false else { selected.add(bookId); true }
-
-/**
- * 全选 / 全不选。传进来的 [all] 是当前架上的全部 bookId（不含搜索过滤）。
- * 返回操作后是否变成「全选」状态 —— 图标据此在「全选 / 全不选」之间切。
- */
-fun shelfSelectAll(selected: MutableSet<String>, all: Collection<String>): Boolean {
-    val wantAll = !(all.isNotEmpty() && selected.containsAll(all))
-    selected.clear()
-    if (wantAll) selected.addAll(all)
-    return wantAll
-}
-
-/** 清掉已经不在架上的选中项（删完一本书后集合要跟着收）。返回是否还有选中。 */
-fun shelfPruneSelection(selected: MutableSet<String>, alive: Collection<String>): Boolean {
-    val keep = alive.toSet()
-    selected.retainAll(keep)
-    return selected.isNotEmpty()
 }
 
 // ══════════════════ 排序（legado BookshelfConfigSheet 的「排序 / 顺序」） ══════════════════

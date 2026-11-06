@@ -1,8 +1,4 @@
 import com.watchdl.core.BookHit
-import com.watchdl.core.FindSeg
-import com.watchdl.core.findHighlight
-import com.watchdl.core.findMatcher
-import com.watchdl.core.findRegexUsable
 import com.watchdl.core.Bookmark
 import com.watchdl.core.markChapterLabel
 import com.watchdl.core.markDeleteMessage
@@ -45,6 +41,7 @@ import com.watchdl.core.ReaderFind
 import com.watchdl.core.ReaderStyle
 import com.watchdl.core.ReplacePrefs
 import com.watchdl.core.ReplaceRule
+import com.watchdl.core.ReplaceRuleStore
 import com.watchdl.core.ReplaceSort
 import com.watchdl.core.replaceApplyOrder
 import com.watchdl.core.replaceDeleteMessage
@@ -83,11 +80,6 @@ import com.watchdl.core.searchRankTier
 import com.watchdl.core.searchRanked
 import com.watchdl.core.searchSourceBadge
 import com.watchdl.core.searchSummaryText
-import com.watchdl.core.shelfDeleteMessage
-import com.watchdl.core.shelfPruneSelection
-import com.watchdl.core.shelfSelectAll
-import com.watchdl.core.shelfSelectSubtitle
-import com.watchdl.core.shelfSelectTitle
 import com.watchdl.core.SourceFilter
 import com.watchdl.core.SourcePrefs
 import com.watchdl.core.SourcePrefsStore
@@ -112,7 +104,6 @@ import com.watchdl.core.sourceToggle
 import com.watchdl.core.sourceToggleSelect
 import com.watchdl.core.shelfSourceTag
 import com.watchdl.core.shelfSubtitle
-import com.watchdl.core.shelfToggle
 import com.watchdl.core.shelfUnreadCount
 import com.watchdl.core.ChapterRef
 import com.watchdl.core.ShelfSort
@@ -232,9 +223,8 @@ fun main() {
         chapterCacheStatusText(ChapterCacheStatus.Cached) == "下载完成" &&
         chapterCacheStatusText(ChapterCacheStatus.NotCached) == "未缓存")
 
-    // 书架卡与选择模式（照 legado-novel `BookItem.kt` 的 leftBottomText、
-    // `BookshelfTopBar` 的编辑态）。
-    println("[书架卡与选择]")
+    // 书架卡（照 legado-novel `BookItem.kt` 的 leftBottomText + titleMaxLines）。
+    println("[书架卡]")
     check("未读 = 总章 - 在读 - 1", shelfUnreadCount(10, 3) == 6)
     check("没记录过（下标 0）→ 总章减 1", shelfUnreadCount(10, 0) == 9)
     check("读到最后一章 → 0", shelfUnreadCount(10, 9) == 0)
@@ -242,22 +232,8 @@ fun main() {
     check("没有章 → 0", shelfUnreadCount(0, 0) == 0)
     check("副标题", shelfSubtitle(12, 3) == "12 本 · 在读 3")
     check("在读数不超总数", shelfSubtitle(3, 9) == "3 本 · 在读 3")
-    check("选择标题照 legado 措辞", shelfSelectTitle(2) == "已选 2")
-    check("选择副标题照 legado 措辞", shelfSelectSubtitle(9) == "共 9 本")
-    check("单本删除文案点名书名",
-        shelfDeleteMessage(listOf("剑来")) == "删除《剑来》的缓存与目录，不可恢复")
-    check("多本删除文案给本数",
-        shelfDeleteMessage(listOf("a", "b", "c")) == "删除 3 本书的缓存与目录，不可恢复")
     check("没有书源给「本地」", shelfSourceTag(null) == "本地" && shelfSourceTag("  ") == "本地")
     check("书源名截到 4 字", shelfSourceTag("番茄小说app") == "番茄小说")
-    val sel = linkedSetOf<String>()
-    check("点一下选中", shelfToggle(sel, "a") && sel.contains("a"))
-    check("再点一下取消", !shelfToggle(sel, "a") && sel.isEmpty())
-    check("全选", shelfSelectAll(sel, listOf("a", "b")) && sel.size == 2)
-    check("再点全选变全不选", !shelfSelectAll(sel, listOf("a", "b")) && sel.isEmpty())
-    sel.addAll(listOf("a", "gone"))
-    check("剔除已不在架上的选中项", shelfPruneSelection(sel, listOf("a")) && sel == setOf("a"))
-    check("选中的都删了 → 该退出选择模式", !shelfPruneSelection(sel, emptyList()))
 
     // 书详情屏（照 legado-novel `ui/book/info/BookInfoScreen.kt` 的
     // `BookInfoSummary` / `BookInfoActions` / `BookInfoIntro`）。
@@ -493,6 +469,16 @@ fun main() {
     check("翻屏时长按距离比例", ReaderStyle.pageDuration(1000, 1000) == ReaderStyle.PAGE_BASE_MS &&
         ReaderStyle.pageDuration(500, 1000) == ReaderStyle.PAGE_BASE_MS / 2)
     check("翻屏基准与表屏相符", ReaderStyle.PAGE_BASE_MS == 240L)
+    check("自定义基准按滑杆值返" ,
+        ReaderStyle.pageDuration(1000, 1000, 400L) == 400L &&
+            ReaderStyle.pageDuration(500, 1000, 400L) == 200L)
+    check("自定义基准仍以它为上限", ReaderStyle.pageDuration(2000, 1000, 400L) == 400L)
+    check("基准夹在可调区间", ReaderStyle.pageBaseClamp(10L) == ReaderStyle.PAGE_BASE_MIN_MS &&
+        ReaderStyle.pageBaseClamp(9999L) == ReaderStyle.PAGE_BASE_MAX_MS &&
+        ReaderStyle.pageBaseClamp(240L) == 240L)
+    check("基准区间能被滑杆整除",
+        (ReaderStyle.PAGE_BASE_MAX_MS - ReaderStyle.PAGE_BASE_MIN_MS) %
+            ReaderStyle.PAGE_BASE_STEP_MS == 0L)
     check("零距离与零视口都给 1 ms", ReaderStyle.pageDuration(0, 1000) == 1L &&
         ReaderStyle.pageDuration(300, 0) == 1L)
     check("下一处首尾循环", ReaderStyle.step(2, 1, 3) == 0)
@@ -602,6 +588,45 @@ fun main() {
         check("删除文案写明找不回来", replaceDeleteMessage(2).contains("找不回来"))
     }
 
+    // ── 内置推荐净化规则（core/ReplaceRules.kt 的 presets）──
+    // 这批正则来自第三方规则集，桌面 JVM 与 Android ICU 的接受度不同。
+    // 这里只断言「能编译、不把干净正文吃光」；具体标点改法写死在规则里，不逐个断言。
+    run {
+        val ps = ReplaceRuleStore.presets()
+        check("推荐规则条数", ps.size == 15)
+        check("推荐规则全部默认启用且只动正文",
+            ps.all { it.enabled && it.scope == "text" && it.isRegex })
+        val compileFail = ps.mapNotNull { r ->
+            if (com.watchdl.core.SafeRegex.compile(r.pattern) == null) r.name else null
+        }
+        check("推荐规则全都能编译", compileFail.isEmpty(), compileFail.joinToString("、"))
+        check("推荐规则名称与模式都不重复",
+            ps.map { it.name to it.pattern }.toSet().size == ps.size)
+
+        // 干净正文：规则不该把它吃掉。排版规则会改标点，所以只看字数不塌。
+        //
+        // 下面统一加 `(?U)`：这批规则是给 Android 写的，ICU 的 `\w` 含汉字；
+        // 桌面 JVM 默认只认 ASCII，不打开这个开关，规则会把整段中文当非词字符删光。
+        // 只影响自检，应用里跑的是原模式（Android 本来就是 Unicode 语义）。
+        fun rx(r: ReplaceRule): Regex? =
+            com.watchdl.core.SafeRegex.compile("(?U)" + r.pattern)
+        val clean = "第十二章 出发\n" +
+            "他的脸色变了变，随即冷笑道：“你以为你赢了？”\n" +
+            "“还没有。”林风答得很平静，他把手中的剑缓缓放回鞘中，然后转身看向身后的众人。\n" +
+            "消息传得很快——三天之内，整个青石镇都知道了这件事。\n" +
+            "夜色渐深，风从山谷里吹出来，带着湿冷的气息，卷起地上的落叶。\n"
+        val out = ps.fold(clean) { t, r -> rx(r)?.replace(t, r.replacement) ?: t }
+        check("推荐规则不吃掉正文", out.length >= clean.length * 7 / 10,
+            "${clean.length} -> ${out.length}")
+        check("推荐规则保住了正文句子", out.contains("你以为你赢了") && out.contains("林风答得很平静"))
+
+        // 广告尾巴：规则集里 #15/#16 就是干这个的。
+        val ad = "正文正文正文。\n（本章完）\n本书由 某某小说网 提供下载，更多精校小说尽在 www.test.com\n"
+        val cleaned = ps.fold(ad) { t, r -> rx(r)?.replace(t, r.replacement) ?: t }
+        check("推荐规则删掉章尾广告", cleaned.contains("正文正文正文") &&
+            !cleaned.contains("www.test.com"), cleaned)
+    }
+
     // ── 书签与阅读记录（core/MarksState.kt）──────────────
     // 书签页与记录页的搜索、排序、多选、文案：两页共用，所以一起断言。
     run {
@@ -664,27 +689,6 @@ fun main() {
         check("记录副标题写明按最近阅读", recordSubtitleText(3) == "共 3 本 · 按最近阅读排列")
         check("删记录写明书还在", recordDeleteMessage(2).contains("书和正文都还在"))
         check("清空记录写明书还在", recordClearMessage().contains("书和正文都还在"))
-        check("字面匹配不分大小写", findMatcher("Abc", false)("xABCy") == listOf(1..3))
-        check("字面匹配找全每一处", findMatcher("a", false)("a|a|a").size == 3)
-        check("空关键词不命中", findMatcher("  ", false)("任何文字").isEmpty())
-        check("正则能命中多段", findMatcher("第\\d+章", true)("第1章与第22章") ==
-            listOf(0..2, 4..7))
-        check("正则不成立退回字面", findMatcher("([", true)("字面([") == listOf(2..3))
-        check("正则可用性判得准", findRegexUsable("第\\d+章") && !findRegexUsable("(["))
-        check("零宽正则不卡死", runCatching { findMatcher("^|\\b", true)("abc") }.isSuccess)
-        check("高亮切出命中段", run {
-            val segs = findHighlight("前言关键词后语", listOf(2..4))
-            segs.size == 3 && segs[1].text == "关键词" && segs[1].hit &&
-                !segs[0].hit && segs[0].text == "前言"
-        })
-        check("高亮合并重叠区间", run {
-            val segs = findHighlight("abcdef", listOf(1..3, 2..4))
-            segs.joinToString("") { it.text } == "abcdef" &&
-                segs.count { it.hit } == 1 && segs.first { it.hit }.text == "bcde"
-        })
-        check("高亮丢掉越界区间", findHighlight("abc", listOf(2..9)).none { it.hit })
-        check("没有命中就是整段", findHighlight("abc", emptyList()) == listOf(FindSeg("abc", false)))
-        check("空文字没有分段", findHighlight("", listOf(0..1)).isEmpty())
     }
 
     // ── 书架排序（legado BookshelfRepository.sortBooks 的四个键）────────────

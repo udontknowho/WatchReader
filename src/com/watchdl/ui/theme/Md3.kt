@@ -106,6 +106,23 @@ object Md3 {
     var TAB_H = 40           // 页签行高（手机档 48）
 
     /**
+     * 主屏顶栏高度。用户判词（2026-11-05）：顶栏太大，压到 25 dp。
+     *
+     * 与 [TAB_H] 分开：TAB_H 是「可选项」行（书源/书签/记录/替换净化的选择条），
+     * 那些行要留 36 dp 的图标槽，压下来点不准；这条只放标题与一两枚动作图标。
+     */
+    var HEADER_H = 25
+
+    /** 底栏指示点条高度。8 dp 是用户定的：再高就白吃正文，再低点按不到。 */
+    var NAV_DOT_H = 8
+
+    /** 指示点直径。3 dp 是实测可用下限，2 dp 在这块屏上圆角看不出来。 */
+    var NAV_DOT = 3f
+
+    /** 指示点间距。 */
+    var NAV_DOT_GAP = 5f
+
+    /**
      * 按屏宽选版面表。必须在建界面前调一次；屏幕尺寸变化时（onConfigurationChanged）重调。
      *
      * 用 screenWidthDp 而不是 smallestScreenWidthDp：手表横过来还是 248dp 宽，
@@ -116,11 +133,17 @@ object Md3 {
         if (w >= 320) {
             NAV = 80
             TAB_H = 48
+            HEADER_H = 34
+            NAV_DOT_H = 12
+            NAV_DOT = 4f
             NAV_IND_W = 64
             PAD = if (w >= 600) 24 else 16
         } else {
             NAV = 64
             TAB_H = 40
+            HEADER_H = 25
+            NAV_DOT_H = 8
+            NAV_DOT = 3f
             NAV_IND_W = 48
             PAD = 16
         }
@@ -222,10 +245,11 @@ object Md3 {
         glyph: String,
         onClick: (() -> Unit)? = null,
         desc: String? = null,
+        size: Int = ICON_ACTION,
     ): View {
         val icon = Icons.name(glyph)
         if (icon != null) {
-            val v = Icons.view(ctx, icon, onSurfaceVariant, ICON_ACTION)
+            val v = Icons.view(ctx, icon, onSurfaceVariant, size)
             // 顶栏只有 TOP_BAR 高，热区横向补到 HIT，纵向就到顶栏高为止。
             v.minimumWidth = HIT
             v.minimumHeight = TOP_BAR

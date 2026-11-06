@@ -254,10 +254,10 @@ private fun readPreview(f: File): PreviewText {
 }
 
 /**
- * 整页文本预览。文件页与导出书单页共用：两边都是「打开一个自己写的文件核对内容」。
+ * 整页文本预览。文件页用它看自己写的文件（json / jsonl / log 等）。
  *
  * legado 的做法是把文件交给系统应用打开（`openFileUri`），手表上没有这样的应用，
- * 只能自己画。@param onBack 回到来处（文件列表或书单列表）。
+ * 只能自己画。@param onBack 回到来处（文件列表）。
  */
 internal fun MainActivity.renderTextPreview(f: File, onBack: () -> Unit) {
     root.removeAllViews()

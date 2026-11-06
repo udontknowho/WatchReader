@@ -14,11 +14,8 @@ import com.watchdl.core.*
 import com.watchdl.ui.attachTabs
 import com.watchdl.ui.reader.preview
 import com.watchdl.ui.my.showCache
-import com.watchdl.ui.my.showExportList
 import com.watchdl.ui.my.showLogs
 import com.watchdl.ui.search.askKeyword
-import com.watchdl.ui.source.showSources
-import com.watchdl.ui.theme.Icons
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
 import java.io.File
@@ -34,15 +31,11 @@ import java.io.File
  */
 
 /**
- * 书架的选择模式状态。
+ * 书架的布局与显示项。
  *
- * 放文件级 object 而不是往 MainActivity 加字段：选择模式只属于这一屏，
- * 它不该跟着 Activity 走一辈子（离开书架再回来要回到干净态）。
+ * 放文件级 object 而不是往 MainActivity 加字段：这些开关只属于这一屏。
  */
 internal object ShelfUi {
-    /** 是否处于多选模式（legado `isEditMode`）。 */
-    var selecting = false
-
     // ── 布局与显示项（legado `BookshelfSettings` 里能落到 189 dp 上的那几条）──
     //
     // 落盘走既有的全局偏好桶 SharedPreferences("reader")：主题、字号、表冠灵敏度
@@ -88,21 +81,6 @@ internal object ShelfUi {
             .putBoolean("shelfShowTag", showTag)
             .putBoolean("shelfShowNew", showNew)
             .apply()
-    }
-
-    /** 选中的 bookId。用 LinkedHashSet：顺序按点击先后，删除确认里列书名才稳定。 */
-    val selected = linkedSetOf<String>()
-
-    /** 进多选模式，并把长按的那本先选上（legado 长按即选中）。 */
-    fun enter(bookId: String) {
-        selecting = true
-        selected.clear()
-        if (bookId.isNotEmpty()) selected.add(bookId)
-    }
-
-    fun exit() {
-        selecting = false
-        selected.clear()
     }
 }
 
@@ -179,7 +157,7 @@ internal fun MainActivity.shelfRows(): List<ShelfRow> {
     }
 }
 
-/** 屏上现有滚动位置。重画同一屏（切选择模式）时要把位置带回去。 */
+/** 屏上现有滚动位置。重画同一屏（改布局、更新目录、删书后）时要把位置带回去。 */
 private fun MainActivity.bodyScrollOf(): Int {
     for (i in 0 until root.childCount) {
         val c = root.getChildAt(i)
@@ -201,7 +179,7 @@ private fun MainActivity.bodyScrollOf(): Int {
 internal fun MainActivity.showShelf(keepScroll: Boolean = false) {
     setScreen(Screen.Shelf)
     ShelfUi.load(this)
-    // 切选择模式会重画整屏；不带回滚动位置，用户在第三屏长按一下就被弹回顶。
+    // 重画整屏时带回滚动位置：不带回，用户在第三屏点一下就被弹回顶。
     val scrollY = if (keepScroll) bodyScrollOf() else 0
     root.removeAllViews()
     // legado 书架的分组页签是「用户自建书单」，不是在读状态过滤。我们只有下载作业、
@@ -210,27 +188,16 @@ internal fun MainActivity.showShelf(keepScroll: Boolean = false) {
     val rows = shelfRows()
     val books = rows.map { it.job }
 
-    // 选中的书被删光或已不在架上时收起选择模式，否则会停在「已选 0」的死界面。
-    if (ShelfUi.selecting && !shelfPruneSelection(ShelfUi.selected, books.map { it.bookId })) {
-        ShelfUi.exit()
-    }
-
-    if (ShelfUi.selecting) {
-        // legado 编辑态：导航位换成 ✕，标题下方写「已选 N 本 · 共 M 本」，右侧排动作图标。
-        root.addView(shelfSelectBar(books))
-        root.addView(shelfSubtitle(shelfSelectSubtitle(books.size)))
-    } else {
-        root.addView(Widgets.headerRow(this, "书架",
-            trailing = listOf(
-                "search" to { askKeyword() },
-                "more" to { showShelfMenu() },
-            )))
-        // legado 顶栏副标题 `uiState.subtitle`。我们的 headerRow 只有一行标题位，
-        // 副标题单独占一行（FS_SM）。189 dp 上「N 本 · 在读 M」约 90 dp，一行放得下。
-        // 「更新目录」跑着时这一行改成进度：网络活没有别的着落处。
-        root.addView(shelfSubtitle(ShelfUi.updating ?: shelfSubtitle(
-            books.size, books.count { readProgress(it.bookId) > 0 })))
-    }
+    root.addView(Widgets.headerRow(this, "书架",
+        trailing = listOf(
+            "search" to { askKeyword() },
+            "more" to { showShelfMenu() },
+        )))
+    // legado 顶栏副标题 `uiState.subtitle`。我们的 headerRow 只有一行标题位，
+    // 副标题单独占一行（FS_SM）。189 dp 上「N 本 · 在读 M」约 90 dp，一行放得下。
+    // 「更新目录」跑着时这一行改成进度：网络活没有别的着落处。
+    root.addView(shelfSubtitle(ShelfUi.updating ?: shelfSubtitle(
+        books.size, books.count { readProgress(it.bookId) > 0 })))
 
     val body = Widgets.scrollBody(this, crownStep, crownGlide)
     val col = Widgets.contentColumn(body)
@@ -260,10 +227,8 @@ internal fun MainActivity.showShelf(keepScroll: Boolean = false) {
                 it.isNotBlank() && it != readTitle
             }
             val item = Widgets.listItem(this, displayName, sub, twoLine = true,
-                highlight = ShelfUi.selected.contains(job.bookId),
                 trailing = "more", onTrailingClick = { showJobMenu(job) }) {
-                if (ShelfUi.selecting) toggleShelfSelection(job)
-                else openShelfBook(job.bookId, displayName, job.author)
+                openShelfBook(job.bookId, displayName, job.author)
             }
             if (latest != null) {
                 // listItem 只画两行。第三行（最新章节）直接挂在它返回的竖排容器上，
@@ -279,7 +244,7 @@ internal fun MainActivity.showShelf(keepScroll: Boolean = false) {
                         ViewGroup.LayoutParams.WRAP_CONTENT))
             }
             item.setOnLongClickListener {
-                if (!ShelfUi.selecting) ShelfUi.enter(job.bookId) else toggleShelfSelection(job)
+                showJobMenu(job)
                 true
             }
             col.addView(item)
@@ -315,12 +280,6 @@ internal fun MainActivity.showShelf(keepScroll: Boolean = false) {
     attachTabs(0)
 }
 
-/** 点一下卡片：选择模式下切选中，平时进目录。两条路都要重画顶栏标题里的计数。 */
-private fun MainActivity.toggleShelfSelection(job: BookJob) {
-    shelfToggle(ShelfUi.selected, job.bookId)
-    showShelf(keepScroll = true)
-}
-
 /**
  * 顶栏副标题。legado 的 `subtitle` 挂在 TopAppBar 里（标题下面一行）；
  * 我们的 `Widgets.headerRow` 只有一行标题位，所以副标题单独占一行。
@@ -331,82 +290,6 @@ private fun MainActivity.shelfSubtitle(text: CharSequence): android.widget.TextV
         setPadding(Md3.dp(this@shelfSubtitle, Md3.PAD), 0,
             Md3.dp(this@shelfSubtitle, Md3.PAD), Md3.dp(this@shelfSubtitle, Md3.GAP / 2))
     }
-
-/**
- * 选择模式顶栏。
- *
- * legado 的 `BookshelfTopBar` 在编辑态把 navigationIcon 换成 ✕，标题是当前分组名，
- * 副标题「已选 N 本 · 共 M 本」，右侧排 全选 / 反选 / 批量下载 / 分组 / 私密 / 删除 六枚。
- *
- * 189 dp 上这套排不下：M3 一个图标槽 48 dp，✕ + 全选 + 删除 就 144 dp，
- * 标题只剩 13 dp，等于没有标题。所以：
- * - 图标槽压到 34~36 dp（`Md3.iconButton` 只给图形本身，槽宽由这里定）；
- * - 标题降到 FS_MD（22 sp 的「已选 N」在这行里放不下）；
- * - 只留 ✕ / 全选 / 删除 三枚 —— 反选、批量下载、分组、私密在本应用没有对应物。
- *
- * 没有直接用 `Widgets.headerRow`：它的图标槽固定 TAP（48 dp），也不给左侧导航位。
- * 正常态的顶栏仍是 headerRow（见 showShelf），根屏不挂返回箭头的规则不变。
- */
-private fun MainActivity.shelfSelectBar(books: List<BookJob>): LinearLayout {
-    val bar = Md3.row(this)
-    bar.setPadding(Md3.dp(this, Md3.PAD / 2), 0, Md3.dp(this, Md3.PAD / 2),
-        Md3.dp(this, Md3.GAP))
-
-    fun slot(glyph: String, desc: String, widthDp: Int, act: () -> Unit): View {
-        val v = Md3.iconButton(this, glyph, act, desc)
-        // 热区：横向按槽宽，纵向吃满行高（36 dp）。M3 的 48 dp 槽在这里放不下三个。
-        v.minimumWidth = 0
-        v.setPadding(Md3.dp(this, 2), 0, Md3.dp(this, 2), 0)
-        v.layoutParams = LinearLayout.LayoutParams(Md3.dp(this, widthDp),
-            Md3.dp(this, Md3.TAB_H))
-        return v
-    }
-
-    bar.addView(slot("close", "退出选择", 34) {
-        ShelfUi.exit()
-        showShelf(keepScroll = true)
-    })
-    val title = Md3.ellipsize(
-        Md3.text(this, shelfSelectTitle(ShelfUi.selected.size), Md3.FS_MD, Md3.onSurface,
-            bold = true)).apply { gravity = Gravity.CENTER_VERTICAL }
-    bar.addView(title, LinearLayout.LayoutParams(0, Md3.dp(this, Md3.TAB_H), 1f))
-    bar.addView(slot("select_all", "全选", 36) {
-        shelfSelectAll(ShelfUi.selected, books.map { it.bookId })
-        showShelf(keepScroll = true)
-    })
-    bar.addView(slot("delete", "删除选中", 36) { confirmDeleteSelected(books) })
-    return bar
-}
-
-/**
- * 删除选中的书，走二次确认。
- *
- * 与 legado `DeleteBooksConfirmDialog` 同一条路：标题「删除选中」，
- * 关窗前不做任何落盘动作。区别是 legado 正文只写「已选 N 本」，把后果交给
- * 一组勾选（是否删源文件）；我们没有那个分叉 —— 正文直接把后果写清楚。
- */
-private fun MainActivity.confirmDeleteSelected(books: List<BookJob>) {
-    val chosen = books.filter { ShelfUi.selected.contains(it.bookId) }
-    if (chosen.isEmpty()) {
-        toast("先选一本书")
-        return
-    }
-    Widgets.md3Dialog(this,
-        title = "删除选中",
-        body = shelfDeleteMessage(chosen.map { it.name.ifBlank { "未命名" } }),
-        confirm = "删除",
-        onConfirm = {
-            val ids = chosen.map { it.bookId }
-            ShelfUi.exit()
-            // 与缓存页同一套整本删除：取消服务 → 踢出队列 → 等收工 → 落墓碑。
-            purgeBookCache(ids) { gone ->
-                toast(if (gone == ids.size) "已删除 $gone 本"
-                      else "已删除 $gone 本，其余目录仍被占用")
-                showShelf()
-            }
-        },
-    ).show()
-}
 
 /**
  * 三列下每张卡的实际宽度（dp）。
@@ -427,8 +310,7 @@ private fun MainActivity.shelfCoverHeightDp(): Int = shelfCardWidthDp() * 7 / 5
  * 网格卡：封面墙上一张。
  *
  * 抄 legado `BookItem.kt` 的 `BookshelfGridItem` + `BookshelfCover` 三处：
- * 左下角来源标签（`leftBottomText`）、
- * 选中态底色（`isSelected` → secondaryContainer）；书名居中最多两行
+ * 左下角来源标签（`leftBottomText`）；书名居中最多两行
  * （`titleCenter = true`、`titleMaxLines = 2`）。
  *
  * 压了什么：legado 封面 84 dp 宽、书名下留 4 dp；这里封面 47 dp 宽，
@@ -437,15 +319,11 @@ private fun MainActivity.shelfCoverHeightDp(): Int = shelfCardWidthDp() * 7 / 5
  */
 private fun MainActivity.shelfCard(row: ShelfRow): LinearLayout {
     val job = row.job
-    val selected = ShelfUi.selected.contains(job.bookId)
     val card = Md3.column(this)
     card.isClickable = true
     card.isFocusable = true
     val displayName = job.name.ifBlank { "未命名" }
-    // 选中态给卡片铺底色（legado 网格项就是这么标的）。47 dp 的卡只靠底色
-    // 在表盘上看不出来，所以封面再叠一层遮罩 + 勾（见下）。
-    card.background = Md3.ripple(this,
-        if (selected) Md3.secondaryContainer else android.graphics.Color.TRANSPARENT,
+    card.background = Md3.ripple(this, android.graphics.Color.TRANSPARENT,
         Md3.R_ITEM.toFloat())
     card.contentDescription = buildString {
         append(displayName)
@@ -453,19 +331,14 @@ private fun MainActivity.shelfCard(row: ShelfRow): LinearLayout {
         val unread = shelfUnreadCount(job.total, readProgress(job.bookId))
         if (unread > 0) append("，未读 $unread 章")
         if (row.sourceTag.isNotBlank()) append("，").append(row.sourceTag)
-        if (selected) append("，已选中")
     }
     card.setOnClickListener {
-        if (ShelfUi.selecting) toggleShelfSelection(job)
-        else openShelfBook(job.bookId, displayName, job.author)
+        openShelfBook(job.bookId, displayName, job.author)
     }
+    // 长按开这本的作业菜单（重命名 / 导出 TXT / 删除）。
+    // 以前长按是进多选，多选撤掉后删除只能走这里 —— 网格卡没有 trailing 位。
     card.setOnLongClickListener {
-        // legado 长按在浏览态是进详情页（它另有「选择模式」菜单项）；
-        // 我们这一屏的目标就是多选，长按直接进选择模式并把这本选上。
-        if (ShelfUi.selecting) toggleShelfSelection(job) else {
-            ShelfUi.enter(job.bookId)
-            showShelf(keepScroll = true)
-        }
+        showJobMenu(job)
         true
     }
 
@@ -511,20 +384,6 @@ private fun MainActivity.shelfCard(row: ShelfRow): LinearLayout {
         })
     }
 
-    // 选中遮罩：legado 只换卡片底色，手表上认不出，所以封面上再压一层
-    // 半透明 secondaryContainer 加一枚勾。
-    if (selected) {
-        cover.addView(View(this).apply {
-            background = Md3.bg(Md3.secondaryContainer, Md3.R_GRID.toFloat())
-            alpha = 0.72f
-        }, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        val check = Icons.view(this, "check", Md3.onSecondaryContainer, 18).apply {
-            contentDescription = "已选中"
-        }
-        cover.addView(check, FrameLayout.LayoutParams(
-            Md3.dp(this, 18), Md3.dp(this, 18), Gravity.CENTER))
-    }
     card.addView(cover, LinearLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, coverH)))
 
@@ -579,36 +438,23 @@ internal fun MainActivity.shelfColor(job: BookJob): Int {
 }
 
 /**
- * 书架右上角 ⋮ 菜单。条目、顺序照 legado `BookshelfScreen.kt:679-764`：
- * 远程书籍 / 添加本地 / 更新目录 / 布局设置 / 分组管理 / 添加网址 /
- * 选择模式 / 书架管理 / 导出书单 / 导入书单 / 日志。
+ * 书架右上角 ⋮ 菜单。
  *
- * 我们只做下载和本地文件，没有书源导入、书单、分组、WebDav 这些东西。
- * 照 legado 的排位保留全部条目：能接的接上（更新目录 / 布局设置 / 添加网址 / 选择模式 /
- * 书架管理 / 导出书单 / 日志），接不上的点一下说清缺什么，
- * 保留占位优于删条目 —— 删了就看不出这一屏还差哪些能力。
+ * 条目照 legado `BookshelfScreen.kt:679-764` 的排位收过一轮：远程书籍（WebDav 同步）、
+ * 分组管理、添加网址、选择模式、导出书单、导入书单都已移除（用户判词 2026-11-04）。
+ * 前两项本应用没有对应体系，第三项名不副实（它调的是联网搜书），后三项是书单与多选。
+ *
+ * 留下的是这一屏真能干的四件事：添加本地书、更新目录、布局设置、看缓存。
  */
 internal fun MainActivity.showShelfMenu() {
-    fun todo(what: String, why: String) = { toast("$what：$why") }
     Widgets.longMenuDialog(this, "书架", listOf(
-        // legado 的「远程书籍」是 WebDav 同步，本版没有网络备份。
-        "远程书籍" to todo("远程书籍", "要 WebDav，本版只有本机目录"),
         // legado 的「添加本地」走 SAF 文件选择器。手表系统自带「文件」选择器，
         // 用 ACTION_OPEN_DOCUMENT 就能拉到，不需要任何存储权限，也不用 androidx。
         "添加本地" to { pickLocalBook() },
         "更新目录" to { refreshShelfTocs() },
         "布局设置" to { showShelfLayoutSheet() },
-        "分组管理" to todo("分组管理", "本应用没有书单分组"),
-        "添加网址" to { askKeyword() },
-        "选择模式" to {
-            ShelfUi.enter("")
-            showShelf(keepScroll = true)
-        },
         // legado 的「书架管理」是书架自身的批量管理页；我们对应的是缓存管理。
         "书架管理" to { showCache() },
-        "导出书单" to { showExportList() },
-        // 与「我的」页同一处规矩：书源页返回靠返回栈，进来前要压一条。
-        "导入书单" to { rememberReturn(); showSources() },
         "日志" to { showLogs() },
     )).show()
 }

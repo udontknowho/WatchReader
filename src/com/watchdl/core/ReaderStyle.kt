@@ -17,6 +17,20 @@ object ReaderStyle {
      */
     const val PAGE_BASE_MS = 240L
 
+    /**
+     * 翻屏基准的可调区间（ms），设置页的「时长」滑杆按它取值。
+     *
+     * 下限 60 ms 已近乎瞬移，再短看不出翻页；上限 600 ms 比 legado 的手机基准
+     * 还慢，表屏一屏才十来行，等动画跑完人就烦了。区间取窄是为了让滑杆拖得准。
+     */
+    const val PAGE_BASE_MIN_MS = 60L
+    const val PAGE_BASE_MAX_MS = 600L
+    /** 滑杆步长：20 ms 一档，人手辨得出差别又不至于碎成一堆档。 */
+    const val PAGE_BASE_STEP_MS = 20L
+
+    /** 读档回来的基准夹进可调区间。旧存档、手改的偏好文件都走这一处。 */
+    fun pageBaseClamp(v: Long): Long = v.coerceIn(PAGE_BASE_MIN_MS, PAGE_BASE_MAX_MS)
+
     // ── 亮度：legado 是 0–100 滑杆，手表屏只够三档 ──────────
     const val BRIGHT_DIM = 0.35f
     const val BRIGHT_MID = 0.6f
@@ -149,6 +163,7 @@ object ReaderStyle {
      * 照 legado 的「基准 × 距离 / 视口」（`ReaderScrollState.kt:83-91`，
      * `core/transition/ReaderPageTurnSpeed.kt:41`）。基准从 legado 的 360 ms 降到
      * [PAGE_BASE_MS]：表屏只有 248 dp，一屏十来行，眼扫完了动画还在跑就显得拖。
+     * [base] 由设置页的「时长」滑杆给（[pageBaseClamp] 夹过），缺省取 [PAGE_BASE_MS]。
      * 下限 1 ms：距离为 0 时不能让动画库收到 0 时长。
      */
     fun pageDuration(distancePx: Int, viewportPx: Int, base: Long = PAGE_BASE_MS): Long {

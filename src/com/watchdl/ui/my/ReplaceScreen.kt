@@ -324,6 +324,15 @@ private fun MainActivity.showReplaceMenu() {
     items += "全部启用" to { setReplaceEnabled(replaceKeys(rules), true) }
     items += "全部停用" to { setReplaceEnabled(replaceKeys(rules), false) }
     items += "新建规则" to { askReplaceRule(null) }
+    // 推荐规则集只在「还差几条」时出现：全加过了就不该再占一行菜单。
+    val missing = ReplaceRuleStore.missingPresets()
+    if (missing > 0) {
+        items += "加入推荐规则（$missing 条）" to {
+            val n = ReplaceRuleStore.addPresets()
+            toast(if (n > 0) "加入 $n 条推荐规则" else "推荐规则已经都在了")
+            showReplace()
+        }
+    }
     items += "从 replace.json 导入" to { importRules() }
     Widgets.longMenuDialog(this, "替换净化", items).show()
 }

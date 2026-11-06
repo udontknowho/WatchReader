@@ -169,6 +169,13 @@ internal fun MainActivity.showReaderSettings(
         col.addView(Widgets.sectionLabel(this, "翻页"))
         chips("动画", listOf("滚一屏" to 0 as Any, "覆盖" to 1),
             { ReaderUi.pageAnim as Any }) { ReaderUi.pageAnim = it as Int }
+        // 一屏整屏滚完的时长；不满一屏按距离比例缩，所以它也是上限。
+        slider("时长", ReaderStyle.PAGE_BASE_MIN_MS.toFloat(), ReaderStyle.PAGE_BASE_MAX_MS.toFloat(),
+            ((ReaderStyle.PAGE_BASE_MAX_MS - ReaderStyle.PAGE_BASE_MIN_MS) /
+                ReaderStyle.PAGE_BASE_STEP_MS).toInt(),
+            ReaderUi.pageBaseMs.toFloat(), { "${it.toInt()} ms" }) {
+            ReaderUi.pageBaseMs = ReaderStyle.pageBaseClamp(it.toLong())
+        }
 
         // ── 菜单 ───────────────────────────────────────────
         col.addView(Widgets.sectionLabel(this, "菜单"))
@@ -202,6 +209,7 @@ internal fun MainActivity.showReaderSettings(
             ReaderUi.titleBold = true
             ReaderUi.titleGap = 1
             ReaderUi.marginLevel = 1
+            ReaderUi.pageBaseMs = ReaderStyle.PAGE_BASE_MS
             applyNow()
             paint()
             toast("排版已恢复默认")

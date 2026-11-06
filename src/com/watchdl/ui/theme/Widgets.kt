@@ -817,6 +817,126 @@ object Widgets {
     }
 
     /**
+     * 底栏指示点。
+     *
+     * 用户判词（2026-11-05）：底栏 64 dp 太大，改成三个小圆点，当前栏是一条短横。
+     * 8 dp 一条，省下的 56 dp 全给正文。
+     *
+     * 点本身只有 3 dp，没法直接点：热区是三个等宽格子（约 63×8），点只是格子里的图案。
+     * 主入口是左右滑动切栏，点按是给「知道自己在哪一栏」的备用路径。
+     *
+     * @param labels 三栏名，只用于无障碍描述（TalkBack 读「书架，已选择」）。
+     */
+    fun navDots(
+        ctx: Context,
+        labels: List<String>,
+        active: Int,
+        onSelect: ((Int) -> Unit)? = null,
+    ): LinearLayout {
+        val bar = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            background = Md3.bg(Md3.surface, 0)
+        }
+        labels.forEachIndexed { i, label ->
+            val on = i == active
+            val cell = FrameLayout(ctx).apply {
+                contentDescription = label
+                isSelected = on
+                isClickable = onSelect != null
+                onSelect?.let { cb -> setOnClickListener { cb(i) } }
+            }
+            val w = if (on) Md3.NAV_DOT * 3 else Md3.NAV_DOT
+            val dot = View(ctx).apply {
+                background = Md3.bg(
+                    if (on) Md3.primary else Md3.outlineVariant,
+                    Md3.NAV_DOT / 2f,
+                )
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }
+            cell.addView(dot, FrameLayout.LayoutParams(
+                Md3.dp(ctx, w), Md3.dp(ctx, Md3.NAV_DOT), Gravity.CENTER))
+            bar.addView(cell, LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+        }
+        bar.layoutParams = Md3.lpDp(ctx, null, Md3.NAV_DOT_H)
+        return bar
+    }
+
+    /**
+     * 顶栏自动收起：下滚累计到阈值就滑走，上滚拉回。
+     *
+     * 用户判词（2026-11-05）：「他会自己收上去」。要点是**不把高度绑在滚动位置上** ——
+     * 绑着做，滚得慢时顶栏会一顿一顿地跟着挪。这里改成「方向触发 + 一次动画走完」，
+     * 手感才是自己收上去。
+     *
+     * 收出去的是真高度（25 → 0）：列表跟着长高，这 25 dp 才算真省下来。
+     * 代价是动画期间列表要重排；真机掉帧就退回「只位移不塌高」的做法。
+     */
+    fun autoHideHeader(ctx: Context, root: ViewGroup) {
+        val header = root.getChildAt(0) ?: return
+        val scroller = firstScroll(root) ?: return
+        val full = Md3.dp(ctx, Md3.HEADER_H)
+        if (full <= 0) return
+
+        val lp = (header.layoutParams as? LinearLayout.LayoutParams)
+            ?: LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, full).also { header.layoutParams = it }
+        lp.height = full
+        header.layoutParams = lp
+
+        var lastY = scroller.scrollY
+        var acc = 0
+        var collapsed = false
+        var anim: android.animation.ValueAnimator? = null
+        val threshold = Md3.dp(ctx, 8).coerceAtLeast(1)
+
+        fun animateTo(target: Int) {
+            if (lp.height == target) return
+            anim?.cancel()
+            anim = android.animation.ValueAnimator.ofInt(lp.height, target).apply {
+                duration = 180
+                interpolator = android.view.animation.DecelerateInterpolator()
+                addUpdateListener { a ->
+                    lp.height = a.animatedValue as Int
+                    header.layoutParams = lp
+                }
+                start()
+            }
+        }
+
+        scroller.setOnScrollChangeListener { _, _, y, _, _ ->
+            val dy = y - lastY
+            lastY = y
+            // 回到顶上一定展开，不看方向：否则滚回开头会看到一个没有标题的空白页。
+            if (y <= 0) {
+                acc = 0
+                if (collapsed) { collapsed = false; animateTo(full) }
+                return@setOnScrollChangeListener
+            }
+            if (dy == 0) return@setOnScrollChangeListener
+            // 换向就清零累计：不这么做，手指微抖一下能来回翻好几次。
+            if (acc != 0 && (acc > 0) != (dy > 0)) acc = 0
+            acc += dy
+            if (!collapsed && acc >= threshold) {
+                collapsed = true
+                animateTo(0)
+            } else if (collapsed && acc <= -threshold) {
+                collapsed = false
+                animateTo(full)
+            }
+        }
+    }
+
+    /** 第一层纵向滚动区。找不到就返回 null —— 空屏与不可滚的屏都是合法状态。 */
+    fun firstScroll(v: View): ScrollView? {
+        if (v is ScrollView) return v
+        if (v !is ViewGroup) return null
+        for (i in 0 until v.childCount) firstScroll(v.getChildAt(i))?.let { return it }
+        return null
+    }
+
+    /**
      * 分组页签行。照 legado 的 `AppTabRow`：选中页签给胶囊底色，未选中只有文字。
      *
      * 宽了能横向滑：手表 189dp 上三四个页签就满，再多也不挤成一团。
@@ -834,17 +954,21 @@ object Widgets {
         title: CharSequence,
         trailing: List<Pair<String, () -> Unit>> = emptyList(),
     ): LinearLayout {
+        // 25 dp 一行：标题 13 sp 与 18 dp 图标同行，不留底边距。
+        // 旧版是 40 dp 行高 + 8 dp 间隔 = 48 dp，占掉屏高 19%；现在 25 dp 占 10%。
+        // 字号与图标一起降：25 dp 里放 22 sp 的标题会上下顶满，看着像被裁过。
         val bar = Md3.row(ctx)
-        bar.setPadding(Md3.dp(ctx, Md3.PAD), 0, 0, Md3.dp(ctx, Md3.GAP))
+        bar.setPadding(Md3.dp(ctx, Md3.PAD), 0, 0, 0)
         bar.addView(
-            Md3.ellipsize(Md3.text(ctx, title, Md3.FS_LG, Md3.onSurface, bold = true)).apply {
+            Md3.ellipsize(Md3.text(ctx, title, 13f, Md3.onSurface, bold = true)).apply {
                 gravity = Gravity.CENTER_VERTICAL
             },
-            LinearLayout.LayoutParams(0, Md3.dp(ctx, Md3.TAB_H), 1f),
+            LinearLayout.LayoutParams(0, Md3.dp(ctx, Md3.HEADER_H), 1f),
         )
         for ((glyph, act) in trailing) {
-            bar.addView(Md3.iconButton(ctx, glyph, act), LinearLayout.LayoutParams(
-                Md3.dp(ctx, Md3.TAP), Md3.dp(ctx, Md3.TAB_H)))
+            // 槽宽给 HEADER_H + 10：25 dp 是高度，热区靠横向补。
+            bar.addView(Md3.iconButton(ctx, glyph, act, size = 18), LinearLayout.LayoutParams(
+                Md3.dp(ctx, Md3.HEADER_H + 10), Md3.dp(ctx, Md3.HEADER_H)))
         }
         return bar
     }

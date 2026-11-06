@@ -9,16 +9,17 @@ import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
 import com.watchdl.core.*
 import com.watchdl.ui.book.showDetail
+import com.watchdl.ui.handleTabSwipe
 import com.watchdl.ui.book.showSwap
 import com.watchdl.ui.my.showMy
 import com.watchdl.ui.my.showAbout
 import com.watchdl.ui.my.showCache
-import com.watchdl.ui.my.showExportList
 import com.watchdl.ui.my.showFiles
 import com.watchdl.ui.my.showLogs
 import com.watchdl.ui.my.showReplace
@@ -130,6 +131,33 @@ class MainActivity : Activity() {
      * 不能直接开放 `screen`：internal var 的 setter 与 [setScreen] 的 JVM 名撞车。
      */
     internal val curScreen: Screen get() = screen
+
+    /**
+     * 底栏当前栏位（0 书架 / 1 发现 / 2 我的），-1 表示当前屏不是三根屏。
+     *
+     * 三根屏各自搭屏时由 [com.watchdl.ui.attachTabs] 写入；横滑手势只在这个值为
+     * 0..2 时生效，子页要让给子控件自己处理。
+     */
+    internal var tabActive = -1
+
+    /** 当前屏是不是底栏的三个根屏（书架 / 发现目录 / 我的）。 */
+    internal fun isRootTabScreen(): Boolean = when (val s = screen) {
+        Screen.Shelf, Screen.My -> true
+        is Screen.Discover -> s.rankKey.isEmpty()
+        else -> false
+    }
+
+    /**
+     * 横滑切栏必须在派发层拦：三根屏的纵向列表会吃掉 MOVE，子控件上装监听拿不到。
+     *
+     * 拦到手势后返回 true，后续 MOVE / UP 不再往下发；子控件会停在上一次事件的状态，
+     * 但松手要么换屏（整棵子树重建）要么弹回，下一次触摸是新的 DOWN，状态自己复位。
+     */
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        val took = runCatching { handleTabSwipe(ev) }.getOrDefault(false)
+        if (took) return true
+        return super.dispatchTouchEvent(ev)
+    }
 
     /** 切屏统一入口。换屏就意味着上一屏的后台任务全部作废。 */
     internal fun setScreen(next: Screen) {
@@ -281,11 +309,9 @@ class MainActivity : Activity() {
             Screen.Cache -> showCache()
             Screen.Files -> showFiles()
             Screen.Replace -> showReplace()
-            Screen.ExportList -> showExportList()
             Screen.Logs -> showLogs()
             Screen.About -> showAbout()
             is Screen.Swap -> showSwap(s.info, s.src)
-            is Screen.Find -> showFind(s.query, s.hits, s.scanned, s.done, s.useRegex)
             Screen.Shelf -> showShelf()
             is Screen.Detail -> showDetail(s.info, s.src)
             else -> showShelf()
@@ -1928,11 +1954,9 @@ class MainActivity : Activity() {
             Screen.Cache -> showCache()
             Screen.Files -> showFiles()
             Screen.Replace -> showReplace()
-            Screen.ExportList -> showExportList()
             Screen.Logs -> showLogs()
             Screen.About -> showAbout()
             is Screen.Swap -> showSwap(s.info, s.src)
-            is Screen.Find -> showFind(s.query, s.hits, s.scanned, s.done, s.useRegex)
             Screen.My -> showMy()
             is Screen.Detail -> showDetail(s.info, s.src)
         }
@@ -1962,11 +1986,9 @@ class MainActivity : Activity() {
             Screen.Cache -> showMy()
             Screen.Files -> showMy()
             Screen.Replace -> showMy()
-            Screen.ExportList -> showMy()
             Screen.Logs -> showMy()
             Screen.About -> showMy()
             is Screen.Swap -> goBackToPrevious()
-            is Screen.Find -> showMy()
             is Screen.Detail -> goBackToPrevious()
         }
     }

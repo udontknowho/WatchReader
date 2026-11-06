@@ -325,7 +325,7 @@ private fun MainActivity.settingsCrown(col: LinearLayout) {
  */
 private fun MainActivity.settingsOther(col: LinearLayout) {
     col.addView(Widgets.groupCard(this, "导出") { g ->
-        // 导出规则是一句话说明，不占一行按钮：真导出入口在书单与作业菜单里。
+        // 导出规则是一句话说明，不占一行按钮：真导出入口在作业菜单里。
         g.addView(Md3.text(this, "文件名：书名 - 作者.txt（重名自动加 (2)）\n编码：UTF-8 带 BOM",
             Md3.FS_SM, Md3.onSurfaceVariant).apply {
             setPadding(Md3.dp(this@settingsOther, Md3.PAD), Md3.dp(this@settingsOther, Md3.GAP / 2),

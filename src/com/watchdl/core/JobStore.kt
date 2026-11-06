@@ -342,6 +342,28 @@ class JobStore(private val root: File) {
     }
 
     /**
+     * 只读某一章：扫到命中行就停。
+     *
+     * [readChapters] 会把整本 jsonl 逐行进 Map，三千章的书在手表上要十几兆内存、
+     * 秒级的正则；而换章与拼接块预取都只关心当前这一章，顺读时每章付一次整表代价。
+     * 先用 `contains` 粗筛再解 itemId：粗筛不命中就不跑正则。
+     */
+    fun readChapter(bookId: String, itemId: String): String? = synchronized(lockFor(bookId)) {
+        val f = chaptersFile(bookId)
+        if (!f.isFile || itemId.isEmpty()) return@synchronized null
+        // 不能抛：并发落盘时文件可能正被改名/清理。
+        runCatching {
+            f.useLines { lines ->
+                lines.firstOrNull { line ->
+                    line.contains(itemId) &&
+                        Regex("\"itemId\"\\s*:\\s*\"([^\"]*)\"").find(line)
+                            ?.groupValues?.get(1) == itemId
+                }
+            }
+        }.getOrNull()
+    }
+
+    /**
      * 清掉已下载正文，目录与阅读进度留着（#26）。
      *
      * 删的是正文副本，**不是书**：目录、进度、书源都还在，重新下载能接上。

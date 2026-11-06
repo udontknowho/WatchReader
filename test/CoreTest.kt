@@ -438,6 +438,12 @@ fun main() {
             "${job?.count(com.watchdl.core.ChapterStatus.DONE)}")
         check("正文按章落盘", store.readChapters(res.bookId).size == 3,
             "${store.readChapters(res.bookId).size}")
+        // 换章走单章读法：扫到命中行就停，不再把整本扫成 Map。
+        val oneId = job!!.chapters.first().itemId
+        check("按章读法与整本读法一致",
+            store.readChapter(res.bookId, oneId) == store.readChapters(res.bookId)[oneId])
+        check("找不到的章给 null", store.readChapter(res.bookId, "没有这个 id") == null &&
+            store.readChapter("不存在这本书", oneId) == null)
         check("章 id 不重复", job!!.chapters.map { it.itemId }.toSet().size == 3)
         // 睡眠不适用：restore 会按 300 字线判 DONE，本地书必须豁免，否则短章全变 FAILED。
         val full = com.watchdl.core.Downloader.restore(store, res.bookId)

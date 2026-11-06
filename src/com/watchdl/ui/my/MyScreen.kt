@@ -7,7 +7,6 @@ import com.watchdl.core.Screen
 import com.watchdl.ui.attachTabs
 import com.watchdl.ui.reader.showAllMarks
 import com.watchdl.ui.reader.showRecords
-import com.watchdl.ui.search.askFind
 import com.watchdl.ui.source.showSources
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
@@ -74,8 +73,8 @@ internal fun MainActivity.showMy() {
             rememberReturn()
             showSettings()
         }
-        // 全文搜索（#23）：搜已下载正文，离线可用，与「搜索」栏的联网找书是两回事。
-        e("全文搜索", "search") { askFind() }
+        // 全文搜索与导出书单已移除（用户判词 2026-11-04）：前者要扫完整库正文，
+        // 手表上一轮扫几分钟；后者只是把书架列成文本，导出入口一并在书架菜单里删了。
         e("书签", "bookmark") { showAllMarks() }
         // 阅读记录（#25）：跨书按最后阅读时间列书，点一条接着读。
         e("阅读记录", "history") { showRecords() }
@@ -83,8 +82,6 @@ internal fun MainActivity.showMy() {
         e("缓存管理", "download") { showCache() }
         // 文件管理（#27）：看私有目录占多少，逐项删。
         e("文件管理", "grid") { showFiles() }
-        // 导出书单（#29）：把书架列成纯文本清单，落到私有 export/ 目录。
-        e("导出书单", "list") { showExportList() }
         // 日志（#30）：开发者日志的开关、体积、尾巴，导出与清空都在这。
         e("日志", "history") { showLogs() }
         // 关于：独立成屏，结构照 legado `ui/about/AboutScreen`（头部块 + 项目组 + 日志组）。
