@@ -12,6 +12,9 @@ import com.watchdl.core.Screen
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
 
+/** 预览块用的示范文字：两行，够看字号、行距、段距，又不把卡片撑高。 */
+private const val PREVIEW_TEXT = "夜里风声很轻。\n他翻过一页。"
+
 /**
  * 阅读设置页。
  *
@@ -50,17 +53,34 @@ internal fun MainActivity.showReaderSettings(
     val col = Widgets.contentColumn(body)
     root.addView(body)
 
+    /** 预览块：套当前正文样式的一小段示范文字，滑杆一动就重排。 */
+    var previewView: android.widget.TextView? = null
+
     /** 落盘 + 当场重排正文。不重建整屏，回来时滚动位置还在原处。 */
     fun applyNow() {
         saveReaderPrefs(readerSize, readerSpacing, readerBackground)
         saveReaderExtras()
         applyBright()
         restyleReader(text)
+        // 滑杆不重建整屏，预览块得自己跟着重排。
+        previewView?.let { styleBody(it, PREVIEW_TEXT) }
     }
 
     /** 整页重画：芯片选中态、恢复默认之后都要回头重排自己。 */
     fun paint() {
         col.removeAllViews()
+        previewView = null
+
+        /** 卡内左右内边距，与 listItem 一致；组标题才会和卡内容落在同一条竖线上。 */
+        val ip = Md3.dp(this, Md3.PAD)
+
+        /** 一张分组卡：段标题在卡上方，项在卡里，卡与卡之间的留白由 groupCard 自带。 */
+        fun card(title: String, build: (LinearLayout) -> Unit) {
+            col.addView(Widgets.groupCard(this, title) { g ->
+                g.setPadding(0, Md3.dp(this, 4), 0, Md3.dp(this, 4))
+                build(g)
+            })
+        }
 
         /**
          * 档位行：标签 + 若干等宽档。
@@ -68,11 +88,13 @@ internal fun MainActivity.showReaderSettings(
          * 选中态靠比较取值判：连续量用滑杆，只有离散量才走这里（与 legado 的
          * `TinySliderSettingItem` 与下拉型设置项同一分工）。
          */
-        fun chips(label: String, options: List<Pair<String, Any>>, get: () -> Any, set: (Any) -> Unit) {
+        fun chips(parent: LinearLayout, label: String, options: List<Pair<String, Any>>,
+                  get: () -> Any, set: (Any) -> Unit) {
             val p = Md3.dp(this, 3)
-            val row = Md3.row(this).apply { setPadding(0, p, 0, 0) }
+            val row = Md3.row(this).apply { setPadding(ip, p, ip, p) }
+            // 标签列收窄到 26 dp：卡里比整页少两档边距，三档芯片才排得下。
             row.addView(Md3.text(this, label, Md3.FS_SM, Md3.onSurfaceVariant),
-                LinearLayout.LayoutParams(Md3.dp(this, 30), ViewGroup.LayoutParams.WRAP_CONTENT))
+                LinearLayout.LayoutParams(Md3.dp(this, 26), ViewGroup.LayoutParams.WRAP_CONTENT))
             val cur = get()
             options.forEachIndexed { i, opt ->
                 val sel = opt.second == cur
@@ -96,124 +118,155 @@ internal fun MainActivity.showReaderSettings(
                     leftMargin = if (i == 0) 0 else Md3.dp(this@showReaderSettings, 4)
                 })
             }
-            col.addView(row)
+            parent.addView(row)
         }
 
-        fun slider(label: String, min: Float, max: Float, steps: Int, value: Float,
-                   fmt: (Float) -> String, set: (Float) -> Unit) {
-            col.addView(Widgets.sliderRow(this, label, min, max, value, steps, fmt) { v ->
+        fun slider(parent: LinearLayout, label: String, min: Float, max: Float, steps: Int,
+                   value: Float, fmt: (Float) -> String, set: (Float) -> Unit) {
+            val row = Widgets.sliderRow(this, label, min, max, value, steps, fmt) { v ->
                 set(v)
                 applyNow()
-            })
+            }.apply {
+                setPadding(ip, Md3.dp(this@showReaderSettings, 2), ip,
+                    Md3.dp(this@showReaderSettings, 2))
+            }
+            parent.addView(row)
         }
 
         // ── 外观 ───────────────────────────────────────────
-        col.addView(Widgets.sectionLabel(this, "外观"))
-        chips("底色", listOf("日" to false as Any, "夜" to true),
-            { Color.red(readerBackground) <= 100 }) { night ->
-            // 底色一换，整套前景色都要跟着换，只能重建整屏；这也是本页唯一离开此屏的项。
-            val bg = if (night as Boolean) ReaderStyle.BG_FANQIE_NIGHT else ReaderStyle.BG_FANQIE_DAY
-            saveReaderPrefs(readerSize, readerSpacing, bg)
-            saveReaderExtras()
-            showReader(info, index, text, src)
-        }
-        slider("亮度", 0.15f, 1f, 17, ReaderUi.bright, { "${(it * 100).toInt()}%" }) {
-            // 手动改亮度就退出跟随系统，与底栏那条亮度滑条同一口径。
-            ReaderUi.bright = it
-            ReaderUi.brightAuto = false
+        card("外观") { g ->
+            chips(g, "底色", listOf("日" to false as Any, "夜" to true),
+                { Color.red(readerBackground) <= 100 }) { night ->
+                // 底色一换，整套前景色都要跟着换，只能重建整屏；这也是本页唯一离开此屏的项。
+                val bg = if (night as Boolean) ReaderStyle.BG_FANQIE_NIGHT else ReaderStyle.BG_FANQIE_DAY
+                saveReaderPrefs(readerSize, readerSpacing, bg)
+                saveReaderExtras()
+                showReader(info, index, text, src)
+            }
+            slider(g, "亮度", 0.15f, 1f, 17, ReaderUi.bright, { "${(it * 100).toInt()}%" }) {
+                // 手动改亮度就退出跟随系统，与底栏那条亮度滑条同一口径。
+                ReaderUi.bright = it
+                ReaderUi.brightAuto = false
+            }
         }
 
         // ── 正文 ───────────────────────────────────────────
-        col.addView(Widgets.sectionLabel(this, "正文"))
-        slider("字号", 10f, 24f, 14, readerSize, { "${it.toInt()}" }) { readerSize = it }
-        slider("行距", 1.2f, 2.4f, 12, readerSpacing, { String.format("%.1f", it) }) { readerSpacing = it }
-        slider("段距", 0f, 2f, 2, ReaderUi.paraLevel.toFloat(),
-            { listOf("无", "半行", "一行")[it.toInt().coerceIn(0, 2)] }) {
-            ReaderUi.paraLevel = it.toInt()
+        card("正文") { g ->
+            // 预览块放段首：改字号、行距、字重不用退回阅读页才知道多大。
+            val pv = Md3.text(this, PREVIEW_TEXT, Md3.FS_SM, Md3.onSurfaceVariant).apply {
+                setPadding(Md3.dp(this@showReaderSettings, 8), Md3.dp(this@showReaderSettings, 7),
+                    Md3.dp(this@showReaderSettings, 8), Md3.dp(this@showReaderSettings, 7))
+                background = Md3.bg(Md3.surface3, Md3.R_ITEM.toFloat())
+            }
+            styleBody(pv, PREVIEW_TEXT)
+            g.addView(pv, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                setMargins(ip, Md3.dp(this@showReaderSettings, 4), ip,
+                    Md3.dp(this@showReaderSettings, 2))
+            })
+            previewView = pv
+
+            slider(g, "字号", 10f, 24f, 14, readerSize, { "${it.toInt()}" }) { readerSize = it }
+            slider(g, "行距", 1.2f, 2.4f, 12, readerSpacing, { String.format("%.1f", it) }) {
+                readerSpacing = it
+            }
+            slider(g, "段距", 0f, 2f, 2, ReaderUi.paraLevel.toFloat(),
+                { listOf("无", "半行", "一行")[it.toInt().coerceIn(0, 2)] }) {
+                ReaderUi.paraLevel = it.toInt()
+            }
+            slider(g, "缩进", 0f, 2f, 2, ReaderUi.indentLevel.toFloat(),
+                { listOf("无", "1 字", "2 字")[it.toInt().coerceIn(0, 2)] }) {
+                ReaderUi.indentLevel = it.toInt()
+            }
+            slider(g, "字距", -0.05f, 0.10f, 15, ReaderUi.letterEm, { String.format("%.2f", it) }) {
+                ReaderUi.letterEm = it
+            }
+            chips(g, "字重", listOf("常规" to 0 as Any, "中粗" to 1, "粗" to 2),
+                { ReaderUi.weightLevel as Any }) { ReaderUi.weightLevel = it as Int }
+            chips(g, "斜体", listOf("关" to false as Any, "开" to true),
+                { ReaderUi.italic as Any }) { ReaderUi.italic = it as Boolean }
+            chips(g, "两端", listOf("关" to false as Any, "开" to true),
+                { ReaderUi.justify as Any }) { ReaderUi.justify = it as Boolean }
         }
-        slider("缩进", 0f, 2f, 2, ReaderUi.indentLevel.toFloat(),
-            { listOf("无", "1 字", "2 字")[it.toInt().coerceIn(0, 2)] }) {
-            ReaderUi.indentLevel = it.toInt()
-        }
-        slider("字距", -0.05f, 0.10f, 15, ReaderUi.letterEm, { String.format("%.2f", it) }) {
-            ReaderUi.letterEm = it
-        }
-        chips("字重", listOf("常规" to 0 as Any, "中粗" to 1, "粗" to 2),
-            { ReaderUi.weightLevel as Any }) { ReaderUi.weightLevel = it as Int }
-        chips("斜体", listOf("关" to false as Any, "开" to true),
-            { ReaderUi.italic as Any }) { ReaderUi.italic = it as Boolean }
-        chips("两端", listOf("关" to false as Any, "开" to true),
-            { ReaderUi.justify as Any }) { ReaderUi.justify = it as Boolean }
 
         // ── 标题 ───────────────────────────────────────────
-        col.addView(Widgets.sectionLabel(this, "标题"))
-        chips("位置", listOf("居左" to 0 as Any, "居中" to 1, "隐藏" to 2),
-            { ReaderUi.titleMode as Any }) { ReaderUi.titleMode = it as Int }
-        slider("字号", 0f, 8f, 4, ReaderUi.titleAdd.toFloat(), { "+${it.toInt()}" }) {
-            ReaderUi.titleAdd = it.toInt()
+        card("标题") { g ->
+            chips(g, "位置", listOf("居左" to 0 as Any, "居中" to 1, "隐藏" to 2),
+                { ReaderUi.titleMode as Any }) { ReaderUi.titleMode = it as Int }
+            slider(g, "字号", 0f, 8f, 4, ReaderUi.titleAdd.toFloat(), { "+${it.toInt()}" }) {
+                ReaderUi.titleAdd = it.toInt()
+            }
+            slider(g, "间距", 0f, 12f, 3, (ReaderUi.titleGap * 4).toFloat(), { "${it.toInt()} dp" }) {
+                ReaderUi.titleGap = (it / 4f).toInt()
+            }
+            chips(g, "字重", listOf("常规" to false as Any, "加粗" to true),
+                { ReaderUi.titleBold as Any }) { ReaderUi.titleBold = it as Boolean }
         }
-        slider("间距", 0f, 12f, 3, (ReaderUi.titleGap * 4).toFloat(), { "${it.toInt()} dp" }) {
-            ReaderUi.titleGap = (it / 4f).toInt()
-        }
-        chips("字重", listOf("常规" to false as Any, "加粗" to true),
-            { ReaderUi.titleBold as Any }) { ReaderUi.titleBold = it as Boolean }
 
         // ── 边距 ───────────────────────────────────────────
-        col.addView(Widgets.sectionLabel(this, "边距"))
-        slider("边距", 0f, 2f, 2, ReaderUi.marginLevel.toFloat(),
-            { listOf("窄", "标准", "宽")[it.toInt().coerceIn(0, 2)] }) {
-            ReaderUi.marginLevel = it.toInt()
+        card("边距") { g ->
+            slider(g, "边距", 0f, 2f, 2, ReaderUi.marginLevel.toFloat(),
+                { listOf("窄", "标准", "宽")[it.toInt().coerceIn(0, 2)] }) {
+                ReaderUi.marginLevel = it.toInt()
+            }
         }
 
         // ── 翻页 ───────────────────────────────────────────
-        col.addView(Widgets.sectionLabel(this, "翻页"))
-        chips("动画", listOf("滚一屏" to 0 as Any, "覆盖" to 1),
-            { ReaderUi.pageAnim as Any }) { ReaderUi.pageAnim = it as Int }
-        // 一屏整屏滚完的时长；不满一屏按距离比例缩，所以它也是上限。
-        slider("时长", ReaderStyle.PAGE_BASE_MIN_MS.toFloat(), ReaderStyle.PAGE_BASE_MAX_MS.toFloat(),
-            ((ReaderStyle.PAGE_BASE_MAX_MS - ReaderStyle.PAGE_BASE_MIN_MS) /
-                ReaderStyle.PAGE_BASE_STEP_MS).toInt(),
-            ReaderUi.pageBaseMs.toFloat(), { "${it.toInt()} ms" }) {
-            ReaderUi.pageBaseMs = ReaderStyle.pageBaseClamp(it.toLong())
+        card("翻页") { g ->
+            chips(g, "动画", listOf("滚一屏" to 0 as Any, "覆盖" to 1),
+                { ReaderUi.pageAnim as Any }) { ReaderUi.pageAnim = it as Int }
+            // 一屏整屏滚完的时长；不满一屏按距离比例缩，所以它也是上限。
+            slider(g, "时长", ReaderStyle.PAGE_BASE_MIN_MS.toFloat(), ReaderStyle.PAGE_BASE_MAX_MS.toFloat(),
+                ((ReaderStyle.PAGE_BASE_MAX_MS - ReaderStyle.PAGE_BASE_MIN_MS) /
+                    ReaderStyle.PAGE_BASE_STEP_MS).toInt(),
+                ReaderUi.pageBaseMs.toFloat(), { "${it.toInt()} ms" }) {
+                ReaderUi.pageBaseMs = ReaderStyle.pageBaseClamp(it.toLong())
+            }
         }
 
         // ── 菜单 ───────────────────────────────────────────
-        col.addView(Widgets.sectionLabel(this, "菜单"))
-        col.addView(
-            Widgets.listItem(this, "工具格按钮",
-                ReaderUi.tools.joinToString(" · ") { readerToolTitle(it) },
-                twoLine = true, onClick = { showToolsDialog(info, index, text, src) }),
-            Md3.lpDp(this, null, Md3.ITEM_TALL),
-        )
-        chips("徽标", listOf("隐藏" to false as Any, "显示" to true),
-            { ReaderUi.badgeOn as Any }) { ReaderUi.badgeOn = it as Boolean }
+        card("菜单") { g ->
+            g.addView(
+                Widgets.groupItem(this, "工具格按钮",
+                    ReaderUi.tools.joinToString(" · ") { readerToolTitle(it) },
+                    onClick = { showToolsDialog(info, index, text, src) }),
+                Md3.lpDp(this, null, Md3.ITEM_TALL),
+            )
+            chips(g, "徽标", listOf("隐藏" to false as Any, "显示" to true),
+                { ReaderUi.badgeOn as Any }) { ReaderUi.badgeOn = it as Boolean }
+        }
 
         // ── 其他 ───────────────────────────────────────────
-        col.addView(Widgets.sectionLabel(this, "其他"))
-        chips("常亮", listOf("关" to false as Any, "开" to true),
-            { ReaderUi.keepOn as Any }) { ReaderUi.keepOn = it as Boolean }
-        slider("自动翻页", 1f, 60f, 59, ReaderUi.autoPageSec.toFloat(), { "${it.toInt()} s" }) {
-            ReaderUi.autoPageSec = it.toInt().coerceIn(1, 60)
+        card("其他") { g ->
+            chips(g, "常亮", listOf("关" to false as Any, "开" to true),
+                { ReaderUi.keepOn as Any }) { ReaderUi.keepOn = it as Boolean }
+            slider(g, "自动翻页", 1f, 60f, 59, ReaderUi.autoPageSec.toFloat(), { "${it.toInt()} s" }) {
+                ReaderUi.autoPageSec = it.toInt().coerceIn(1, 60)
+            }
+            g.addView(Widgets.button(this, "恢复默认排版", "outline") {
+                readerSize = Md3.FS_READ
+                readerSpacing = 1.75f
+                ReaderUi.paraLevel = 0
+                ReaderUi.indentLevel = 0
+                ReaderUi.letterEm = 0f
+                ReaderUi.weightLevel = 0
+                ReaderUi.italic = false
+                ReaderUi.justify = true
+                ReaderUi.titleMode = 0
+                ReaderUi.titleAdd = 2
+                ReaderUi.titleBold = true
+                ReaderUi.titleGap = 1
+                ReaderUi.marginLevel = 1
+                ReaderUi.pageBaseMs = ReaderStyle.PAGE_BASE_MS
+                applyNow()
+                paint()
+                toast("排版已恢复默认")
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, Md3.BTN)).apply {
+                setMargins(ip, Md3.dp(this@showReaderSettings, 4), ip,
+                    Md3.dp(this@showReaderSettings, 4))
+            })
         }
-        col.addView(Widgets.button(this, "恢复默认排版", "outline") {
-            readerSize = Md3.FS_READ
-            readerSpacing = 1.75f
-            ReaderUi.paraLevel = 0
-            ReaderUi.indentLevel = 0
-            ReaderUi.letterEm = 0f
-            ReaderUi.weightLevel = 0
-            ReaderUi.italic = false
-            ReaderUi.justify = true
-            ReaderUi.titleMode = 0
-            ReaderUi.titleAdd = 2
-            ReaderUi.titleBold = true
-            ReaderUi.titleGap = 1
-            ReaderUi.marginLevel = 1
-            ReaderUi.pageBaseMs = ReaderStyle.PAGE_BASE_MS
-            applyNow()
-            paint()
-            toast("排版已恢复默认")
-        })
     }
 
     paint()
