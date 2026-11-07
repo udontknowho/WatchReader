@@ -1,6 +1,7 @@
 package com.watchdl.ui
 
 import android.view.MotionEvent
+import android.view.VelocityTracker
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ScrollView
@@ -50,13 +51,23 @@ private fun scrollToTop(from: View) {
  * 改成常驻要重写每屏的搭建时机与返回栈。这里用「拖动位移 + 换屏后从另一侧滑入」
  * 近似同一手感，改动只在手势与收尾动画两处。
  *
- * 松手阈值取屏宽 1/3。位移不到就弹回，不让「轻轻一划」把屏换掉。
+ * 判定分两档（2026-11-06 改，用户报「滑到发现要很大力气」）：
+ * 1. 位移：够屏宽 1/4 就换栏，原来取 1/3，手表小屏上要拖 60 dp 太费力。
+ * 2. 速度：横速过屏宽 3 倍每秒也算换栏，「轻轻一划」得能切。
+ * 方向比也从 1.6 松到 1.2，斜着划不再白滑。
  */
 private var swiping = false
 private var claimed = false
 private var gaveUp = false
 private var startX = 0f
 private var startY = 0f
+private var tracker: VelocityTracker? = null
+
+/** 每秒划过屏宽的这个倍数，就算「甩」了一下，不看位移也换栏。 */
+private const val FLING_SCREEN_PER_SEC = 3f
+
+/** 位移到屏宽的几分之一就提前认领手势，不必等方向比攒够。 */
+private const val EARLY_CLAIM_DIVISOR = 8f
 
 internal fun MainActivity.handleTabSwipe(ev: MotionEvent): Boolean {
     val active = tabActive
@@ -69,20 +80,33 @@ internal fun MainActivity.handleTabSwipe(ev: MotionEvent): Boolean {
             gaveUp = false
             startX = ev.rawX
             startY = ev.rawY
+            tracker?.recycle()
+            tracker = VelocityTracker.obtain().also { it.addMovement(ev) }
         }
 
         MotionEvent.ACTION_MOVE -> {
             if (!swiping || gaveUp) return false
+            tracker?.addMovement(ev)
             val dx = ev.rawX - startX
             val dy = ev.rawY - startY
             if (!claimed) {
-                // 先判方向：竖向占优就彻底让开，别跟列表抢纵向滚动。
-                if (Math.abs(dy) > slop && Math.abs(dy) > Math.abs(dx)) {
-                    gaveUp = true
+                val adx = Math.abs(dx)
+                val ady = Math.abs(dy)
+                if (adx <= slop) return false
+                val w = resources.displayMetrics.widthPixels.toFloat()
+                val fast = Math.abs(xVelocity()) > w * FLING_SCREEN_PER_SEC
+                // 三条任一成立就认领：横向明显占优 / 位移已过屏宽 1/8 且不低于竖向 /
+                // 甩得够快。原来是死守 1.6 方向比，斜着划永远等不到。
+                val horizontal = adx > ady * 1.2f ||
+                    (adx > w / EARLY_CLAIM_DIVISOR && adx > ady) ||
+                    (fast && adx > ady)
+                if (horizontal) {
+                    claimed = true
+                } else {
+                    // 竖向明显占优才彻底让开，别跟列表抢纵向滚动。
+                    if (ady > slop && ady > adx * 1.2f) gaveUp = true
                     return false
                 }
-                if (Math.abs(dx) <= slop || Math.abs(dx) <= Math.abs(dy) * 1.6f) return false
-                claimed = true
             }
             // 到头了给阻尼，拉不动太多 —— 否则第一栏往右滑会露出整片空白。
             var d = dx
@@ -94,22 +118,37 @@ internal fun MainActivity.handleTabSwipe(ev: MotionEvent): Boolean {
         MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
             if (!swiping) return false
             swiping = false
+            tracker?.addMovement(ev)
+            val vx = xVelocity()
+            tracker?.recycle()
+            tracker = null
             if (!claimed) return false
-            settle(active, ev.actionMasked == MotionEvent.ACTION_CANCEL)
+            settle(active, ev.actionMasked == MotionEvent.ACTION_CANCEL, vx)
             return true
         }
     }
     return false
 }
 
-/** 松手后的收尾：够远就滑出去换屏，不够远弹回。 */
-private fun MainActivity.settle(active: Int, cancelled: Boolean) {
+/** 当前横扫速度，单位 px 每秒。没有轨迹时给 0。 */
+private fun xVelocity(): Float {
+    val t = tracker ?: return 0f
+    t.computeCurrentVelocity(1000)
+    return t.xVelocity
+}
+
+/** 松手后的收尾：甩得够快或拖得够远就换屏，否则弹回。 */
+private fun MainActivity.settle(active: Int, cancelled: Boolean, vx: Float) {
     val w = resources.displayMetrics.widthPixels.toFloat()
     val dx = root.translationX
+    val fast = Math.abs(vx) > w * FLING_SCREEN_PER_SEC
     val target = when {
         cancelled -> -1
-        dx <= -w * 0.33f -> active + 1
-        dx >= w * 0.33f -> active - 1
+        // 速度优先：甩一下就不看位移了，这是「轻轻一划」该有的事。
+        fast && vx < 0f -> active + 1
+        fast && vx > 0f -> active - 1
+        dx <= -w * 0.25f -> active + 1
+        dx >= w * 0.25f -> active - 1
         else -> -1
     }
     if (target !in 0..2) {
