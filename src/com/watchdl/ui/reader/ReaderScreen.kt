@@ -122,6 +122,15 @@ internal object ReaderUi {
     var restoreAt = -1
 
     /**
+     * 同上，但落点存的是**正文字符偏移**而不是像素：拼接块读完换章时用。
+     *
+     * 两块文本同源（下一章正文的头部），字符偏移到新页仍指同一行；
+     * 用像素的话拼接块在旧页里排在整章正文之后，绝对 y 会多出一个章高。
+     * -1 表示没有这个落点。
+     */
+    var restoreChars = -1
+
+    /**
      * 正在显示的正文与标题。
      *
      * 设置面板要“改一项、正文立刻变”，重建视图树会把滚动位置打回章首，
@@ -516,18 +525,17 @@ internal fun MainActivity.showReader(
             .coerceAtLeast(0)
 
     /**
-     * 拼接块读完那一行在滚动内容里的 y；下一章从这一行接着显示，不重读。
+     * 拼接块读完处在那块正文里的**字符偏移**；下一章从这一处接着显示，不重读。
      *
-     * 两块版式相同（同一条 [styleBody]），偏移可以直接搬到新页。
-     * tvNext 还没排版时退回 0：宁可让新页落回章首（最多重读一屏），
-     * 也不按猜的行高乱定位。
+     * 存字符不存像素：拼接块的字是下一章正文的头部（同一个 [shownText]、同一条
+     * [styleBody]），字符偏移两边指的是同一行；像素坐标则不然 —— 拼接块在旧页里
+     * 排在整章正文之后，拿它的绝对 y 到新页去落位会多出一个章的高度。
+     * 未排版时退回 0：宁可让新页落回章首（最多重读一屏），也不按猜的行高乱定位。
      */
-    fun spliceResume(): Int {
+    fun spliceReadChars(): Int {
         val nx = tvNext ?: return 0
         val layout = nx.layout ?: return 0
-        val at = spliceChars.coerceIn(0, layout.text.length)
-        return childTopIn(body, nx) + nx.paddingTop +
-            layout.getLineTop(layout.getLineForOffset(at))
+        return spliceChars.coerceIn(0, layout.text.length)
     }
 
     frame.addView(body, FrameLayout.LayoutParams(
@@ -601,24 +609,23 @@ internal fun MainActivity.showReader(
     fun toNext() {
         // 先把这一屏抓下来：新页建好后要把它滑出去作过渡（[ReaderUi.takeSnap]）。
         ReaderUi.capture?.invoke(1)
-        val resume = if (tvNext == null) 0 else spliceResume()
+        val resume = if (tvNext == null) 0 else spliceReadChars()
         if (resume > 0) {
-            // 两块版式相同，偏移直接搬：新页从拼接块停下的那一行接上，不重读。
+            // 拼接块里已经读过的字，新页跳过：传字符偏移，由新页自己的版式换算行号。
             ReaderUi.restoreKey = "${info.bookId}#${index + 1}"
-            ReaderUi.restoreAt = resume
+            ReaderUi.restoreChars = resume
             preview(info, index + 1)
         } else nextChapter(info, index)
     }
 
     /**
-     * 平滑滚一屏。步距按行算，到章末 / 章首才换章。
+     * 平滑滚一屏。步距按「一屏减一行」走，到内容底 / 顶才换章。
      *
-     * 章末会让下一章的开头接在同一屏（拼接块 [tvNext]），所以滚动内容里有**两套行号**：
-     * tv 是本章，tvNext 是下一章开头。两块用的是同一条 [styleBody]，但 layout 互相独立。
-     * 以前一律用本章的 layout 换算：一旦滚进拼接块，`getLineForVertical` 拿到越界偏移
-     * 会夹到本章最后一行，落点跑到当前视口上方 —— 点下半屏变成往回弹，而且永远
-     * 到不了 `from >= limit` 的换章分支，人就被卡在拼接块里出不去。
-     * 现在按“视口顶落在哪一块”分别算，走出边界才交接。
+     * 步距照 legado 的 `ReaderScrollPolicy.pageStep`：新屏顶上留一行旧内容做接续。
+     * 关键是**跨块不另算**：章末接的下一章开头（[tvNext]）与本章正文同一条版式，
+     * 「一屏减一行」在接缝处照样成立。以前接缝处特意跳 `nxTop`，而那一跳的位移
+     * 只剩「分隔线 + 下一章标题」那一小截 —— 就是「只挪一点点」。
+     * 落点再吸附到行顶，行号用落点所在那一块自己的 layout（两块版式相同，坐标独立）。
      */
     fun scrollPage(forward: Boolean) {
         val limit = scrollLimit(body)
@@ -633,35 +640,23 @@ internal fun MainActivity.showReader(
         val nx = tvNext
         val nxTop = if (nx == null) 0 else childTopIn(body, nx) + nx.paddingTop
 
-        /** 在 [layout] 里按一屏行走，返回落点 y；[top] 是这一块的行顶。未排版时给 null。 */
-        fun stepIn(layout: android.text.Layout?, top: Int, linePx: Int): Int? {
-            if (layout == null || linePx <= 0) return null
-            val perPage = (vp / linePx).coerceAtLeast(2)
-            val first = layout.getLineForVertical((from - top).coerceAtLeast(0))
-            val line = ReaderStyle.pageFirstLine(first, perPage, layout.lineCount, forward)
-            return top + layout.getLineTop(line)
-        }
+        // 一屏减一行（legado 的「保留一行」）；一屏不足两行时至少走一行。
+        val lineH = (if (nx != null && from >= nxTop) nx.lineHeight else tv.lineHeight)
+            .coerceAtLeast(1)
+        val step = (vp - lineH).coerceAtLeast(lineH)
+        var target = (if (forward) from + step else from - step).coerceIn(0, limit)
 
-        val target = if (nx != null && from >= nxTop) {
-            // 视口已经在下一章的开头里：按拼接块自己的行号走。
-            val t = stepIn(nx.layout, nxTop, nx.lineHeight)
-            when {
-                // 走到拼接块末尾：交给换章，新页落在预览结束处（版式相同，接着读）。
-                t == null || (forward && t <= from) -> { toNext(); return }
-                // 往回退到拼接块首行之外：退回本章末屏，不在缝隙里卡住。
-                !forward && t <= nxTop -> mainTop + (tv.layout?.lastLineTop() ?: 0)
-                else -> t.coerceIn(nxTop, limit)
-            }
-        } else {
-            val t = stepIn(tv.layout, mainTop, tv.lineHeight)
-            when {
-                // 刚换章那一帧还没排版：退回整屏，至少这一下是动的。
-                t == null -> (if (forward) from + vp else from - vp).coerceIn(0, limit)
-                // 本章读完但下面还接着下一章开头：接着滚进拼接块，不整章跳过去。
-                forward && t <= from && nx != null -> nxTop
-                forward && t <= from -> { toNext(); return }
-                else -> t.coerceIn(0, limit)
-            }
+        // 吸附到行顶：用落点所在那一块自己的 layout，避免一行被切成两半。
+        val inNext = nx != null && target >= nxTop
+        val layout = if (inNext) nx?.layout else tv.layout
+        val top = if (inNext) nxTop else mainTop
+        if (layout != null && layout.lineCount > 0) {
+            val li = layout.getLineForVertical((target - top).coerceAtLeast(0))
+                .coerceIn(0, layout.lineCount - 1)
+            val snapped = (top + layout.getLineTop(li)).coerceIn(0, limit)
+            // 吸反方向（跨块时会落回当前位移之内）就保留原始步距。
+            if (forward && snapped > from) target = snapped
+            if (!forward && snapped < from) target = snapped
         }
         if (target == from) {
             // 只剩不足一行可见：当作到边界。
@@ -1177,9 +1172,11 @@ internal fun MainActivity.showReader(
     // 恢复上次读到的地方。等布局完成再滚，否则拿不到 maxScroll。
     // 「返回刚才那章」胶囊回跳时位置是钉死的：落回当时那一屏，不是那一章上次读到的位置。
     val pinned = if (ReaderUi.restoreKey == findKey) ReaderUi.restoreAt else -1
-    if (pinned >= 0) {
+    val pinnedChars = if (ReaderUi.restoreKey == findKey) ReaderUi.restoreChars else -1
+    if (ReaderUi.restoreKey == findKey) {
         ReaderUi.restoreKey = ""
         ReaderUi.restoreAt = -1
+        ReaderUi.restoreChars = -1
     }
     val restore = readOffset(info.bookId).takeIf { it > 0 }
     if (atEnd) {
@@ -1187,6 +1184,14 @@ internal fun MainActivity.showReader(
         // legado 的窗口一次带四页，退一屏跨章时看到的正是上一章的末页，不是章首。
         // 有拼接块时章末是正文底边：整页底会落进下一章的开头（读的是别人的字）。
         placeBeforeDraw { if (tvNext != null) mainLimit() else Int.MAX_VALUE }
+    } else if (pinnedChars >= 0) {
+        // 拼接块里读完换过来的：按字符偏移落位。新页自己排版后的行号才是准的，
+        // 旧页的像素坐标在这里没有意义（那个坐标里多着一整章正文）。
+        placeBeforeDraw {
+            val l = tv.layout
+            if (l == null) 0 else childTopIn(body, tv) + tv.paddingTop +
+                l.getLineTop(l.getLineForOffset(pinnedChars.coerceIn(0, l.text.length)))
+        }
     } else if (pinned >= 0) {
         placeBeforeDraw { pinned.coerceIn(0, mainLimit()) }
     } else if (restore != null) {
@@ -1336,7 +1341,7 @@ internal fun MainActivity.restyleReader(raw: String) {
  * 正文 tv 与拼接块里的下一章正文都走这一条 —— 两块版式相同，改设置时才能一起变。
  * [raw] 必须是**原始文本**（未缩进、未挂 span）。
  */
-private fun MainActivity.styleBody(tv: TextView, raw: String) {
+internal fun MainActivity.styleBody(tv: TextView, raw: String) {
     val light = Color.red(readerBackground) > 100
     val ink = ReaderStyle.inkOverride(readerBackground)
         ?: if (light) Color.rgb(28, 27, 31) else Md3.onSurface
