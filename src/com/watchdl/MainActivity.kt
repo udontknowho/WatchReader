@@ -154,6 +154,10 @@ class MainActivity : Activity() {
      * 但松手要么换屏（整棵子树重建）要么弹回，下一次触摸是新的 DOWN，状态自己复位。
      */
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) {
+            cancelReturnScroll?.invoke()
+            pendingReturnPoint = null
+        }
         val took = runCatching { handleTabSwipe(ev) }.getOrDefault(false)
         if (took) return true
         return super.dispatchTouchEvent(ev)
@@ -169,8 +173,16 @@ class MainActivity : Activity() {
             screen = next
             return
         }
+        cancelReturnScroll?.invoke()
+        pendingReturnPoint = null
+        // 书架阅读页的顶栏直接 showShelf，不经过 goBackToPrevious。
+        val shelfReturn = if (next == Screen.Shelf && returnStack.lastOrNull()?.screen == next)
+            returnStack.removeLast() else null
         cancelTasks()
         screen = next
+        if (shelfReturn != null) root.post {
+            if (screen == Screen.Shelf) restoreReturnScroll(shelfReturn)
+        }
     }
     private var lastJob: BookJob? = null
 
@@ -275,18 +287,25 @@ class MainActivity : Activity() {
      * 以前只有一个变量，只能记一层：搜索→目录→阅读→设置，从设置退到目录时
      * 就把记录用掉了，再按返回直接回首页，跳过搜索结果。现在是栈。
      */
-    private val returnStack = ArrayDeque<Screen>()
+    private val returnStack = ArrayDeque<ReturnPoint>()
 
     /** 记下当前屏，供返回时重放。只在向前跳转前调。 */
     internal fun rememberReturn() {
         // 同一屏不要重复压：重复调用会让返回要按两次才动。
-        if (returnStack.lastOrNull() != screen) returnStack.addLast(screen)
-        while (returnStack.size > 8) returnStack.removeFirst()
+        val body = (0 until root.childCount).map { root.getChildAt(it) }
+            .filterIsInstance<ScrollView>().firstOrNull()
+        returnStack.remember(ReturnPoint(screen, body?.scrollY ?: 0, hitsWinStart, tocWinStart))
     }
 
     /** 回到进来的那一屏；没有记录就回首页。 */
     internal fun goBackToPrevious() {
-        replay(returnStack.removeLastOrNull())
+        val point = returnStack.removeLastOrNull()
+        if (point == null) { showShelf(); return }
+        hitsWinStart = point.hitsWindow
+        tocWinStart = point.tocWindow
+        replayingReturn = true
+        try { replay(point.screen) } finally { replayingReturn = false }
+        restoreReturnScroll(point)
     }
 
     /** 重放一屏（不重新联网）。记录里的屏都自带重绘所需的数据。 */
@@ -317,6 +336,65 @@ class MainActivity : Activity() {
             else -> showShelf()
         }
     }
+    /** 返回目录时保留原窗口，不能被阅读进度重新定位。 */
+    private var replayingReturn = false
+    private var cancelReturnScroll: (() -> Unit)? = null
+    private var pendingReturnPoint: ReturnPoint? = null
+
+    override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_SCROLL) {
+            cancelReturnScroll?.invoke()
+            pendingReturnPoint = null
+        }
+        return super.dispatchGenericMotionEvent(ev)
+    }
+
+    /**
+     * 监听实际布局而非只 post 一次：发现页等会先画加载占位，再异步填列表。
+     * 用户触摸/转表冠后取消恢复，避免后来一次布局把用户拖回旧位置。
+     * 离开此视图后移除监听，不持有已销毁页面。
+     */
+    private fun restoreReturnScroll(point: ReturnPoint) {
+        cancelReturnScroll?.invoke()
+        val body = (0 until root.childCount).map { root.getChildAt(it) }
+            .filterIsInstance<ScrollView>().firstOrNull() ?: return
+        val content = body.getChildAt(0) ?: return
+        cancelReturnScroll = null
+        pendingReturnPoint = point
+        var active = true
+        lateinit var layout: View.OnLayoutChangeListener
+        val restore = Runnable {
+            if (active && body.parent === root && screenId(screen) == screenId(point.screen)) {
+                body.scrollTo(0, restoredScrollY(point.scrollY, content.height,
+                    body.height - body.paddingTop - body.paddingBottom))
+            }
+        }
+        fun stop() {
+            if (!active) return
+            active = false
+            content.removeOnLayoutChangeListener(layout)
+            body.removeCallbacks(restore)
+            cancelReturnScroll = null
+        }
+        cancelReturnScroll = { stop() }
+        layout = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> body.post(restore) }
+        content.addOnLayoutChangeListener(layout)
+        body.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) {}
+            override fun onViewDetachedFromWindow(v: View) {
+                val pending = pendingReturnPoint
+                stop()
+                body.removeOnAttachStateChangeListener(this)
+                // 同业务屏异步重建视图时，把未完成恢复转交给新列表。
+                if (pending == point) root.post {
+                    if (pendingReturnPoint == point && screenId(screen) == screenId(point.screen))
+                        restoreReturnScroll(point)
+                }
+            }
+        })
+        body.post(restore)
+    }
+
     private var progressDone = 0
     private var progressFailed = 0
     private var progressStartedAt = 0L
@@ -761,7 +839,7 @@ class MainActivity : Activity() {
         // M8：从别的屏进来时把窗口挪回上次读到的那章附近。
         // 翻页时调用方会自己设好 tocWinStart 再进来，这里只在换书或从别处进来时重置。
         val entering = (screen as? Screen.Toc)?.info?.bookId != info.bookId
-        if (entering) {
+        if (entering && !replayingReturn) {
             // 倒序时同一个章号在显示顺序里的位置是镜像的，不能直接拿章号当滑动位置。
             tocWinStart = (tocPos(info, readProgress(info.bookId)) - TOC_WINDOW / 2).coerceAtLeast(0)
         }
@@ -975,7 +1053,7 @@ class MainActivity : Activity() {
         }
         // 直接滚到上次读到的那章：五百章的书手动滑到第 300 章是不可能的事。
         val jumpAt = shown.indexOf(lastRead)
-        if (jumpAt >= 0) {
+        if (jumpAt >= 0 && !replayingReturn) {
             val target = col.getChildAt(listAnchor + jumpAt)
             body.post { target?.let { body.smoothScrollTo(0, it.top) } }
         }

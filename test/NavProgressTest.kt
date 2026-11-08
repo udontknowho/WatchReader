@@ -18,6 +18,26 @@ fun main() {
     println("[导航] 返回栈")
 
     run {
+        val stack = ArrayDeque<ReturnPoint>()
+        stack.remember(ReturnPoint(Screen.Shelf, 940))
+        stack.remember(ReturnPoint(Screen.Hits("书", emptyList()), 1780, hitsWindow = 60))
+        stack.remember(ReturnPoint(Screen.Hits("书", emptyList()), 1820, hitsWindow = 120))
+        check("同屏更新偏移，不重复压栈", stack.size == 2)
+        val hits = stack.removeLast()
+        check("搜索窗口跟随返回记录", hits.hitsWindow == 120)
+        check("搜索偏移跟随返回记录", hits.scrollY == 1820)
+        check("多层返回保留书架偏移", stack.removeLast().scrollY == 940)
+        repeat(20) { stack.remember(ReturnPoint(Screen.Settings("$it"), it)) }
+        check("真实返回栈只保留八层", stack.size == 8 && stack.first().scrollY == 12)
+        check("布局未就绪不越界", restoredScrollY(1800, 100, 300) == 0)
+        check("异步内容展开后恢复原位", restoredScrollY(1800, 3000, 300) == 1800)
+        check("列表变短夹到末尾", restoredScrollY(1800, 1000, 300) == 700)
+        check("负偏移夹到顶部", restoredScrollY(-1, 1000, 300) == 0)
+        val toc = ReturnPoint(Screen.Shelf, 900, tocWindow = 400)
+        check("目录窗口独立保存", toc.tocWindow == 400)
+    }
+
+    run {
         println("[导航] 四层跳转要一层层退")
         val stack = ArrayDeque<String>()
         // home → 搜索 → 目录 → 阅读 → 设置
