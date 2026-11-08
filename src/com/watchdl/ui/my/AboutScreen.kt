@@ -44,7 +44,7 @@ internal fun MainActivity.showAbout() {
             subtitle = "数据只在本机，不上传", glyph = "check",
             onClick = { showPrivacy() }))
         g.addView(Widgets.groupItem(ctx = this, title = "开源许可",
-            subtitle = "Apache 2.0 · 脚本引擎 MPL 2.0", glyph = "list",
+            subtitle = "GPL-3.0 · 脚本引擎 MPL 2.0", glyph = "list",
             onClick = { showLicense() }))
         g.addView(Widgets.groupItem(ctx = this, title = "免责声明",
             subtitle = "内容与版权归原作者及原站点", glyph = "warning",
@@ -149,14 +149,14 @@ private fun MainActivity.showPrivacy() {
  * 许可证。legado 是 Markdown sheet 读 `LICENSE` 文件，我们没有 assets 里的 markdown，
  * 所以直接把要说的几行写进对话框。
  *
- * 只写实际成立的两条：本应用自身 Apache 2.0，脚本引擎 Rhino 走 MPL 2.0；
- * 其余依赖都是 AndroidX（Apache 2.0），不再逐条列，免得写错。
+ * 只写实际成立的两条：本应用自身 GPL-3.0（与仓库根目录 LICENSE 一致），
+ * 脚本引擎 Rhino 走 MPL 2.0；AndroidX 等依赖各自保留原许可，不再逐条列，免得写错。
  */
 private fun MainActivity.showLicense() {
     Widgets.md3Dialog(this,
         title = "许可证",
-        body = "Apache License 2.0：可自由使用、修改与再分发，须保留版权与许可声明，不提供担保。\n" +
-            "脚本引擎 Rhino 走 MPL 2.0，其余为 AndroidX。",
+        body = "GNU GPL v3.0：可自由使用、修改与再分发，分发衍生作品须同样以 GPL-3.0 开放源码，不提供担保。\n" +
+            "脚本引擎 Rhino 走 MPL 2.0，其余依赖保留各自原许可。",
         dismiss = "关闭",
     ).show()
 }
