@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>UI 对齐：六条待拍板</title>
+<style>
+:root{
+  --surface:#141218; --surface1:#1d1b20; --surface2:#211f26; --surface3:#2b2930; --surface4:#36343b;
+  --on:#e6e0e9; --onvar:#cac4d0; --outline-v:#49454f;
+  --primary:#d0bcff; --on-primary:#381e72; --ok:#7bd88f;
+  --bg:#0b0a0e; --page:#16151a;
+}
+*{box-sizing:border-box}
+body{margin:0;padding:14px 14px 120px;background:var(--bg);color:var(--on);
+  font:14px/1.6 system-ui,"Noto Sans SC","PingFang SC",sans-serif;-webkit-text-size-adjust:100%}
+h1{font-size:16px;margin:0 0 4px}
+.sub{color:var(--onvar);font-size:12px;margin:0 0 14px}
+.card{background:var(--page);border:1px solid var(--outline-v);border-radius:10px;
+  padding:12px 12px 8px;margin:0 0 12px}
+.q{font-size:14px;font-weight:600;margin:0 0 2px}
+.q .n{color:var(--primary);font-variant-numeric:tabular-nums;margin-right:6px}
+.hint{font-size:12px;color:var(--onvar);margin:0 0 8px}
+.opt{display:flex;gap:10px;align-items:flex-start;padding:9px 10px;margin:0 0 6px;
+  border:1px solid var(--outline-v);border-radius:8px;background:var(--surface1);cursor:pointer}
+.opt:active{background:var(--surface2)}
+.opt.on{border-color:var(--primary);background:var(--surface3)}
+.k{flex:none;width:22px;height:22px;border-radius:6px;background:var(--surface4);
+  display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;
+  color:var(--onvar);margin-top:1px}
+.opt.on .k{background:var(--primary);color:var(--on-primary)}
+.t{font-size:13px;font-weight:600}
+.d{font-size:12px;color:var(--onvar);margin-top:1px}
+.cost{font-size:11px;color:var(--ok);margin-top:2px}
+.picked{font-size:11px;color:var(--primary);margin-left:6px}
+footer{position:fixed;left:0;right:0;bottom:0;background:var(--surface);border-top:1px solid var(--outline-v);
+  padding:10px 14px calc(10px + env(safe-area-inset-bottom))}
+.sum{font-size:12px;color:var(--onvar);margin:0 0 8px;max-height:74px;overflow:auto;white-space:pre-wrap}
+.row{display:flex;gap:8px;align-items:center}
+button{flex:1;height:40px;border:0;border-radius:20px;font:600 14px system-ui,sans-serif}
+#copy{background:var(--primary);color:var(--on-primary)}
+#clear{flex:none;width:96px;background:transparent;color:var(--primary);border:1px solid var(--outline-v)}
+#toast{position:fixed;left:50%;transform:translateX(-50%);bottom:150px;background:var(--surface3);
+  color:var(--on);padding:8px 14px;border-radius:8px;font-size:12px;opacity:0;transition:.25s;pointer-events:none}
+#toast.on{opacity:1}
+</style>
+</head>
+<body>
+<h1>UI 对齐：六条待拍板</h1>
+<p class="sub">每条点一个选项（最后一条可多选）。点完按「复制结果」，粘回对话就行。<span id="cnt">已选 0 / 6</span></p>
+<div id="qs"></div>
+
+<div id="toast"></div>
+<footer>
+  <div class="sum" id="sum">还没选。</div>
+  <div class="row">
+    <button id="clear">清空</button>
+    <button id="copy">复制结果</button>
+  </div>
+</footer>
+
+<script>
+const QS = [
+  {
+    id: "swap",
+    q: "换源要不要建屏？",
+    hint: "阅读页和详情页两处「换源」现在是 toast 占位，同一个坑出现两次。多源搜索已经有 siblingsOf，切源的数据链是通的。",
+    opts: [
+      { k: "A", t: "不建", d: "两处保持占位，点一下说「还没有」", cost: "0" },
+      { k: "B", t: "建最小换源屏", d: "列出这本书在其它源上的条目，点一条就切源重取目录", cost: "约半天" },
+      { k: "C", t: "只改文案", d: "两处从「还没做」改成「本应用只用一个源」，避免看起来像缺失", cost: "10 分钟" },
+    ],
+  },
+  {
+    id: "fulltext",
+    q: "全文搜索要不要建屏？",
+    hint: "目录现在有章名过滤，但只搜标题。core 里已有 ReaderFind.Hit，正文检索的底子现成。",
+    opts: [
+      { k: "A", t: "不建", d: "只保留目录的章名过滤", cost: "0" },
+      { k: "B", t: "建：搜已下载正文", d: "关键词命中章节与那一行，点进去直接跳到位置", cost: "约半天" },
+    ],
+  },
+  {
+    id: "tocjump",
+    q: "目录要不要补跳章？",
+    hint: "现在只能按窗口前后翻，500 章的书到第 400 章要翻十几次。",
+    opts: [
+      { k: "A", t: "不补", d: "继续用前后翻窗按钮", cost: "0" },
+      { k: "B", t: "加滑杆", d: "顶部一条滑杆，按百分比拖到大概位置，再微调", cost: "约 2 小时" },
+      { k: "C", t: "加「跳到第 N 章」", d: "弹数字输入框，直接跳，最准也最省事", cost: "约 1 小时" },
+    ],
+  },
+  {
+    id: "settings",
+    q: "设置页要不要两页化？",
+    hint: "现在是单页 7 组（外观／阅读显示／表冠／导出／书源／关于／开发者），靠滚动。legado 是 8 项入口再进子页。",
+    opts: [
+      { k: "A", t: "保持单页", d: "全部靠滚，改动为零", cost: "0" },
+      { k: "B", t: "拆成两页", d: "第一页 8 项入口，常用项（外观／阅读显示）进子页，少滚一半", cost: "约 3 小时" },
+      { k: "C", t: "只拆一半", d: "把「开发者」「导出」收进子页，主页面变短，结构不动", cost: "约 1 小时" },
+    ],
+  },
+  {
+    id: "quit",
+    q: "「我的 → 退出」到底干什么？",
+    hint: "legado 是结束 Activity。我们退出后后台下载线程还在跑，按钮含义有歧义。",
+    opts: [
+      { k: "A", t: "真退出", d: "结束 Activity，下载也跟着停（进程杀掉）", cost: "20 分钟" },
+      { k: "B", t: "改成「停止全部下载」", d: "语义明确，二次确认后停任务，不关界面", cost: "约 1 小时" },
+      { k: "C", t: "删掉这一项", d: "手表上直接划掉就行，不设退出按钮", cost: "5 分钟" },
+    ],
+  },
+  {
+    id: "ph",
+    q: "占位 19 项，哪些真做？",
+    hint: "多选。没选的保持「还没做」。剩下不选的项我不动。",
+    multi: true,
+    opts: [
+      { k: "+", t: "书签（全书聚合）", d: "跨书列出所有书签，现在只有单书的书签屏", cost: "半天" },
+      { k: "+", t: "阅读记录（跨书）", d: "每本书读到第几章，现在入口绑死在单本书上", cost: "半天" },
+      { k: "+", t: "缓存管理", d: "看已下载占多少空间，能一键清", cost: "约 2 小时" },
+      { k: "+", t: "文件管理", d: "浏览导出目录、删文件", cost: "约 2 小时" },
+      { k: "+", t: "替换净化", d: "正文关键词替换，规则存本地", cost: "约 4 小时" },
+      { k: "+", t: "导出书单", d: "把书架导出成文本清单", cost: "约 1 小时" },
+      { k: "+", t: "日志", d: "看运行日志、导出给开发者", cost: "约 2 小时" },
+      { k: "-", t: "全都不做", d: "19 项维持占位，只把文案统一成「还没做」", cost: "0" },
+    ],
+  },
+];
+
+const state = JSON.parse(localStorage.getItem("wdl.picks") || "{}");
+
+function render() {
+  const box = document.getElementById("qs");
+  box.innerHTML = "";
+  QS.forEach((q, i) => {
+    const card = document.createElement("div");
+    card.className = "card";
+    const picked = state[q.id];
+    const label = q.multi
+      ? (picked && picked.length ? `<span class="picked">已选 ${picked.length} 项</span>` : "")
+      : (picked ? `<span class="picked">已选 ${picked}</span>` : "");
+    card.innerHTML = `<div class="q"><span class="n">${i + 1}.</span>${q.q}${label}</div>
+      <div class="hint">${q.hint}</div>`;
+    q.opts.forEach((o) => {
+      const el = document.createElement("div");
+      const on = q.multi ? (picked || []).includes(o.k + "|" + o.t) : picked === o.k;
+      el.className = "opt" + (on ? " on" : "");
+      el.innerHTML = `<div class="k">${o.k}</div><div><div class="t">${o.t}</div>
+        <div class="d">${o.d}</div><div class="cost">工作量：${o.cost}</div></div>`;
+      el.onclick = () => {
+        if (q.multi) {
+          const key = o.k + "|" + o.t;
+          let arr = state[q.id] || [];
+          if (o.k === "-") arr = arr.includes(key) ? [] : [key];
+          else {
+            arr = arr.filter((x) => x !== "-|全都不做");
+            arr = arr.includes(key) ? arr.filter((x) => x !== key) : arr.concat(key);
+          }
+          state[q.id] = arr;
+        } else {
+          state[q.id] = picked === o.k ? undefined : o.k;
+        }
+        save(); render();
+      };
+      card.appendChild(el);
+    });
+    box.appendChild(card);
+  });
+  update();
+}
+
+function summary() {
+  const lines = [];
+  QS.forEach((q, i) => {
+    const p = state[q.id];
+    if (!p || (Array.isArray(p) && !p.length)) return;
+    if (q.multi) {
+      lines.push(`${i + 1}. ${q.q} → ${p.map((x) => x.split("|")[1]).join("、")}`);
+    } else {
+      const o = q.opts.find((x) => x.k === p);
+      lines.push(`${i + 1}. ${q.q} → ${o.k} ${o.t}`);
+    }
+  });
+  return lines.length ? lines.join("\n") : "还没选。";
+}
+
+function update() {
+  document.getElementById("sum").textContent = summary();
+  const done = QS.filter((q) => {
+    const p = state[q.id];
+    return p && (!Array.isArray(p) || p.length);
+  }).length;
+  document.getElementById("cnt").textContent = `已选 ${done} / ${QS.length}`;
+}
+
+function save() { localStorage.setItem("wdl.picks", JSON.stringify(state)); }
+
+document.getElementById("clear").onclick = () => {
+  for (const k in state) delete state[k];
+  save(); render();
+};
+
+document.getElementById("copy").onclick = async () => {
+  const txt = summary();
+  try {
+    await navigator.clipboard.writeText(txt);
+    toast("已复制，粘回对话就行");
+  } catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = txt; document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); toast("已复制"); }
+    catch (_) { toast("复制失败，长按上面那段文字手动选"); }
+    ta.remove();
+  }
+};
+
+let tid;
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.className = "on";
+  clearTimeout(tid); tid = setTimeout(() => (t.className = ""), 1600);
+}
+
+render();
+</script>
+</body>
+</html>

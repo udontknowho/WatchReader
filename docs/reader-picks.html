@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阅读页：六条待拍板（换源 / 顶栏 / 主题包）</title>
+<style>
+:root{
+  --surface:#141218; --surface1:#1d1b20; --surface2:#211f26; --surface3:#2b2930; --surface4:#36343b;
+  --on:#e6e0e9; --onvar:#cac4d0; --outline-v:#49454f;
+  --primary:#d0bcff; --on-primary:#381e72; --ok:#7bd88f; --warn:#ffb59c;
+  --bg:#0b0a0e; --page:#16151a;
+}
+*{box-sizing:border-box}
+body{margin:0;padding:14px 14px 130px;background:var(--bg);color:var(--on);
+  font:14px/1.6 system-ui,"Noto Sans SC","PingFang SC",sans-serif;-webkit-text-size-adjust:100%}
+h1{font-size:16px;margin:0 0 4px}
+.sub{color:var(--onvar);font-size:12px;margin:0 0 14px}
+.card{background:var(--page);border:1px solid var(--outline-v);border-radius:10px;
+  padding:12px 12px 8px;margin:0 0 12px}
+.q{font-size:14px;font-weight:600;margin:0 0 2px}
+.q .n{color:var(--primary);font-variant-numeric:tabular-nums;margin-right:6px}
+.hint{font-size:12px;color:var(--onvar);margin:0 0 8px}
+.hint b{color:var(--warn);font-weight:600}
+.opt{display:flex;gap:10px;align-items:flex-start;padding:9px 10px;margin:0 0 6px;
+  border:1px solid var(--outline-v);border-radius:8px;background:var(--surface1);cursor:pointer}
+.opt:active{background:var(--surface2)}
+.opt.on{border-color:var(--primary);background:var(--surface3)}
+.k{flex:none;width:22px;height:22px;border-radius:6px;background:var(--surface4);
+  display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;
+  color:var(--onvar);margin-top:1px}
+.opt.on .k{background:var(--primary);color:var(--on-primary)}
+.t{font-size:13px;font-weight:600}
+.d{font-size:12px;color:var(--onvar);margin-top:1px}
+.d em{color:var(--on);font-style:normal}
+.cost{font-size:11px;color:var(--ok);margin-top:2px}
+.picked{font-size:11px;color:var(--primary);margin-left:6px}
+/* 189×248 dp 屏的等比缩略：150×197 */
+.pv{margin:7px 0 0;display:flex;gap:10px;flex-wrap:wrap}
+.watch{width:150px;height:197px;border-radius:14px;border:1px solid var(--outline-v);
+  overflow:hidden;display:flex;flex-direction:column;position:relative;flex:none}
+.watch .cap{position:absolute;left:0;bottom:0;right:0;text-align:center;font-size:9px;
+  color:#9b95a3;background:rgba(0,0,0,.35);padding:1px 0}
+.tw{background:#141218;color:#e6e0e9;justify-content:space-between}
+.tbar{display:flex;align-items:center;gap:3px;padding:3px 5px;font-size:9px;
+  border-bottom:1px solid #3a3742;min-height:20px}
+.tbar .ic{width:13px;height:13px;border-radius:3px;border:1px solid #6a6577;flex:none;
+  display:flex;align-items:center;justify-content:center;font-size:8px;color:#cac4d0}
+.tbar .nm{flex:1;overflow:hidden;white-space:nowrap;font-size:9px;color:#e6e0e9}
+.body{padding:5px 7px;font-size:8px;line-height:1.5;color:#cfc9d6;flex:1;overflow:hidden}
+.bottom{margin-top:auto;border-top:1px solid #3a3742;font-size:8px;color:#a9a3b3}
+.line{height:1px;background:#3a3742}
+.brow{display:flex;align-items:center;gap:4px;padding:2px 5px;height:17px}
+.brow .ic{width:11px;height:11px;border-radius:3px;border:1px solid #6a6577;flex:none}
+.sl{flex:1;height:3px;border-radius:2px;background:#4a4657;position:relative}
+.sl i{position:absolute;left:0;top:0;bottom:0;width:52%;border-radius:2px;background:#d0bcff}
+.grid{display:flex;padding:3px 4px;gap:4px}
+.grid span{flex:1;height:15px;border-radius:3px;border:1px solid #555163;display:flex;align-items:center;justify-content:center;font-size:8px;color:#cac4d0}
+/* 主题样张 */
+.thm{background:#ded9c5;color:#5b4928;justify-content:flex-start}
+.thm .tbar{border-color:#c9c2ab;color:#5b4928}
+.thm .body{color:#5b4928}
+.thm .bottom{border-color:#c9c2ab;color:#7a6a4a}
+.thm .cap{background:rgba(255,255,255,.45);color:#5b4928}
+.thn{background:#0e0e0e;color:#bfbfbf;justify-content:flex-start}
+.thn .tbar,.thn .bottom{border-color:#2a2a2a}
+.thn .body{color:#bfbfbf}
+.legend{font-size:11px;color:var(--onvar);margin:2px 0 0}
+footer{position:fixed;left:0;right:0;bottom:0;background:var(--surface);border-top:1px solid var(--outline-v);
+  padding:10px 14px calc(10px + env(safe-area-inset-bottom))}
+.sum{font-size:12px;color:var(--onvar);margin:0 0 8px;max-height:74px;overflow:auto;white-space:pre-wrap}
+.row{display:flex;gap:8px;align-items:center}
+button{flex:1;height:40px;border:0;border-radius:20px;font:600 14px system-ui,sans-serif}
+#copy{background:var(--primary);color:var(--on-primary)}
+#clear{flex:none;width:96px;background:transparent;color:var(--primary);border:1px solid var(--outline-v)}
+#toast{position:fixed;left:50%;transform:translateX(-50%);bottom:160px;background:var(--surface3);
+  color:var(--on);padding:8px 14px;border-radius:8px;font-size:12px;opacity:0;transition:.25s;pointer-events:none}
+#toast.on{opacity:1}
+</style>
+</head>
+<body>
+<h1>阅读页：六条待拍板</h1>
+<p class="sub">换源怎么搜、顶栏放什么、主题包要不要接。每条点一个，点完按「复制结果」粘回对话。<span id="cnt">已选 0 / 6</span></p>
+<div id="qs"></div>
+<div id="toast"></div>
+<footer>
+  <div class="sum" id="sum">还没选。</div>
+  <div class="row">
+    <button id="clear">清空</button>
+    <button id="copy">复制结果</button>
+  </div>
+</footer>
+
+<script>
+// 缩略屏：189×248 dp 等比缩到 150×197。只画顶栏 + 底栏三行，正文两行占位。
+const BODY = '<div class="body">第 12 章 夜雨<br>他说这句话的时候，风正好从窗缝里灌进来，<br>' +
+  '把人吹得往被子里缩了缩。</div>';
+
+function bottomBar() {
+  return `<div class="bottom">
+    <div class="line"></div>
+    <div class="brow"><span class="ic"></span><span class="sl"><i></i></span></div>
+    <div class="line"></div>
+    <div class="brow"><span class="ic"></span><span class="sl"><i></i></span>
+      <span style="font-size:8px">‹ ›</span></div>
+    <div class="line"></div>
+    <div class="grid"><span>查</span><span>播</span><span>目</span><span>设</span></div>
+  </div>`;
+}
+
+function watch(tbar, cap, cls) {
+  return `<div class="watch ${cls || "tw"}">${tbar}${BODY}${bottomBar()}<div class="cap">${cap}</div></div>`;
+}
+
+// 顶栏三种摆法，同一套图标只用汉字占位：返 / 刷 / 换 / ⋮
+const TB_A = '<div class="tbar"><span class="ic">返</span>' +
+  '<span class="nm">夜雨长歌</span><span class="ic">⋮</span></div>';
+const TB_B = '<div class="tbar"><span class="ic">返</span>' +
+  '<span class="nm" style="flex:none;color:#8f8a9b">（无书名）</span>' +
+  '<span class="ic">刷</span><span class="ic">换</span><span class="ic">⋮</span></div>';
+const TB_C = '<div class="tbar"><span class="ic">返</span>' +
+  '<span class="nm">夜雨长…</span><span class="ic">换</span><span class="ic">⋮</span></div>';
+
+// 主题样张：番茄日 / 番茄夜 / 现在四档里的深色
+const TH = '<div class="tbar"><span class="ic">返</span><span class="nm">夜雨长歌</span>' +
+  '<span class="ic">⋮</span></div>';
+const pvThA = `<div class="pv">${watch(TH, "番茄 · 日 #ded9c5", "thm")}` +
+  `${watch(TH, "番茄 · 夜 #0e0e0e", "thn")}</div>`;
+const pvThB = `<div class="pv">${watch(TH, "只加一个「番茄」主题", "thm")}</div>`;
+const pvThC = `<div class="pv">${watch(TH, "现在就这样", "tw")}</div>`;
+const pvA = `<div class="pv">${watch(TB_A, "A：只有 ⋮，书名完整")}</div>`;
+const pvB = `<div class="pv">${watch(TB_B, "B：刷 + 换 + ⋮，书名没了")}</div>`;
+const pvC = `<div class="pv">${watch(TB_C, "C：换 + ⋮，书名半截")}</div>`;
+
+const QS = [
+  {
+    id: "titlebar",
+    q: "顶栏到底放几枚动作？",
+    hint: "legado 的顶栏默认就带「离线缓存、刷新、换源」三枚（<b>ReadButtonConfigDelegate.kt:222-227</b>）。我把顶栏压成了一枚 ⋮，理由是这块屏只有 189 dp 宽。现在你点出来了，三条路选一条。",
+    opts: [
+      { k: "A", t: "保持现状：顶栏只有 ⋮", d: "书名完整显示。缓存 / 刷新 / 换源都从 ⋮ 里的「更多操作」点。少一次误触，多一次点击。", pv: pvA, cost: "0（已经这样）" },
+      { k: "B", t: "顶栏放「刷新 + 换源 + ⋮」", d: "书名让位，只能看前四个字。常用两个动作一步够到。", pv: pvB, cost: "约 1 小时" },
+      { k: "C", t: "顶栏放「换源 + ⋮」，书名留一半", d: "折中：最常点的换源外露，刷新和缓存留在 ⋮ 里。", pv: pvC, cost: "约 40 分钟" },
+    ],
+  },
+  {
+    id: "swapsearch",
+    q: "换源时搜多大范围？",
+    hint: "现在点了「全部源」里的一条，是在<b>这一条源</b>里按书名搜，1~3 秒。而上面的「同名书命中」直接复用进详情页时那次搜索的旧结果，可能几分钟前、可能别的关键词——这就是你说的「没重新搜」。",
+    opts: [
+      { k: "A", t: "只用你点的那条源搜", d: "快，1~3 秒出结果。找不到就明说没有，不硬换。缺点是目标源没这本书时你得自己换一条再点。", cost: "约 40 分钟（把旧候选那条路也改成现搜）" },
+      { k: "B", t: "跨所有源一次搜完", d: "一次列出这本书在哪几条源上有。慢，十几秒，书上源多时要翻页。", cost: "约 2 小时" },
+      { k: "C", t: "先单源，找不到再问要不要全量", d: "平常快，卡住时给你第二条路。多一个确认框。", cost: "约 2.5 小时" },
+    ],
+  },
+  {
+    id: "swapreturn",
+    q: "换完源，落到哪？",
+    hint: "现在换成功是把你丢到新源的<b>目录页</b>，自己找刚才那章。legado 是换完直接回到原来那一章续读（<b>ChangeSourceSheet.kt:179-220</b> 取目录后迁移位置）。难处：换源后章号全变，只能按章标题匹配。",
+    opts: [
+      { k: "A", t: "按章标题匹配，回原来的章", d: "换完直接接着读，最顺手。标题对不上时退回目录页。", cost: "约 2 小时（含匹配兜底）" },
+      { k: "B", t: "停在目录页，自己点", d: "保持现状。最省事，但每次换源都要重新找位置。", cost: "0" },
+      { k: "C", t: "回原章，对不上就从第 1 章起并提示", d: "总是回到正文，不会卡在目录。对不上时说一句「没找到原章节，已从第一章开始」。", cost: "约 1.5 小时" },
+    ],
+  },
+  {
+    id: "sheetorder",
+    q: "「更多操作」里的顺序要不要按 legado 重排？",
+    hint: "legado 的 Sheet 顺序是：自定义按钮 → <b>换源 → 刷新 → 离线缓存</b> → 目录规则 → 编码 → 编辑内容 → 加书签 → …（<b>ReaderMoreActionsSheet.kt:311-326</b>）。我把换源/刷新/缓存排到了第 5、6、7 位，这是我排错了。",
+    opts: [
+      { k: "A", t: "按 legado 原序重排", d: "换源、刷新、离线缓存提到最前三个，目录和查找往后挪。找得最快的就是这三样。", cost: "20 分钟" },
+      { k: "B", t: "保持现在的顺序", d: "目录、查找、自动翻页在前。你要是习惯先翻目录，这条更顺手。", cost: "0" },
+    ],
+  },
+  {
+    id: "theme",
+    q: "主题包：接不接 legado 的 readConfig？",
+    hint: "你给的链接我下下来看了：里面是一个 <b>readConfig.json</b>，1198 字节，<b>name 是「番茄小说」</b>。这是 legado 阅读界面的<b>整份外观配置</b>（背景、字色、字号、行距、段距、缩进、四边留白、标题样式、页眉页脚），不是书源。我们要接，就得让阅读页能读这种 json。",
+    opts: [
+      { k: "A", t: "接：能导入 readConfig.json，并把这份番茄主题做成内置", d: "设置里多一项「导入主题」，能读这份文件里我们有的字段：背景 #ded9c5 / 夜色 #0e0e0e、字色 #5b4928 / #bfbfbf、字号 17、行距 14、段距 8、缩进两个全角、四边留白 21/20/12/11、标题加粗与间距。左边两张就是这份主题的白天与夜间样张。", pv: pvThA, cost: "约 4 小时" },
+      { k: "B", t: "接，但不做导入，只把番茄这套配色内置成第 5 档", d: "设置里多一个「番茄」主题，一键套用。别人导出的主题包读不进来。", pv: pvThB, cost: "约 1 小时" },
+      { k: "C", t: "不接，维持现在四档", d: "深 / 浅 / 暖 / 米，字号行距手工调。", pv: pvThC, cost: "0" },
+    ],
+  },
+  {
+    id: "unmapped",
+    q: "主题包里我们没做的字段怎么办？",
+    hint: "这份 json 里还有：页眉页脚开关与位置（headerMode / footerMode / tipHeader* / tipFooter*）、翻页动画（pageAnim 0）、电子墨水三套配色（*EInk）、页眉页脚分隔线、正文粗体档（textBold 0）。我们阅读页现在没页眉页脚，翻页只有「滚一屏」一种，也没有墨水屏模式。",
+    opts: [
+      { k: "A", t: "忽略，导入时列清单告诉你哪些没生效", d: "不假装支持。导完弹一句「页眉页脚、翻页动画、墨水屏配色这 3 类没做」。", cost: "含在上一项里" },
+      { k: "B", t: "顺手把页眉页脚做出来（显示章节名 / 电量 / 页码）", d: "照 legado 的 tip 位置摆，三处文字可配。表盘 248 dp 高，页眉页脚各占 14 dp，正文少两行。", cost: "另加约 3 小时" },
+      { k: "C", t: "只做墨水屏三套配色，其余忽略", d: "多一组「白天/夜间/墨水」独立配色，其余不动。", cost: "另加约 2 小时" },
+    ],
+  },
+];
+
+const state = JSON.parse(localStorage.getItem("wdl.readerpicks") || "{}");
+
+function render() {
+  const box = document.getElementById("qs");
+  box.innerHTML = "";
+  QS.forEach((q, i) => {
+    const card = document.createElement("div");
+    card.className = "card";
+    const picked = state[q.id];
+    const label = picked ? `<span class="picked">已选 ${picked}</span>` : "";
+    card.innerHTML = `<div class="q"><span class="n">${i + 1}.</span>${q.q}${label}</div>
+      <div class="hint">${q.hint}</div>`;
+    q.opts.forEach((o) => {
+      const el = document.createElement("div");
+      el.className = "opt" + (picked === o.k ? " on" : "");
+      el.innerHTML = `<div class="k">${o.k}</div><div><div class="t">${o.t}</div>
+        <div class="d">${o.d}</div>${o.pv || ""}<div class="cost">工作量：${o.cost}</div></div>`;
+      el.onclick = () => { state[q.id] = picked === o.k ? undefined : o.k; save(); render(); };
+      card.appendChild(el);
+    });
+    box.appendChild(card);
+  });
+  update();
+}
+
+function summary() {
+  const lines = [];
+  QS.forEach((q, i) => {
+    const p = state[q.id];
+    if (!p) return;
+    const o = q.opts.find((x) => x.k === p);
+    lines.push(`${i + 1}. ${q.q} → ${o.k} ${o.t}`);
+  });
+  return lines.length ? lines.join("\n") : "还没选。";
+}
+
+function update() {
+  document.getElementById("sum").textContent = summary();
+  const done = QS.filter((q) => state[q.id]).length;
+  document.getElementById("cnt").textContent = `已选 ${done} / ${QS.length}`;
+}
+
+function save() { localStorage.setItem("wdl.readerpicks", JSON.stringify(state)); }
+
+document.getElementById("clear").onclick = () => {
+  for (const k in state) delete state[k];
+  save(); render();
+};
+
+document.getElementById("copy").onclick = async () => {
+  const txt = summary();
+  try { await navigator.clipboard.writeText(txt); }
+  catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = txt; document.body.appendChild(ta); ta.select();
+    document.execCommand("copy"); ta.remove();
+  }
+  const t = document.getElementById("toast");
+  t.textContent = "已复制，粘回对话就行";
+  t.className = "on";
+  setTimeout(() => { t.className = ""; }, 1600);
+};
+
+render();
+</script>
+</body>
+</html>

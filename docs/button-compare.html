@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>按钮宽度：五个方案</title>
+<style>
+:root{
+  --surface:#141218; --surface1:#1d1b20; --surface2:#211f26; --surface3:#2b2930; --surface4:#36343b;
+  --on:#e6e0e9; --onvar:#cac4d0; --outline-v:#49454f;
+  --primary:#d0bcff; --on-primary:#381e72; --secondary-c:#4a4458; --on-secondary-c:#e8def8;
+  --ok:#7bd88f; --warn:#f2b8b5;
+  --bg:#0b0a0e; --page:#16151a;
+}
+*{box-sizing:border-box}
+body{margin:0;padding:14px 14px 80px;background:var(--bg);color:var(--on);
+  font:14px/1.6 system-ui,"Noto Sans SC","PingFang SC",sans-serif;-webkit-text-size-adjust:100%}
+h1{font-size:16px;margin:0 0 4px}
+.sub{color:var(--onvar);font-size:12px;margin:0 0 16px}
+.card{background:var(--page);border:1px solid var(--outline-v);border-radius:10px;
+  padding:12px;margin:0 0 14px}
+.head{display:flex;align-items:baseline;gap:8px;margin:0 0 2px}
+.tag{flex:none;width:22px;height:22px;border-radius:6px;background:var(--surface4);
+  display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--onvar)}
+.card.best .tag{background:var(--primary);color:var(--on-primary)}
+.q{font-size:14px;font-weight:600;margin:0}
+.badge{font-size:10px;color:var(--primary);border:1px solid var(--primary);border-radius:6px;padding:0 5px}
+.hint{font-size:12px;color:var(--onvar);margin:4px 0 10px}
+.stage{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap}
+.zoom{zoom:1.55}
+.frame{width:189px;height:248px;background:#0f0e13;border:1px solid var(--outline-v);
+  border-radius:26px;padding:6px 0 0;display:flex;flex-direction:column;overflow:hidden;
+  font-size:9px;line-height:1.35}
+.bar{display:flex;align-items:center;gap:4px;padding:0 8px 5px;color:var(--on)}
+.bar .t{font-size:11px;font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar .ic{width:16px;height:16px;border-radius:8px;background:var(--surface3);flex:none}
+.list{padding:0 6px;flex:1;overflow:hidden}
+.row{display:flex;align-items:center;gap:4px;padding:5px 4px;border-bottom:1px solid #211f26}
+.row .ck{width:12px;height:12px;border-radius:4px;border:1.5px solid var(--primary);flex:none}
+.row .tx{flex:1;min-width:0}
+.row .tx b{display:block;font-weight:600;font-size:9.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .tx i{display:block;font-style:normal;font-size:8px;color:var(--onvar);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.acts{padding:6px;display:flex;flex-direction:column;gap:4px}
+.acts.inline{flex-direction:row;gap:4px}
+.btn{height:26px;border-radius:13px;display:flex;align-items:center;justify-content:center;
+  font-size:9.5px;font-weight:600;padding:0 10px;white-space:nowrap}
+.btn.filled{background:var(--primary);color:var(--on-primary)}
+.btn.tonal{background:var(--secondary-c);color:var(--on-secondary-c)}
+.btn.outline{border:1px solid var(--outline-v);color:var(--primary)}
+.btn.text{color:var(--primary);background:transparent;padding:0 6px}
+.full{width:100%}
+.grow{flex:1;min-width:0}
+.pill{align-self:flex-start}
+.center{align-self:center}
+.end{align-self:flex-end}
+.clip{max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.note{font-size:12px;color:var(--onvar);margin-top:10px}
+.note b{color:var(--on)}
+.good{color:var(--ok)}
+.bad{color:var(--warn)}
+table{border-collapse:collapse;width:100%;font-size:11.5px;margin-top:6px}
+th,td{border-bottom:1px solid var(--outline-v);padding:4px 6px;text-align:left;vertical-align:top}
+th{color:var(--onvar);font-weight:600}
+</style>
+</head>
+<body>
+
+<h1>按钮宽度：五个方案</h1>
+<p class="sub">同一屏、同一批文案，只改按钮的宽度规则。表盘 189×248 dp，按 1.55 倍放大显示。长标签用「从 replace.json 导入」「下载缺失章节（3735 章）」故意压线。</p>
+
+<!-- A -->
+<div class="card">
+  <div class="head"><div class="tag">A</div><p class="q">现状：独占一行就整宽</p></div>
+  <p class="hint">竖排按钮一律 MATCH_PARENT，一行两枚用等分 weight。文字永远不折行，但短标签也被拉成大横条。</p>
+  <div class="stage"><div class="zoom"><div class="frame">
+    <div class="bar"><div class="t">替换净化</div><div class="ic"></div><div class="ic"></div></div>
+    <div class="list">
+      <div class="row"><div class="ck"></div><div class="tx"><b>去掉「本章未完」尾巴</b><i>正则 · 正文 · 替换为空</i></div></div>
+      <div class="row"><div class="ck"></div><div class="tx"><b>去掉求票行</b><i>正则 · 正文 · 替换为空</i></div></div>
+      <div class="row"><div class="ck"></div><div class="tx"><b>站点域名替换</b><i>纯文本 · 正文+标题</i></div></div>
+    </div>
+    <div class="acts">
+      <div class="btn filled full">保存规则</div>
+      <div class="btn outline full">从 replace.json 导入</div>
+    </div>
+  </div></div></div>
+  <p class="note"><b>优点</b> <span class="good">好点、好认，字不会折。</span><br><b>代价</b> <span class="bad">短按钮（「确定」「收起」）也变成横条，一屏按钮越多越像表格。</span></p>
+</div>
+
+<!-- B -->
+<div class="card">
+  <div class="head"><div class="tag">B</div><p class="q">随字宽胶囊（legado 原样）</p></div>
+  <p class="hint">按钮宽度跟着字走，成组时右对齐或居中。短标签漂亮，长标签要省略号或折行。</p>
+  <div class="stage"><div class="zoom"><div class="frame">
+    <div class="bar"><div class="t">替换净化</div><div class="ic"></div><div class="ic"></div></div>
+    <div class="list">
+      <div class="row"><div class="ck"></div><div class="tx"><b>去掉「本章未完」尾巴</b><i>正则 · 正文 · 替换为空</i></div></div>
+      <div class="row"><div class="ck"></div><div class="tx"><b>去掉求票行</b><i>正则 · 正文 · 替换为空</i></div></div>
+      <div class="row"><div class="ck"></div><div class="tx"><b>站点域名替换</b><i>纯文本 · 正文+标题</i></div></div>
+    </div>
+    <div class="acts inline" style="justify-content:flex-end">
+      <div class="btn text">导入</div>
+      <div class="btn filled pill">保存</div>
+    </div>
+  </div></div></div>
+  <p class="note"><b>优点</b> <span class="good">最像 Material 3，短按钮不横成一条。</span><br><b>代价</b> <span class="bad">「从 replace.json 导入」这类长标签在 189 dp 上必折行；触控目标变小，表盘误触变多。</span></p>
+</div>
+
+<!-- C -->
+<div class="card best">
+  <div class="head"><div class="tag">C</div><p class="q">主操作整宽，次操作随字宽（混合）</p></div>
+  <p class="hint">主操作（保存、开始、继续读）铺满一行；取消、导入、收起这类次操作走 text 变体，宽度随字。</p>
+  <div class="stage"><div class="zoom"><div class="frame">
+    <div class="bar"><div class="t">替换净化</div><div class="ic"></div><div class="ic"></div></div>
+    <div class="list">
+      <div class="row"><div class="ck"></div><div class="tx"><b>去掉「本章未完」尾巴</b><i>正则 · 正文 · 替换为空</i></div></div>
+      <div class="row"><div class="ck"></div><div class="tx"><b>去掉求票行</b><i>正则 · 正文 · 替换为空</i></div></div>
+      <div class="row"><div class="ck"></div><div class="tx"><b>站点域名替换</b><i>纯文本 · 正文+标题</i></div></div>
+    </div>
+    <div class="acts">
+      <div class="btn filled full">保存规则</div>
+      <div class="acts inline" style="padding:0;justify-content:flex-end">
+        <div class="btn text">取消</div><div class="btn text">导入…</div>
+      </div>
+    </div>
+  </div></div></div>
+  <p class="note"><b>优点</b> <span class="good">主次一眼分得开，长标签只出现在铺满的那颗上看不出折行。</span><br><b>代价</b> <span class="bad">次操作热区只有 26 dp 高，表盘上要留够内边距。</span></p>
+</div>
+
+<!-- D -->
+<div class="card">
+  <div class="head"><div class="tag">D</div><p class="q">整宽但有上限与居中</p></div>
+  <p class="hint">按钮最大宽 148 dp，短的随字宽、居中，超了才铺满。一行两枚等分，最小 56 dp。</p>
+  <div class="stage"><div class="zoom"><div class="frame">
+    <div class="bar"><div class="t">替换净化</div><div class="ic"></div><div class="ic"></div></div>
+    <div class="list">
+      <div class="row"><div class="ck"></div><div class="tx"><b>去掉「本章未完」尾巴</b><i>正则 · 正文 · 替换为空</i></div></div>
+      <div class="row"><div class="ck"></div><div class="tx"><b>去掉求票行</b><i>正则 · 正文 · 替换为空</i></div></div>
+      <div class="row"><div class="ck"></div><div class="tx"><b>站点域名替换</b><i>纯文本 · 正文+标题</i></div></div>
+    </div>
+    <div class="acts">
+      <div class="btn filled center" style="max-width:148px">保存规则</div>
+      <div class="btn outline center clip" style="max-width:148px">从 replace.json 导入</div>
+    </div>
+  </div></div></div>
+  <p class="note"><b>优点</b> <span class="good">短按钮回到胶囊大小，长按钮仍有省略号兜底。</span><br><b>代价</b> <span class="bad">居中后左右留白不对称，滚动时视觉上「飘」；规则要多一条上限常量。</span></p>
+</div>
+
+<!-- E -->
+<div class="card">
+  <div class="head"><div class="tag">E</div><p class="q">操作收进行内 chip 与 ⋮</p></div>
+  <p class="hint">屏上只留一颗主操作，其余全部收进顶栏 ⋮ 或行内小牌。按钮数量降到 1 到 2 颗，宽度问题自然消失。</p>
+  <div class="stage"><div class="zoom"><div class="frame">
+    <div class="bar"><div class="t">替换净化</div><div class="ic"></div><div class="ic"></div></div>
+    <div class="list">
+      <div class="row"><div class="ck"></div><div class="tx"><b>去掉「本章未完」尾巴</b><i>正则 · 正文</i></div><div class="ic" style="width:12px;height:12px"></div></div>
+      <div class="row"><div class="ck"></div><div class="tx"><b>去掉求票行</b><i>正则 · 正文</i></div><div class="ic" style="width:12px;height:12px"></div></div>
+      <div class="row"><div class="ck"></div><div class="tx"><b>站点域名替换</b><i>纯文本 · 正文+标题</i></div><div class="ic" style="width:12px;height:12px"></div></div>
+    </div>
+    <div class="acts"><div class="btn filled full">保存规则</div></div>
+  </div></div></div>
+  <p class="note"><b>优点</b> <span class="good">一屏只留一个视觉重心，最省地方。</span><br><b>代价</b> <span class="bad">常用操作多一次点击；表盘上「 ⋮ 里还有东西」不够显眼。</span></p>
+</div>
+
+<div class="card">
+  <p class="q" style="margin-bottom:6px">怎么选</p>
+  <table>
+    <tr><th>方案</th><th>折行</th><th>好点</th><th>适合</th></tr>
+    <tr><td>A 现状</td><td class="good">不会</td><td class="good">最易点</td><td>页面主操作、下载/删除这类要犹豫一秒的动作</td></tr>
+    <tr><td>B 随字宽</td><td class="bad">会长标签</td><td class="bad">偏小</td><td>一行两枚、文案短到两个字的场景</td></tr>
+    <tr><td>C 混合</td><td class="good">不会</td><td class="good">主次分明</td><td>对话框与详情页的底部动作区</td></tr>
+    <tr><td>D 上限+居中</td><td class="good">省略号</td><td class="good">中等</td><td>想保留胶囊感又要防折行</td></tr>
+    <tr><td>E 收进 ⋮</td><td class="good">不会</td><td class="bad">多点一次</td><td>低频操作多的页</td></tr>
+  </table>
+  <p class="note">我的建议：<b>C 打底</b>，把「主操作整宽、次操作文字」写进 <code>Widgets.button</code> 的变体规则里；<b>A 保留</b>给危险动作；<b>E</b> 只用在已经有多选的地方。这样全站只需要两档宽度，不用每页单独调。</p>
+</div>
+
+</body>
+</html>

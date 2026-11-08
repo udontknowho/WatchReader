@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>发现页重写：四个方案</title>
+<style>
+:root{
+  --surface:#141218; --surface1:#1d1b20; --surface2:#211f26; --surface3:#2b2930; --surface4:#36343b;
+  --on:#e6e0e9; --onvar:#cac4d0; --outline-v:#49454f;
+  --primary:#d0bcff; --on-primary:#381e72; --secondary-c:#4a4458; --on-secondary-c:#e8def8;
+  --ok:#7bd88f; --warn:#f2b8b5;
+  --bg:#0b0a0e; --page:#16151a;
+}
+*{box-sizing:border-box}
+body{margin:0;padding:14px 14px 80px;background:var(--bg);color:var(--on);
+  font:14px/1.6 system-ui,"Noto Sans SC","PingFang SC",sans-serif;-webkit-text-size-adjust:100%}
+h1{font-size:16px;margin:0 0 4px}
+.sub{color:var(--onvar);font-size:12px;margin:0 0 16px}
+.card{background:var(--page);border:1px solid var(--outline-v);border-radius:10px;padding:12px;margin:0 0 14px}
+.head{display:flex;align-items:baseline;gap:8px;margin:0 0 2px}
+.tag{flex:none;width:24px;height:22px;border-radius:6px;background:var(--surface4);
+  display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:var(--onvar)}
+.card.best{border-color:var(--primary)}
+.card.best .tag{background:var(--primary);color:var(--on-primary)}
+.q{font-size:14px;font-weight:600;margin:0}
+.hint{font-size:12px;color:var(--onvar);margin:4px 0 10px}
+.stage{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}
+.zoom{zoom:1.55}
+.frame{width:189px;height:248px;background:#0f0e13;border:1px solid var(--outline-v);
+  border-radius:26px;padding:6px 0 0;display:flex;flex-direction:column;overflow:hidden;
+  font-size:9px;line-height:1.3}
+.bar{display:flex;align-items:center;gap:4px;padding:0 8px 5px;flex:none}
+.bar .t{font-size:11px;font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ic{width:16px;height:16px;border-radius:8px;background:var(--surface3);flex:none}
+.tabbar{display:flex;gap:4px;padding:0 6px 4px;flex:none}
+.btn{height:24px;border-radius:12px;display:flex;align-items:center;justify-content:center;
+  font-size:9px;font-weight:600;padding:0 8px;white-space:nowrap;flex:1;min-width:0}
+.btn.filled{background:var(--primary);color:var(--on-primary)}
+.btn.tonal{background:var(--secondary-c);color:var(--on-secondary-c)}
+.btn.text{color:var(--primary);background:transparent}
+.list{flex:1;overflow:hidden;padding:0 6px}
+.grp{font-size:8.5px;color:var(--onvar);padding:5px 4px 2px;letter-spacing:.3px}
+.item{display:flex;align-items:center;gap:4px;padding:4px 4px;border-bottom:1px solid #211f26}
+.item b{font-weight:600;font-size:9.5px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.item i{font-style:normal;font-size:8px;color:var(--onvar);flex:none}
+.empty{flex:1;display:flex;align-items:center;justify-content:center;text-align:center;
+  padding:0 16px;color:var(--onvar);font-size:9px;line-height:1.5}
+.cover{width:18px;height:24px;border-radius:3px;background:var(--surface3);flex:none}
+.rank{width:12px;color:var(--onvar);font-size:8px;text-align:right;flex:none}
+.note{font-size:12px;color:var(--onvar);margin-top:10px}
+.note b{color:var(--on)}
+.good{color:var(--ok)} .bad{color:var(--warn)}
+.cap{font-size:10px;color:var(--onvar);text-align:center;margin-top:6px}
+table{border-collapse:collapse;width:100%;font-size:11.5px;margin-top:6px}
+th,td{border-bottom:1px solid var(--outline-v);padding:4px 6px;text-align:left;vertical-align:top}
+th{color:var(--onvar);font-weight:600}
+</style>
+</head>
+<body>
+
+<h1>发现页重写：四个方案</h1>
+<p class="sub">真实数据：番茄男频 19 类、女频 7 类，起点 5 个榜（月票／畅销／新书／收藏／更新）。表盘 189×248 dp，1.55 倍放大。</p>
+
+<!-- 现状问题 -->
+<div class="card">
+  <div class="head"><div class="tag">!</div><p class="q">现在的毛病</p></div>
+  <p class="hint">顶部四颗等分按钮：番茄／起点／男频／女频。起点只建了男频条目，所以「起点 + 女频」永远是空屏，还白占 34 dp。</p>
+  <div class="stage"><div class="zoom"><div class="frame">
+    <div class="bar"><div class="t">发现</div><div class="ic"></div></div>
+    <div class="tabbar">
+      <div class="btn tonal">番茄</div><div class="btn filled">起点</div>
+      <div class="btn tonal">男频</div><div class="btn filled">女频</div>
+    </div>
+    <div class="empty">这个频道暂时没有榜单</div>
+  </div></div></div>
+  <p class="note">四颗按钮里，<span class="bad">起点 × 女频必定打不开</span>；而且按钮挤在一行，字最小的「男频」只有两颗字宽。</p>
+</div>
+
+<!-- A -->
+<div class="card">
+  <div class="head"><div class="tag">A</div><p class="q">能力位：按钮跟着站点走</p></div>
+  <p class="hint">榜单条目声明自己有没有男女频。起点只显 5 个榜，性别按钮直接不出现；番茄照旧四颗里的三颗。</p>
+  <div class="stage">
+    <div><div class="zoom"><div class="frame">
+      <div class="bar"><div class="t">起点月票榜</div><div class="ic"></div></div>
+      <div class="tabbar">
+        <div class="btn tonal">番茄</div><div class="btn filled">起点</div>
+      </div>
+      <div class="list">
+        <div class="item"><span class="rank">1</span><div class="cover"></div><b>夜无疆</b><i>辰东</i></div>
+        <div class="item"><span class="rank">2</span><div class="cover"></div><b>苟在初圣魔门当人材</b><i>鹤守月满池</i></div>
+        <div class="item"><span class="rank">3</span><div class="cover"></div><b>谁让他修仙的！</b><i>最白的乌鸦</i></div>
+        <div class="item"><span class="rank">4</span><div class="cover"></div><b>宿命之环</b><i>爱潜水的乌贼</i></div>
+        <div class="item"><span class="rank">5</span><div class="cover"></div><b>光阴之外</b><i>耳根</i></div>
+      </div>
+    </div></div><p class="cap">起点：只有两颗按钮</p></div>
+    <div><div class="zoom"><div class="frame">
+      <div class="bar"><div class="t">西方奇幻 · 阅读</div><div class="ic"></div></div>
+      <div class="tabbar">
+        <div class="btn filled">番茄</div><div class="btn tonal">起点</div>
+        <div class="btn filled">男频</div><div class="btn tonal">女频</div>
+      </div>
+      <div class="list">
+        <div class="item"><span class="rank">1</span><div class="cover"></div><b>我在精神病院学斩神</b><i>三九音域</i></div>
+        <div class="item"><span class="rank">2</span><div class="cover"></div><b>宇宙职业选手</b><i>我吃西红柿</i></div>
+        <div class="item"><span class="rank">3</span><div class="cover"></div><b>深海余烬</b><i>远瞳</i></div>
+      </div>
+    </div></div><p class="cap">番茄：仍是四颗</p></div>
+  </div>
+  <p class="note"><b>好处</b> <span class="good">空态彻底消失，改动最小，四颗按钮的组合全都有解。</span><br>
+  <b>代价</b> <span class="bad">顶部按钮数量随站点变，同一个位置一会儿两颗一会儿四颗；榜单还是「先选频道再选榜」，起点那 5 个榜仍藏在下一层。</span></p>
+</div>
+
+<!-- B -->
+<div class="card">
+  <div class="head"><div class="tag">B</div><p class="q">补数据：起点也建女频榜</p></div>
+  <p class="hint">给起点补 5 个女频榜单条目，四颗按钮全部有效。界面不动，只动 <code>RankConfig</code>。</p>
+  <div class="stage"><div class="zoom"><div class="frame">
+    <div class="bar"><div class="t">起点女频月票榜</div><div class="ic"></div></div>
+    <div class="tabbar">
+      <div class="btn tonal">番茄</div><div class="btn filled">起点</div>
+      <div class="btn tonal">男频</div><div class="btn filled">女频</div>
+    </div>
+    <div class="list">
+      <div class="item"><span class="rank">1</span><div class="cover"></div><b>娇软美人，但暴君</b><i>—</i></div>
+      <div class="item"><span class="rank">2</span><div class="cover"></div><b>她来听我的演唱会</b><i>—</i></div>
+      <div class="item"><span class="rank">3</span><div class="cover"></div><b>我的师妹是魔尊</b><i>—</i></div>
+    </div>
+  </div></div></div>
+  <p class="note"><b>好处</b> <span class="good">改动只有配置表，风险最低；起点女频的书终于能进得来。</span><br>
+  <b>代价</b> <span class="bad">榜单数 31 → 36；四颗按钮挤一行的毛病一点没好；起点女频取到的书能否取目录尚未验证。</span></p>
+</div>
+
+<!-- C -->
+<div class="card best">
+  <div class="head"><div class="tag">C</div><p class="q">列表化：首屏就是全部榜单</p></div>
+  <p class="hint">删掉四颗按钮，首屏分三组直接列榜：番茄 · 男频 19 行、番茄 · 女频 7 行、起点 5 行。点一行进那个榜。</p>
+  <div class="stage"><div class="zoom"><div class="frame">
+    <div class="bar"><div class="t">发现</div><div class="ic"></div></div>
+    <div class="list">
+      <div class="grp">番茄 · 男频</div>
+      <div class="item"><b>西方奇幻 · 阅读</b><i>›</i></div>
+      <div class="item"><b>东方仙侠 · 阅读</b><i>›</i></div>
+      <div class="grp">番茄 · 女频</div>
+      <div class="item"><b>古风世情 · 阅读</b><i>›</i></div>
+      <div class="item"><b>玄幻言情 · 阅读</b><i>›</i></div>
+      <div class="grp">起点</div>
+      <div class="item"><b>月票榜</b><i>›</i></div>
+      <div class="item"><b>畅销榜</b><i>›</i></div>
+      <div class="item"><b>新书榜</b><i>›</i></div>
+    </div>
+  </div></div></div>
+  <p class="note"><b>好处</b> <span class="good">多出 34 dp 给列表；性别变成分组标题，不再是无解的筛选；31 个榜一屏滚动能看到底。</span><br>
+  <b>代价</b> <span class="bad">打开发现页看不到书，多一次点击；列表要滑，找某个冷门分类得记住位置。</span></p>
+</div>
+
+<!-- D -->
+<div class="card">
+  <div class="head"><div class="tag">D</div><p class="q">两级：站点按钮 + 该站榜单列表</p></div>
+  <p class="hint">顶部只留番茄／起点两颗，下面直接是这一站的榜：番茄按男频、女频两组列 26 行，起点列 5 行。</p>
+  <div class="stage"><div class="zoom"><div class="frame">
+    <div class="bar"><div class="t">番茄</div><div class="ic"></div></div>
+    <div class="tabbar">
+      <div class="btn filled">番茄</div><div class="btn tonal">起点</div>
+    </div>
+    <div class="list">
+      <div class="grp">男频 · 19 个榜</div>
+      <div class="item"><b>西方奇幻 · 阅读</b><i>›</i></div>
+      <div class="item"><b>东方仙侠 · 阅读</b><i>›</i></div>
+      <div class="item"><b>科幻末世 · 阅读</b><i>›</i></div>
+      <div class="grp">女频 · 7 个榜</div>
+      <div class="item"><b>古风世情 · 阅读</b><i>›</i></div>
+    </div>
+  </div></div></div>
+  <p class="note"><b>好处</b> <span class="good">保留「先选站点」的肌肉记忆；性别退成组标题，空组合不存在。</span><br>
+  <b>代价</b> <span class="bad">仍占一行按钮；番茄要滑 26 行才见到女频榜。</span></p>
+</div>
+
+<div class="card">
+  <p class="q" style="margin-bottom:6px">怎么选</p>
+  <table>
+    <tr><th>方案</th><th>空态</th><th>首屏出书</th><th>改动量</th><th>适合</th></tr>
+    <tr><td>A 能力位</td><td class="good">消失</td><td class="good">是</td><td class="good">小</td><td>只想把 bug 修掉，界面别动</td></tr>
+    <tr><td>B 补数据</td><td class="good">消失</td><td class="good">是</td><td class="good">最小</td><td>先看起点女频数据能不能用</td></tr>
+    <tr><td>C 列表化</td><td class="good">消失</td><td class="bad">否</td><td class="bad">中</td><td>想要一个干净、一次能翻完的榜单目录</td></tr>
+    <tr><td>D 两级</td><td class="good">消失</td><td class="bad">否</td><td class="bad">中</td><td>站点要留按钮，性别退成组标题</td></tr>
+  </table>
+  <p class="note">我的建议：<b>C 打底</b>，顺手把 <b>B</b> 的起点女频榜补进配置。<b>A</b> 如果只想立刻止血，就单独改，不必等重写。C 与 D 的差别只在顶部那一行按钮要不要留。</p>
+</div>
+
+</body>
+</html>

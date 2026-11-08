@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>动画预览：顶栏 32 / 底栏 8 指示点 + 滑动 / 发现目录两列</title>
+<style>
+  :root{
+    --bg:#0e1014; --card:#171a21; --line:#282e39; --ink:#e6e9ef; --dim:#98a1b0;
+    --acc:#c6bfff; --acc2:#7a70d8; --ok:#8fd694; --warn:#ffb86b; --screen:#14181e;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  body{margin:0; padding:18px 14px 40px; background:var(--bg); color:var(--ink);
+    font:14px/1.65 -apple-system,"Noto Sans SC",system-ui,sans-serif}
+  h1{font-size:19px; margin:0 0 4px}
+  h2{font-size:15px; margin:30px 0 2px; padding-bottom:6px; border-bottom:1px solid var(--line)}
+  p{margin:8px 0; color:var(--dim)}
+  .lead{color:var(--ink)}
+  b{color:var(--ink)}
+  code{background:#232833; padding:1px 5px; border-radius:4px; font-size:12px}
+  .num{font-variant-numeric:tabular-nums}
+  .save{color:var(--ok)}
+
+  /* ── 手表外框：189×248 dp，按 2 倍渲染 ── */
+  .stage{display:flex; gap:26px; flex-wrap:wrap; align-items:flex-start; margin-top:14px}
+  .watchbox{flex:none}
+  .watch{
+    width:378px; height:496px; border-radius:44px; background:#000; padding:10px;
+    border:2px solid #2c323d; box-shadow:0 10px 34px #0008;
+  }
+  .screen{
+    position:relative; width:100%; height:100%; border-radius:36px; overflow:hidden;
+    background:var(--screen);
+  }
+  .caption{font-size:12px; color:var(--dim); margin-top:8px; text-align:center; width:378px}
+
+  /* ── 三页横排，拖动或按钮切换 ── */
+  .track{display:flex; height:100%; will-change:transform}
+  .page{width:378px; height:100%; flex:none; display:flex; flex-direction:column; overflow:hidden}
+
+  /* 新顶栏：32 dp = 64 px，无下间隔 */
+  .topbar{flex:none; height:64px; display:flex; align-items:center; gap:10px;
+    padding:0 20px; background:#1a1f28}
+  .title{font-size:30px; font-weight:700; white-space:nowrap; letter-spacing:.3px}
+  .title.md{font-size:26px}
+  .grow{flex:1}
+  .ico{width:36px; height:36px; border-radius:50%; background:#4d5566; flex:none}
+  .ico.sm{width:30px; height:30px}
+  .ico.acc{background:var(--acc)}
+
+  .content{flex:1; overflow:hidden; padding:0 32px; position:relative}
+
+  /* 书架封面墙 3 列 */
+  .shelf{display:grid; grid-template-columns:repeat(3,1fr); gap:16px; padding-top:10px}
+  .bk{display:flex; flex-direction:column; gap:6px}
+  .cover{height:130px; border-radius:14px; display:flex; align-items:center;
+    justify-content:center; font-size:38px; font-weight:700; color:#1b1f27}
+  .bkt{font-size:20px; text-align:center; color:#dfe4ec; white-space:nowrap;
+    overflow:hidden; text-overflow:ellipsis}
+  .bks{font-size:17px; text-align:center; color:#8e97a6; white-space:nowrap;
+    overflow:hidden; text-overflow:ellipsis}
+
+  /* 发现目录：两列按钮 */
+  .dir{display:grid; grid-template-columns:repeat(2,1fr); gap:12px; padding-top:12px}
+  .chip{height:64px; border-radius:14px; background:#21262f; display:flex;
+    align-items:center; justify-content:center; font-size:21px; color:#dbe1ea;
+    opacity:0; transform:translateY(14px)}
+  .dir.play .chip{animation:pop .34s cubic-bezier(.2,.9,.3,1.2) forwards}
+  @keyframes pop{to{opacity:1; transform:translateY(0)}}
+  .dir .chip:nth-child(1){animation-delay:.02s}
+  .dir .chip:nth-child(2){animation-delay:.06s}
+  .dir .chip:nth-child(3){animation-delay:.10s}
+  .dir .chip:nth-child(4){animation-delay:.14s}
+  .dir .chip:nth-child(5){animation-delay:.18s}
+  .dir .chip:nth-child(6){animation-delay:.22s}
+  .dir .chip:nth-child(7){animation-delay:.26s}
+  .dir .chip:nth-child(8){animation-delay:.30s}
+
+  /* 发现榜内容：72 dp = 144 px 双行 */
+  .list{padding-top:6px}
+  .row{height:144px; border-radius:14px; background:#1e232b; padding:24px 20px;
+    margin-bottom:10px; display:flex; flex-direction:column; justify-content:center; gap:6px}
+  .rt{font-size:24px; color:#e6e9ef; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .rs{font-size:19px; color:#8e97a6; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+
+  /* 我的：分组卡 */
+  .grp{margin-top:12px; background:#1b2029; border-radius:16px; overflow:hidden}
+  .gi{height:104px; display:flex; align-items:center; gap:16px; padding:0 20px;
+    border-bottom:1px solid #242a34}
+  .gi:last-child{border-bottom:0}
+  .gi .ico{width:32px; height:32px}
+  .git{font-size:22px; color:#dfe4ec}
+
+  /* 底栏：8 dp = 16 px 指示点 */
+  .dotsbar{flex:none; height:16px; display:flex; align-items:center;
+    justify-content:center; gap:10px; background:transparent}
+  .dot{width:12px; height:12px; border-radius:50%; background:#4a5162;
+    transition:all .28s cubic-bezier(.2,.8,.2,1); cursor:pointer}
+  .dot.on{background:var(--acc); width:30px; border-radius:6px}
+
+  /* 拖动提示 */
+  .hint{position:absolute; left:0; right:0; bottom:26px; text-align:center;
+    font-size:18px; color:#6f7787; pointer-events:none; transition:opacity .3s}
+  .hint.hide{opacity:0}
+  .swipearrow{position:absolute; top:50%; font-size:26px; color:#565e6e;
+    transform:translateY(-50%); pointer-events:none; animation:nudge 1.8s ease-in-out infinite}
+  @keyframes nudge{0%,100%{opacity:.25}50%{opacity:.8}}
+
+  /* ── 控件 ── */
+  .ctrl{display:flex; gap:10px; align-items:center; margin-top:12px; flex-wrap:wrap}
+  button{background:var(--acc2); color:#fff; border:0; border-radius:10px;
+    padding:9px 16px; font-size:13px; cursor:pointer}
+  button.ghost{background:transparent; border:1px solid var(--line); color:var(--dim)}
+  button.ghost.on{background:#2a2440; border-color:var(--acc2); color:var(--acc)}
+  .seg{display:flex; border:1px solid var(--line); border-radius:10px; overflow:hidden}
+  .seg button{border-radius:0; background:transparent; color:var(--dim); padding:9px 14px}
+  .seg button.on{background:#2a2440; color:var(--acc)}
+
+  /* ── 前后对比：一根会伸缩的柱状图 ── */
+  .compare{width:378px; flex:none}
+  .cframe{width:378px; height:496px; border-radius:44px; background:#000; padding:10px;
+    border:2px solid #2c323d; position:relative; overflow:hidden}
+  .cframe .screen{border-radius:36px}
+  .ctop{position:absolute; top:0; left:0; right:0; height:96px; background:#1a1f28;
+    transition:height .5s cubic-bezier(.2,.8,.2,1); display:flex; align-items:center;
+    padding:0 20px; overflow:hidden}
+  .cbot{position:absolute; bottom:0; left:0; right:0; height:128px; background:#1a1f28;
+    transition:height .5s cubic-bezier(.2,.8,.2,1); display:flex; align-items:center;
+    justify-content:space-around; overflow:hidden}
+  .cbody{position:absolute; left:0; right:0; transition:top .5s cubic-bezier(.2,.8,.2,1),
+    bottom .5s cubic-bezier(.2,.8,.2,1); overflow:hidden; padding:0 32px}
+  .new .ctop{height:64px}
+  .new .cbot{height:16px}
+  .new .cbody{top:64px; bottom:16px}
+  .cbody{top:96px; bottom:128px}
+
+  .badge{position:absolute; right:16px; top:18px; font-size:15px; color:var(--warn);
+    background:#0009; padding:3px 10px; border-radius:20px; transition:opacity .3s}
+  .new .badge{opacity:0}
+
+  .metric{display:flex; gap:18px; margin-top:10px; font-size:13px; color:var(--dim)}
+  .metric b{font-size:20px; color:var(--acc); font-variant-numeric:tabular-nums}
+
+  .note{background:#1b2029; border-left:3px solid var(--acc2); border-radius:0 10px 10px 0;
+    padding:10px 14px; margin:14px 0; font-size:13px; color:var(--dim)}
+  ul{margin:8px 0 8px 20px; padding:0; color:var(--dim)}
+  li{margin:4px 0}
+</style>
+</head>
+<body>
+
+<h1>动画预览</h1>
+<p class="lead">按你选的三项做的：顶栏 32 dp、底栏 8 dp 指示点加左右滑动、发现目录改两列。画面按 189 × 248 dp 两倍放大。</p>
+
+<div class="metric" style="margin-top:12px">
+  <div>屏高<br><b>248</b> dp</div>
+  <div>旧 chrome<br><b>112</b> dp</div>
+  <div>新 chrome<br><b>40</b> dp</div>
+  <div>内容区<br><b class="save">136 → 208</b> dp</div>
+</div>
+
+<h2>一 · 三栏滑动（可拖动）</h2>
+<p>下面这台可以在屏上左右拖，也可以点底下的三个点。跟手拖动就是你要的滑动切换效果。松手不到一半会弹回。</p>
+
+<div class="stage">
+  <div class="watchbox">
+    <div class="watch"><div class="screen" id="screen">
+      <div class="track" id="track">
+
+        <!-- 书架 -->
+        <div class="page">
+          <div class="topbar">
+            <div class="title">书架</div><div class="grow"></div>
+            <div class="ico"></div><div class="ico"></div>
+          </div>
+          <div class="content">
+            <div class="shelf">
+              <div class="bk"><div class="cover" style="background:#c7b9ff">剑</div><div class="bkt">剑来</div><div class="bks">12/1043</div></div>
+              <div class="bk"><div class="cover" style="background:#9ad0c2">诡</div><div class="bkt">诡秘之主</div><div class="bks">88/1394</div></div>
+              <div class="bk"><div class="cover" style="background:#f0c9a0">大</div><div class="bkt">大奉打更人</div><div class="bks">3/1088</div></div>
+              <div class="bk"><div class="cover" style="background:#a8bde0">道</div><div class="bkt">道诡异仙</div><div class="bks">0/1024</div></div>
+              <div class="bk"><div class="cover" style="background:#e0a8b6">赤</div><div class="bkt">赤心巡天</div><div class="bks">55/2013</div></div>
+              <div class="bk"><div class="cover" style="background:#b7d99a">夜</div><div class="bkt">夜无疆</div><div class="bks">7/620</div></div>
+            </div>
+          </div>
+          <div class="dotsbar"></div>
+        </div>
+
+        <!-- 发现：目录两列 -->
+        <div class="page">
+          <div class="topbar">
+            <div class="title">发现</div><div class="grow"></div>
+            <div class="ico"></div><div class="ico"></div>
+          </div>
+          <div class="content">
+            <div class="dir play" id="dir" style="padding-top:14px">
+              <div class="chip">阅读</div><div class="chip">月票</div>
+              <div class="chip">新书</div><div class="chip">完本</div>
+              <div class="chip">畅销</div><div class="chip">推荐</div>
+              <div class="chip">收藏</div><div class="chip">打赏</div>
+            </div>
+          </div>
+          <div class="dotsbar"></div>
+        </div>
+
+        <!-- 我的 -->
+        <div class="page">
+          <div class="topbar">
+            <div class="title md">我的</div><div class="grow"></div>
+          </div>
+          <div class="content">
+            <div class="grp">
+              <div class="gi"><div class="ico"></div><div class="git">书源管理</div></div>
+              <div class="gi"><div class="ico"></div><div class="git">替换净化</div></div>
+            </div>
+            <div class="grp">
+              <div class="gi"><div class="ico"></div><div class="git">设置</div></div>
+              <div class="gi"><div class="ico"></div><div class="git">书签</div></div>
+              <div class="gi"><div class="ico"></div><div class="git">缓存管理</div></div>
+            </div>
+          </div>
+          <div class="dotsbar"></div>
+        </div>
+
+      </div>
+
+      <div class="swipearrow" id="aL" style="left:6px">‹</div>
+      <div class="swipearrow" id="aR" style="right:6px">›</div>
+    </div></div>
+    <div class="caption">拖动或点击下面的点 · 自动轮播中</div>
+  </div>
+
+  <div style="flex:1; min-width:260px">
+    <div class="ctrl" style="margin-top:0">
+      <div class="seg" id="tabseg">
+        <button data-i="0" class="on">书架</button>
+        <button data-i="1">发现</button>
+        <button data-i="2">我的</button>
+      </div>
+      <button class="ghost" id="playbtn">暂停轮播</button>
+    </div>
+
+    <div class="ctrl">
+      <span style="color:var(--dim); font-size:13px">底栏指示点：</span>
+      <div style="display:flex; gap:10px; align-items:center; padding:8px 14px;
+        border:1px solid var(--line); border-radius:20px" id="demoDots">
+        <div class="dot on" data-i="0"></div>
+        <div class="dot" data-i="1"></div>
+        <div class="dot" data-i="2"></div>
+      </div>
+    </div>
+
+    <div class="note" style="margin-top:16px">
+      这一版演示的是跟手拖动，也就是上一条里的做法 2。松手后按速度与位移决定切还是弹回，
+      切栏用 280 ms 的缓出。<br>
+      如果只做做法 1，画面会变成：手指划过去时不动，抬手才整屏换过去。
+    </div>
+
+    <ul>
+      <li>顶栏 32 dp：标题 15 sp，两枚 18 dp 图标，去掉原来那 8 dp 间隔。</li>
+      <li>底栏 8 dp：三个点，当前栏是一条短横。底栏不再吃 64 dp。</li>
+      <li>发现目录两列：八个榜一屏看全，不用再滚三屏。</li>
+    </ul>
+  </div>
+</div>
+
+<h2>二 · 前后对比（点按钮看变化）</h2>
+<p>同一台表，只在旧 chrome 与新 chrome 之间切换。注意底下的正文区跟着变高。</p>
+
+<div class="stage">
+  <div class="compare">
+    <div class="cframe" id="cframe">
+      <div class="screen">
+        <div class="ctop"><div class="title" id="ctitle">书架</div></div>
+        <div class="cbody">
+          <div class="list">
+            <div class="row"><div class="rt">剑来</div><div class="rs">烽火戏诸侯 · 已读 12/1043</div></div>
+            <div class="row"><div class="rt">诡秘之主</div><div class="rs">爱潜水的乌贼 · 已读 88/1394</div></div>
+            <div class="row"><div class="rt">大奉打更人</div><div class="rs">卖报小郎君 · 已读 3/1088</div></div>
+          </div>
+        </div>
+        <div class="cbot">
+          <div class="ico"></div><div class="ico"></div><div class="ico"></div>
+        </div>
+        <div class="badge" id="cbadge">chrome 112 dp · 1.9 行</div>
+      </div>
+    </div>
+    <div class="caption" id="cnum">顶栏 48 + 底栏 64 = 112 dp</div>
+  </div>
+
+  <div style="flex:1; min-width:260px">
+    <div class="ctrl" style="margin-top:0">
+      <div class="seg" id="cseg">
+        <button data-mode="old" class="on">改前</button>
+        <button data-mode="new">改后</button>
+      </div>
+      <button class="ghost" id="loopbtn">来回播放</button>
+    </div>
+
+    <div class="note" style="margin-top:16px">
+      正文区从 136 dp 涨到 208 dp，同样是 72 dp 的双行，一屏从 1.9 行变成 2.9 行。
+      列表本身一行没改，只是把被两块固定栏吃掉的高度拿回来。
+    </div>
+
+    <div class="note" style="border-left-color:var(--warn)">
+      提醒：改前那台里滚到第三行时，第二行只露出一点点。这是“夹缝里看列表”的来源。
+    </div>
+  </div>
+</div>
+
+<h2>三 · 发现目录的入场</h2>
+<p>八个榜依次落下，间隔 40 ms。切换栏位回来时会重播一次。</p>
+
+<div class="ctrl">
+  <button id="replay">重播动画</button>
+  <button class="ghost" id="slow">慢放（间隔 120 ms）</button>
+</div>
+
+<div class="note">
+  没有做「展开成榜单内容」的动画：现在点一个榜是整屏换成内容页，两屏之间没有共用元素，
+  硬做过渡会看到一个中间态空屏。保持立即切换反而干净。
+</div>
+
+<script>
+(function(){
+  var W = 378, N = 3;
+  var screen = document.getElementById('screen');
+  var track = document.getElementById('track');
+  var idx = 0, dragging = false, startX = 0, startT = 0, delta = 0, auto = true, timer = null;
+  var dots = Array.prototype.slice.call(document.querySelectorAll('#demoDots .dot'));
+  var segBtns = Array.prototype.slice.call(document.querySelectorAll('#tabseg button'));
+  var aL = document.getElementById('aL'), aR = document.getElementById('aR');
+
+  function setTransform(x, animate){
+    track.style.transition = animate ? 'transform .28s cubic-bezier(.2,.8,.2,1)' : 'none';
+    track.style.transform = 'translateX(' + (-x) + 'px)';
+  }
+  function paint(){
+    dots.forEach(function(d,i){ d.classList.toggle('on', i === idx); });
+    segBtns.forEach(function(b,i){ b.classList.toggle('on', i === idx); });
+    aL.style.opacity = idx === 0 ? 0 : 1;
+    aR.style.opacity = idx === N-1 ? 0 : 1;
+    document.getElementById('screen').dataset.page = idx;
+  }
+  function go(i, animate){
+    idx = Math.max(0, Math.min(N-1, i));
+    setTransform(idx * W, animate !== false);
+    paint();
+    if (idx === 1) replayDir();
+  }
+  function next(){
+    go(idx === N-1 ? 0 : idx+1);
+  }
+  function startAuto(){
+    if (timer) clearInterval(timer);
+    if (!auto) return;
+    timer = setInterval(function(){ if (!dragging) next(); }, 2200);
+  }
+
+  // ── 拖动 ──
+  screen.style.touchAction = 'none';
+  screen.addEventListener('pointerdown', function(e){
+    dragging = true; startX = e.clientX; startT = Date.now(); delta = 0;
+    track.style.transition = 'none';
+    screen.setPointerCapture(e.pointerId);
+  });
+  screen.addEventListener('pointermove', function(e){
+    if (!dragging) return;
+    delta = e.clientX - startX;
+    // 到头了给一点阻尼
+    var atEdge = (idx === 0 && delta > 0) || (idx === N-1 && delta < 0);
+    var d = atEdge ? delta * 0.32 : delta;
+    setTransform(idx * W - d, false);
+  });
+  function endDrag(){
+    if (!dragging) return;
+    dragging = false;
+    var dt = Date.now() - startT;
+    var v = Math.abs(delta) / Math.max(dt, 1);
+    var far = Math.abs(delta) > W * 0.42;
+    var fast = v > 0.55 && Math.abs(delta) > 24;
+    if (delta < 0 && (far || fast)) go(idx + 1);
+    else if (delta > 0 && (far || fast)) go(idx - 1);
+    else go(idx);
+    startAuto();
+  }
+  screen.addEventListener('pointerup', endDrag);
+  screen.addEventListener('pointercancel', endDrag);
+  screen.addEventListener('pointerleave', function(e){ if (dragging && e.buttons === 0) endDrag(); });
+
+  dots.forEach(function(d){ d.addEventListener('click', function(){ go(+d.dataset.i); startAuto(); }); });
+  segBtns.forEach(function(b){ b.addEventListener('click', function(){ go(+b.dataset.i); startAuto(); }); });
+
+  var playbtn = document.getElementById('playbtn');
+  playbtn.addEventListener('click', function(){
+    auto = !auto;
+    playbtn.textContent = auto ? '暂停轮播' : '继续轮播';
+    playbtn.classList.toggle('on', !auto);
+    startAuto();
+  });
+
+  // ── 目录入场 ──
+  function replayDir(){
+    var dir = document.getElementById('dir');
+    if (!dir) return;
+    dir.classList.remove('play');
+    void dir.offsetWidth;
+    dir.classList.add('play');
+  }
+  window.replayDir = replayDir;
+
+  go(0, false);
+  startAuto();
+
+  // ── 前后对比 ──
+  var cf = document.getElementById('cframe');
+  var cbadge = document.getElementById('cbadge');
+  var cnum = document.getElementById('cnum');
+  var ctitle = document.getElementById('ctitle');
+  var cbtns = Array.prototype.slice.call(document.querySelectorAll('#cseg button'));
+  function mode(m){
+    var isNew = m === 'new';
+    cf.classList.toggle('new', isNew);
+    cbadge.textContent = isNew ? 'chrome 40 dp · 2.9 行' : 'chrome 112 dp · 1.9 行';
+    cnum.textContent = isNew ? '顶栏 32 + 底栏 8 = 40 dp' : '顶栏 48 + 底栏 64 = 112 dp';
+    ctitle.style.fontSize = isNew ? '30px' : '38px';
+    cbtns.forEach(function(b){ b.classList.toggle('on', b.dataset.mode === m); });
+  }
+  cbtns.forEach(function(b){
+    b.addEventListener('click', function(){
+      stopLoop();
+      mode(b.dataset.mode);
+    });
+  });
+
+  var loopTimer = null;
+  function stopLoop(){
+    if (loopTimer) { clearInterval(loopTimer); loopTimer = null; }
+    document.getElementById('loopbtn').classList.remove('on');
+  }
+  document.getElementById('loopbtn').addEventListener('click', function(){
+    if (loopTimer) { stopLoop(); return; }
+    this.classList.add('on');
+    var cur = cf.classList.contains('new') ? 'new' : 'old';
+    loopTimer = setInterval(function(){
+      cur = cur === 'new' ? 'old' : 'new';
+      mode(cur);
+    }, 1400);
+  });
+
+  mode('old');
+
+  // ── 重播 / 慢放 ──
+  function replayDirSafe(){
+    var dir = document.getElementById('dir');
+    if (!dir) return;
+    dir.classList.remove('play');
+    void dir.offsetWidth;
+    dir.classList.add('play');
+  }
+  document.getElementById('replay').addEventListener('click', replayDirSafe);
+  var slowOn = false;
+  document.getElementById('slow').addEventListener('click', function(){
+    slowOn = !slowOn;
+    this.classList.toggle('on', slowOn);
+    var dir = document.getElementById('dir');
+    Array.prototype.forEach.call(dir.children, function(c, i){
+      c.style.animationDelay = (slowOn ? i * 0.12 : i * 0.04) + 's';
+      c.style.animationDuration = slowOn ? '.5s' : '.34s';
+    });
+    replayDirSafe();
+  });
+})();
+</script>
+
+</body>
+</html>

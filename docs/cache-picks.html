@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>缓存管理：三条待拍板</title>
+<style>
+:root{
+  --surface:#141218; --surface1:#1d1b20; --surface2:#211f26; --surface3:#2b2930; --surface4:#36343b;
+  --on:#e6e0e9; --onvar:#cac4d0; --outline-v:#49454f;
+  --primary:#d0bcff; --on-primary:#381e72; --ok:#7bd88f;
+  --bg:#0b0a0e; --page:#16151a;
+}
+*{box-sizing:border-box}
+body{margin:0;padding:14px 14px 120px;background:var(--bg);color:var(--on);
+  font:14px/1.6 system-ui,"Noto Sans SC","PingFang SC",sans-serif;-webkit-text-size-adjust:100%}
+h1{font-size:16px;margin:0 0 4px}
+.sub{color:var(--onvar);font-size:12px;margin:0 0 14px}
+.card{background:var(--page);border:1px solid var(--outline-v);border-radius:10px;
+  padding:12px 12px 8px;margin:0 0 12px}
+.q{font-size:14px;font-weight:600;margin:0 0 2px}
+.q .n{color:var(--primary);font-variant-numeric:tabular-nums;margin-right:6px}
+.hint{font-size:12px;color:var(--onvar);margin:0 0 8px}
+.opt{display:flex;gap:10px;align-items:flex-start;padding:9px 10px;margin:0 0 6px;
+  border:1px solid var(--outline-v);border-radius:8px;background:var(--surface1);cursor:pointer}
+.opt:active{background:var(--surface2)}
+.opt.on{border-color:var(--primary);background:var(--surface3)}
+.k{flex:none;width:22px;height:22px;border-radius:6px;background:var(--surface4);
+  display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;
+  color:var(--onvar);margin-top:1px}
+.opt.on .k{background:var(--primary);color:var(--on-primary)}
+.t{font-size:13px;font-weight:600}
+.d{font-size:12px;color:var(--onvar);margin-top:1px}
+.cost{font-size:11px;color:var(--ok);margin-top:2px}
+.picked{font-size:11px;color:var(--primary);margin-left:6px}
+footer{position:fixed;left:0;right:0;bottom:0;background:var(--surface);border-top:1px solid var(--outline-v);
+  padding:10px 14px calc(10px + env(safe-area-inset-bottom))}
+.sum{font-size:12px;color:var(--onvar);margin:0 0 8px;max-height:74px;overflow:auto;white-space:pre-wrap}
+.row{display:flex;gap:8px;align-items:center}
+button{flex:1;height:40px;border:0;border-radius:20px;font:600 14px system-ui,sans-serif}
+#copy{background:var(--primary);color:var(--on-primary)}
+#clear{flex:none;width:96px;background:transparent;color:var(--primary);border:1px solid var(--outline-v)}
+#toast{position:fixed;left:50%;transform:translateX(-50%);bottom:150px;background:var(--surface3);
+  color:var(--on);padding:8px 14px;border-radius:8px;font-size:12px;opacity:0;transition:.25s;pointer-events:none}
+#toast.on{opacity:1}
+</style>
+</head>
+<body>
+<h1>缓存管理：三条待拍板</h1>
+<p class="sub">每条点一个选项。点完按「复制结果」，粘回对话就行。<span id="cnt">已选 0 / 3</span></p>
+<div id="qs"></div>
+
+<div id="toast"></div>
+<footer>
+  <div class="sum" id="sum">还没选。</div>
+  <div class="row">
+    <button id="clear">清空</button>
+    <button id="copy">复制结果</button>
+  </div>
+</footer>
+
+<script>
+const QS = [
+  {
+    id: "section",
+    q: "缓存页按什么分段？",
+    hint: "legado 是「书架书籍 / 未在书架」，靠书的书架分组字段。我们的 job.json 里没有这个字段，所以只能换一种分法。",
+    opts: [
+      { k: "A", t: "维持现状：有正文 / 待重新下载", d: "按磁盘上有没有正文分两段，段标题带本数与体积。已经落地，不用改。", cost: "0" },
+      { k: "B", t: "改成：已下全 / 还有缺章", d: "与顶栏五段数同口径，一眼看出哪些书还没下完；按「完整性」分，比按「有没有正文」更贴近这一页的用途。", cost: "约 20 分钟" },
+      { k: "C", t: "给作业加快照书架标记", d: "下载时把「来自书架」写进 job.json，之后就能照 legado 分成书架 / 未在书架两段。要改数据结构，旧作业补不上标记。", cost: "约 3 小时" },
+    ],
+  },
+  {
+    id: "queue",
+    q: "全部开始 / 全部停止放哪？",
+    hint: "legado 是右下角 FAB，只在有任务或有缺章时出现。手表屏只有 189×248 dp，FAB 会压住最后一张书卡的末行。",
+    opts: [
+      { k: "A", t: "维持常驻屏底条", d: "整库动作固定在屏底一条通栏按钮，任何时候都在，不遮书卡。已落地。", cost: "0" },
+      { k: "B", t: "照 legado 用 FAB", d: "右下角圆形键，没有任务时不画。位置与 legado 一致，代价是压住最后一张卡的末行。", cost: "约 40 分钟" },
+      { k: "C", t: "屏底条，但按需出现", d: "位置仍是屏底，只在有任务或有缺章时才画；没活时多出一行给列表。兼得两者。", cost: "约 20 分钟" },
+    ],
+  },
+  {
+    id: "bug",
+    q: "顺手发现的旧 bug 改不改？",
+    hint: "DownloadService.kt 第 210 行，单本启动分支读的是 jobs 目录，其余各处都是 books。后果是「正在下载另一本」时那条通知恒报 0/0/0。",
+    opts: [
+      { k: "A", t: "改：jobs → books", d: "一个词的修正，改完那种情况会报出真实进度。属于本次缓存页改动的邻近代码。", cost: "2 分钟" },
+      { k: "B", t: "不动", d: "保持现状，另开一次改动处理。", cost: "0" },
+    ],
+  },
+];
+
+const state = JSON.parse(localStorage.getItem("wdl.cachepicks") || "{}");
+
+function render() {
+  const box = document.getElementById("qs");
+  box.innerHTML = "";
+  QS.forEach((q, i) => {
+    const card = document.createElement("div");
+    card.className = "card";
+    const picked = state[q.id];
+    const label = q.multi
+      ? (picked && picked.length ? `<span class="picked">已选 ${picked.length} 项</span>` : "")
+      : (picked ? `<span class="picked">已选 ${picked}</span>` : "");
+    card.innerHTML = `<div class="q"><span class="n">${i + 1}.</span>${q.q}${label}</div>
+      <div class="hint">${q.hint}</div>`;
+    q.opts.forEach((o) => {
+      const el = document.createElement("div");
+      const on = q.multi ? (picked || []).includes(o.k + "|" + o.t) : picked === o.k;
+      el.className = "opt" + (on ? " on" : "");
+      el.innerHTML = `<div class="k">${o.k}</div><div><div class="t">${o.t}</div>
+        <div class="d">${o.d}</div><div class="cost">工作量：${o.cost}</div></div>`;
+      el.onclick = () => {
+        if (q.multi) {
+          const key = o.k + "|" + o.t;
+          let arr = state[q.id] || [];
+          if (o.k === "-") arr = arr.includes(key) ? [] : [key];
+          else {
+            arr = arr.filter((x) => x !== "-|全都不做");
+            arr = arr.includes(key) ? arr.filter((x) => x !== key) : arr.concat(key);
+          }
+          state[q.id] = arr;
+        } else {
+          state[q.id] = picked === o.k ? undefined : o.k;
+        }
+        save(); render();
+      };
+      card.appendChild(el);
+    });
+    box.appendChild(card);
+  });
+  update();
+}
+
+function summary() {
+  const lines = [];
+  QS.forEach((q, i) => {
+    const p = state[q.id];
+    if (!p || (Array.isArray(p) && !p.length)) return;
+    if (q.multi) {
+      lines.push(`${i + 1}. ${q.q} → ${p.map((x) => x.split("|")[1]).join("、")}`);
+    } else {
+      const o = q.opts.find((x) => x.k === p);
+      lines.push(`${i + 1}. ${q.q} → ${o.k} ${o.t}`);
+    }
+  });
+  return lines.length ? lines.join("\n") : "还没选。";
+}
+
+function update() {
+  document.getElementById("sum").textContent = summary();
+  const done = QS.filter((q) => {
+    const p = state[q.id];
+    return p && (!Array.isArray(p) || p.length);
+  }).length;
+  document.getElementById("cnt").textContent = `已选 ${done} / ${QS.length}`;
+}
+
+function save() { localStorage.setItem("wdl.cachepicks", JSON.stringify(state)); }
+
+document.getElementById("clear").onclick = () => {
+  for (const k in state) delete state[k];
+  save(); render();
+};
+
+document.getElementById("copy").onclick = async () => {
+  const txt = summary();
+  try {
+    await navigator.clipboard.writeText(txt);
+    toast("已复制，粘回对话就行");
+  } catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = txt; document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); toast("已复制"); }
+    catch (_) { toast("复制失败，长按上面那段文字手动选"); }
+    ta.remove();
+  }
+};
+
+let tid;
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.className = "on";
+  clearTimeout(tid); tid = setTimeout(() => (t.className = ""), 1600);
+}
+
+render();
+</script>
+</body>
+</html>

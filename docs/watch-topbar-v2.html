@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>顶栏新方案 + 底栏指示点尺寸（跟手拖动）</title>
+<style>
+  :root{
+    --bg:#0e1014; --card:#161a21; --line:#282e39; --ink:#e6e9ef; --dim:#98a1b0;
+    --acc:#c6bfff; --acc2:#7a70d8; --ok:#8fd694; --warn:#ffb86b;
+    --screen:#14181e; --bar:#1a1f28;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  body{margin:0; padding:18px 14px 60px; background:var(--bg); color:var(--ink);
+    font:14px/1.65 -apple-system,"Noto Sans SC",system-ui,sans-serif}
+  h1{font-size:19px; margin:0 0 4px}
+  h2{font-size:15px; margin:32px 0 2px; padding-bottom:6px; border-bottom:1px solid var(--line)}
+  p{margin:8px 0; color:var(--dim)}
+  .lead{color:var(--ink)}
+  code{background:#232833; padding:1px 5px; border-radius:4px; font-size:12px}
+  .num{font-variant-numeric:tabular-nums}
+  .save{color:var(--ok)}
+  .note{background:#1b2029; border-left:3px solid var(--acc2); border-radius:0 10px 10px 0;
+    padding:10px 14px; margin:14px 0; font-size:13px; color:var(--dim)}
+  .note.warn{border-left-color:var(--warn)}
+
+  /* ── 手表：189×248 dp，2 倍渲染 = 378×496 px ── */
+  .watch{width:378px; height:496px; border-radius:44px; background:#000; padding:10px;
+    border:2px solid #2c323d; box-shadow:0 10px 34px #0008; flex:none}
+  .screen{position:relative; width:100%; height:100%; border-radius:36px;
+    overflow:hidden; background:var(--screen)}
+  .caption{font-size:12px; color:var(--dim); margin-top:8px; text-align:center; width:378px}
+
+  .track{display:flex; height:100%; will-change:transform}
+  .page{width:378px; height:100%; flex:none; display:flex; flex-direction:column; overflow:hidden}
+  .p-top{flex:none}
+  .content{flex:1; overflow:hidden; padding:0 32px; position:relative}
+
+  /* 顶栏零件 */
+  .tb{display:flex; align-items:center; background:var(--bar); overflow:hidden}
+  .ttl{font-size:30px; font-weight:700; white-space:nowrap}
+  .ttl.sm{font-size:28px}
+  .ttl.xs{font-size:24px}
+  .ttl.xxs{font-size:22px; font-weight:600}
+  .ttl.big{font-size:36px}
+  .gr{flex:1}
+  .ic{width:36px; height:36px; border-radius:50%; background:#4d5566; flex:none}
+  .ic.sm{width:30px; height:30px}
+  .ic.xs{width:26px; height:26px}
+  .ic.ghost{background:#4d556688}
+  .segment{display:flex; gap:26px; align-items:center; height:100%}
+  .segitem{font-size:24px; color:#8e97a6; position:relative; padding-bottom:4px}
+  .segitem.on{color:#fff; font-weight:700}
+  .segitem.on::after{content:""; position:absolute; left:0; right:0; bottom:0;
+    height:3px; border-radius:2px; background:var(--acc)}
+  .float{position:absolute; top:10px; right:16px; display:flex; gap:12px; z-index:5}
+  .scrim{position:absolute; top:0; left:0; right:0; height:60px; z-index:4;
+    background:linear-gradient(#14181ee6,#14181e00)}
+
+  /* 书架 */
+  .shelf{display:grid; grid-template-columns:repeat(3,1fr); gap:16px; padding-top:10px}
+  .bk{display:flex; flex-direction:column; gap:6px}
+  .cover{height:130px; border-radius:14px; display:flex; align-items:center;
+    justify-content:center; font-size:38px; font-weight:700; color:#1b1f27}
+  .bkt{font-size:20px; text-align:center; color:#dfe4ec; white-space:nowrap;
+    overflow:hidden; text-overflow:ellipsis}
+
+  /* 发现目录两列 */
+  .dir{display:grid; grid-template-columns:repeat(2,1fr); gap:12px; padding-top:12px}
+  .chip{height:64px; border-radius:14px; background:#21262f; display:flex;
+    align-items:center; justify-content:center; font-size:21px; color:#dbe1ea}
+
+  /* 我的 */
+  .grp{margin-top:12px; background:#1b2029; border-radius:16px; overflow:hidden}
+  .gi{height:104px; display:flex; align-items:center; gap:16px; padding:0 20px;
+    border-bottom:1px solid #242a34}
+  .gi:last-child{border-bottom:0}
+  .gi .ic{width:32px; height:32px}
+  .git{font-size:22px; color:#dfe4ec}
+
+  /* 底栏指示点：尺寸由 --ds 控制（dp） */
+  .dotsbar{position:absolute; left:0; right:0; bottom:0; height:16px;
+    display:flex; align-items:center; justify-content:center;
+    gap:calc(var(--ds, 3) * 3px); z-index:6}
+  .dot{width:calc(var(--ds, 3) * 2px); height:calc(var(--ds, 3) * 2px);
+    border-radius:50%; background:#4a5162; transition:all .26s cubic-bezier(.2,.8,.2,1)}
+  .dot.on{background:var(--acc); width:calc(var(--ds, 3) * 6px)}
+
+  /* ── 方案卡 ── */
+  .grid{display:flex; flex-wrap:wrap; gap:16px; margin-top:14px}
+  .opt{background:var(--card); border:1px solid var(--line); border-radius:14px;
+    padding:12px; width:334px}
+  .opt.on{border-color:var(--acc2)}
+  .opt-head{display:flex; gap:8px; align-items:flex-start; margin-bottom:6px}
+  .opt-head input{margin-top:4px; width:17px; height:17px; accent-color:var(--acc2); flex:none}
+  .opt-head label{flex:1; cursor:pointer}
+  .opt-head h3{font-size:14px; margin:0}
+  .tag{font-size:11px; color:var(--acc); border:1px solid var(--acc2);
+    border-radius:20px; padding:0 7px; margin-left:6px; vertical-align:1px}
+  .desc{font-size:12px; color:var(--dim); margin:6px 0}
+  .metrics{font-size:12px; color:var(--dim); margin:4px 0 10px}
+  .metrics b{color:var(--ink); font-variant-numeric:tabular-nums}
+  .mini{width:100%; height:270px; overflow:hidden; border-radius:18px; border:2px solid #2c323d; background:#000; padding:6px}
+  .mini .screen{border-radius:14px}
+  .dotdemo{display:flex; gap:26px; align-items:center; background:#171b22;
+    border:1px solid var(--line); border-radius:12px; padding:14px 18px; margin-top:10px}
+  .dots-bar-real{display:flex; gap:9px; align-items:center}
+  .dz{display:flex; flex-direction:column; gap:10px; align-items:center;
+    border:1px solid var(--line); border-radius:12px; padding:12px 16px; cursor:pointer}
+  .dz.on{border-color:var(--acc2); background:#211d33}
+  .dz span{font-size:12px; color:var(--dim)}
+
+  .stage{display:flex; gap:26px; flex-wrap:wrap; align-items:flex-start; margin-top:14px}
+  .ctrl{display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:12px}
+  button{background:var(--acc2); color:#fff; border:0; border-radius:10px;
+    padding:9px 16px; font-size:13px; cursor:pointer}
+  button.ghost{background:transparent; border:1px solid var(--line); color:var(--dim)}
+  button.ghost.on{background:#2a2440; border-color:var(--acc2); color:var(--acc)}
+  .seg{display:flex; border:1px solid var(--line); border-radius:10px; overflow:hidden}
+  .seg button{border-radius:0; background:transparent; color:var(--dim); padding:9px 14px}
+  .seg button.on{background:#2a2440; color:var(--acc)}
+  table{border-collapse:collapse; margin:12px 0; font-size:13px}
+  th,td{border:1px solid var(--line); padding:5px 9px; text-align:left}
+  th{background:#1d2129; color:var(--dim)}
+  ul{margin:8px 0 8px 20px; color:var(--dim)}
+  li{margin:4px 0}
+</style>
+</head>
+<body>
+
+<h1>顶栏新方案 + 底栏指示点尺寸</h1>
+<p class="lead">底栏三点按你的意见改小了。顶栏再给六个方案，最下面一台是活的，能拖。</p>
+
+<div class="note">
+  先说上一版为什么看着大：我按 6 dp 画的，且整机放大了两倍。手表上常见的指示点是 3 dp 上下，
+  选中态做成短条。这一版按 3 / 2.5 / 2 dp 三档重画，你挑一个。
+</div>
+
+<h2>一 · 底栏指示点（三档，单选）</h2>
+<p>点间距都是 5 dp。选中态是同一高度的短条，长度是点的 3 倍。</p>
+
+<div class="dots-bar-real" style="margin-top:12px; gap:14px">
+  <div class="dz on" data-ds="3" onclick="pickDs(3,this)">
+    <div style="display:flex; gap:9px; align-items:center">
+      <div style="width:6px;height:6px;border-radius:50%;background:#4a5162"></div>
+      <div style="width:18px;height:6px;border-radius:3px;background:var(--acc)"></div>
+      <div style="width:6px;height:6px;border-radius:50%;background:#4a5162"></div>
+    </div>
+    <span>3 dp · 推荐</span>
+  </div>
+  <div class="dz" data-ds="2.5" onclick="pickDs(2.5,this)">
+    <div style="display:flex; gap:9px; align-items:center">
+      <div style="width:5px;height:5px;border-radius:50%;background:#4a5162"></div>
+      <div style="width:15px;height:5px;border-radius:2.5px;background:var(--acc)"></div>
+      <div style="width:5px;height:5px;border-radius:50%;background:#4a5162"></div>
+    </div>
+    <span>2.5 dp · 更小</span>
+  </div>
+  <div class="dz" data-ds="2" onclick="pickDs(2,this)">
+    <div style="display:flex; gap:9px; align-items:center">
+      <div style="width:4px;height:4px;border-radius:50%;background:#4a5162"></div>
+      <div style="width:12px;height:4px;border-radius:2px;background:var(--acc)"></div>
+      <div style="width:4px;height:4px;border-radius:50%;background:#4a5162"></div>
+    </div>
+    <span>2 dp · 下限</span>
+  </div>
+</div>
+
+<div class="note warn">
+  2 dp 在这块屏上大约是 4 个像素的直径，圆角基本看不出来，看着像小方点。
+  再加手指遮挡，非选中点会很难判断在哪一栏。3 dp 是我建议的底。
+</div>
+
+<h2>二 · 顶栏新方案（六个，单选）</h2>
+<p>每个方案下面画的是 2 倍放大的真机效果，顶栏高度都标出来了。现在的 T2 是 32 dp。</p>
+
+<div class="grid">
+
+  <div class="opt">
+    <div class="opt-head"><input type="checkbox" id="T5" data-name="顶栏 T5 25dp 只留一枚 ⋮" data-top="t5">
+      <label for="T5"><h3>T5 · 25 dp 只留一枚 ⋮<span class="tag">最省事</span></h3></label></div>
+    <div class="desc">搜不放到顶栏，收进 ⋮ 菜单。顶栏只剩标题与一枚按钮，去掉图标挤在一起的观感。</div>
+    <div class="metrics">占屏 <b>25 dp</b> · 内容区 <b>215 dp</b> <span class="save">比 T2 再省 7</span></div>
+    <div class="mini"><div class="screen" style="display:flex;flex-direction:column">
+      <div class="tb" style="height:50px; padding:0 18px"><div class="ttl xs">书架</div>
+        <div class="gr"></div><div class="ic sm"></div></div>
+      <div class="content"><div class="shelf">
+        <div class="bk"><div class="cover" style="height:86px;background:#c7b9ff">剑</div><div class="bkt" style="font-size:15px">剑来</div></div>
+        <div class="bk"><div class="cover" style="height:86px;background:#9ad0c2">诡</div><div class="bkt" style="font-size:15px">诡秘之主</div></div>
+        <div class="bk"><div class="cover" style="height:86px;background:#f0c9a0">大</div><div class="bkt" style="font-size:15px">大奉</div></div>
+        <div class="bk"><div class="cover" style="height:86px;background:#a8bde0">道</div><div class="bkt" style="font-size:15px">道诡异仙</div></div>
+        <div class="bk"><div class="cover" style="height:86px;background:#e0a8b6">赤</div><div class="bkt" style="font-size:15px">赤心</div></div>
+        <div class="bk"><div class="cover" style="height:86px;background:#b7d99a">夜</div><div class="bkt" style="font-size:15px">夜无疆</div></div>
+      </div></div>
+    </div></div>
+    <div class="desc" style="color:var(--warn)">代价：搜索要多点一次。</div>
+  </div>
+
+  <div class="opt">
+    <div class="opt-head"><input type="checkbox" id="T6" data-name="顶栏 T6 26dp 标题居中" data-top="t6">
+      <label for="T6"><h3>T6 · 26 dp 标题居中<span class="tag">对称</span></h3></label></div>
+    <div class="desc">标题居中，左右各一枚 13 dp 图标贴边。视觉重心在中间，比左侧标题更稳。</div>
+    <div class="metrics">占屏 <b>26 dp</b> · 内容区 <b>214 dp</b> <span class="save">比 T2 再省 6</span></div>
+    <div class="mini"><div class="screen" style="display:flex;flex-direction:column">
+      <div class="tb" style="height:52px; padding:0 12px; justify-content:space-between">
+        <div class="ic xs"></div><div class="ttl xs" style="position:absolute;left:0;right:0;text-align:center">书架</div>
+        <div style="display:flex;gap:10px"><div class="ic xs"></div></div></div>
+      <div class="content"><div class="shelf">
+        <div class="bk"><div class="cover" style="height:86px;background:#c7b9ff">剑</div><div class="bkt" style="font-size:15px">剑来</div></div>
+        <div class="bk"><div class="cover" style="height:86px;background:#9ad0c2">诡</div><div class="bkt" style="font-size:15px">诡秘之主</div></div>
+        <div class="bk"><div class="cover" style="height:86px;background:#f0c9a0">大</div><div class="bkt" style="font-size:15px">大奉</div></div>
+        <div class="bk"><div class="cover" style="height:86px;background:#a8bde0">道</div><div class="bkt" style="font-size:15px">道诡异仙</div></div>
+        <div class="bk"><div class="cover" style="height:86px;background:#e0a8b6">赤</div><div class="bkt" style="font-size:15px">赤心</div></div>
+        <div class="bk"><div class="cover" style="height:86px;background:#b7d99a">夜</div><div class="bkt" style="font-size:15px">夜无疆</div></div>
+      </div></div>
+    </div></div>
+    <div class="desc" style="color:var(--warn)">代价：居中标题与右滑手势都在中间区，容易互相干扰。</div>
+  </div>
+
+  <div class="opt">
+    <div class="opt-head"><input type="checkbox" id="T7" data-name="顶栏 T7 0dp 悬浮图标不占高" data-top="t7">
+      <label for="T7"><h3>T7 · 0 dp 悬浮图标<span class="tag">正文最大</span></h3></label></div>
+    <div class="desc">顶栏不占布局，两枚半透明图标浮在右上角，正文从屏顶开始。标题干脆不画，靠底下的指示点认栏。</div>
+    <div class="metrics">占屏 <b>0 dp</b> · 内容区 <b>240 dp</b> <span class="save">比 T2 再省 32</span></div>
+    <div class="mini"><div class="screen" style="display:flex;flex-direction:column">
+      <div class="content" style="padding-top:12px"><div class="shelf" style="padding-top:22px">
+        <div class="bk"><div class="cover" style="height:92px;background:#c7b9ff">剑</div><div class="bkt" style="font-size:15px">剑来</div></div>
+        <div class="bk"><div class="cover" style="height:92px;background:#9ad0c2">诡</div><div class="bkt" style="font-size:15px">诡秘之主</div></div>
+        <div class="bk"><div class="cover" style="height:92px;background:#f0c9a0">大</div><div class="bkt" style="font-size:15px">大奉</div></div>
+        <div class="bk"><div class="cover" style="height:92px;background:#a8bde0">道</div><div class="bkt" style="font-size:15px">道诡异仙</div></div>
+        <div class="bk"><div class="cover" style="height:92px;background:#e0a8b6">赤</div><div class="bkt" style="font-size:15px">赤心</div></div>
+        <div class="bk"><div class="cover" style="height:92px;background:#b7d99a">夜</div><div class="bkt" style="font-size:15px">夜无疆</div></div>
+      </div></div>
+      <div class="float"><div class="ic sm ghost"></div><div class="ic sm ghost"></div></div>
+    </div></div>
+    <div class="desc" style="color:var(--warn)">代价：第一排封面会被图标压住一角，要留 20 dp 顶距。</div>
+  </div>
+
+  <div class="opt">
+    <div class="opt-head"><input type="checkbox" id="T8" data-name="顶栏 T8 折叠大标题 44→24" data-top="t8">
+      <label for="T8"><h3>T8 · 折叠大标题 44 收 24<span class="tag">有生气</span></h3></label></div>
+    <div class="desc">刚进来是大标题 44 dp，往下滚收到 24 dp 小标题。停住不动就保持，回顶再展开。</div>
+    <div class="metrics">展开 <b>44 dp</b> · 滚动后 <b>24 dp</b> · 内容区 <b>216 dp</b></div>
+    <div class="mini"><div class="screen" style="display:flex;flex-direction:column">
+      <div class="tb" style="height:88px; padding:0 18px; align-items:flex-end; padding-bottom:10px">
+        <div class="ttl big">书架</div><div class="gr"></div><div class="ic sm" style="margin-bottom:2px"></div></div>
+      <div class="content"><div class="shelf">
+        <div class="bk"><div class="cover" style="height:78px;background:#c7b9ff">剑</div><div class="bkt" style="font-size:15px">剑来</div></div>
+        <div class="bk"><div class="cover" style="height:78px;background:#9ad0c2">诡</div><div class="bkt" style="font-size:15px">诡秘之主</div></div>
+        <div class="bk"><div class="cover" style="height:78px;background:#f0c9a0">大</div><div class="bkt" style="font-size:15px">大奉</div></div>
+        <div class="bk"><div class="cover" style="height:78px;background:#a8bde0">道</div><div class="bkt" style="font-size:15px">道诡异仙</div></div>
+        <div class="bk"><div class="cover" style="height:78px;background:#e0a8b6">赤</div><div class="bkt" style="font-size:15px">赤心</div></div>
+        <div class="bk"><div class="cover" style="height:78px;background:#b7d99a">夜</div><div class="bkt" style="font-size:15px">夜无疆</div></div>
+      </div></div>
+    </div></div>
+    <div class="desc" style="color:var(--warn)">代价：要加滚动监听与高度插值，是六个里代码最多的一个。</div>
+  </div>
+
+  <div class="opt">
+    <div class="opt-head"><input type="checkbox" id="T9" data-name="顶栏 T9 24dp 分段页签" data-top="t9">
+      <label for="T9"><h3>T9 · 24 dp 分段页签<span class="tag">替代底栏</span></h3></label></div>
+    <div class="desc">三栏名做成页签行，当前栏加粗加下划线。选这个就可以不要底栏，导航全在顶上。</div>
+    <div class="metrics">占屏 <b>24 dp</b> · 内容区 <b>216 dp</b> <span class="save">与 B4 二选一</span></div>
+    <div class="mini"><div class="screen" style="display:flex;flex-direction:column">
+      <div class="tb" style="height:48px; padding:0 18px; justify-content:center">
+        <div class="segment"><div class="segitem on">书架</div><div class="segitem">发现</div><div class="segitem">我的</div></div></div>
+      <div class="content"><div class="shelf">
+        <div class="bk"><div class="cover" style="height:88px;background:#c7b9ff">剑</div><div class="bkt" style="font-size:15px">剑来</div></div>
+        <div class="bk"><div class="cover" style="height:88px;background:#9ad0c2">诡</div><div class="bkt" style="font-size:15px">诡秘之主</div></div>
+        <div class="bk"><div class="cover" style="height:88px;background:#f0c9a0">大</div><div class="bkt" style="font-size:15px">大奉</div></div>
+        <div class="bk"><div class="cover" style="height:88px;background:#a8bde0">道</div><div class="bkt" style="font-size:15px">道诡异仙</div></div>
+        <div class="bk"><div class="cover" style="height:88px;background:#e0a8b6">赤</div><div class="bkt" style="font-size:15px">赤心</div></div>
+        <div class="bk"><div class="cover" style="height:88px;background:#b7d99a">夜</div><div class="bkt" style="font-size:15px">夜无疆</div></div>
+      </div></div>
+    </div></div>
+    <div class="desc" style="color:var(--warn)">代价：三个词并排在 189 dp 宽里，字号只能到 12 sp，且横向滑动与页签点击重叠。</div>
+  </div>
+
+  <div class="opt">
+    <div class="opt-head"><input type="checkbox" id="T10" data-name="顶栏 T10 透明叠加 不占高" data-top="t10">
+      <label for="T10"><h3>T10 · 透明标题叠在列表上<span class="tag">占 0 但看得见</span></h3></label></div>
+    <div class="desc">标题浮在内容上，底下加一层渐隐遮罩。看着像有顶栏，实际不占高度。滚动时标题淡出。</div>
+    <div class="metrics">占屏 <b>0 dp</b> · 视觉高度 <b>约 26 dp</b> · 内容区 <b>240 dp</b></div>
+    <div class="mini"><div class="screen" style="display:flex;flex-direction:column">
+      <div class="content" style="padding-top:4px"><div class="shelf" style="padding-top:40px">
+        <div class="bk"><div class="cover" style="height:92px;background:#c7b9ff">剑</div><div class="bkt" style="font-size:15px">剑来</div></div>
+        <div class="bk"><div class="cover" style="height:92px;background:#9ad0c2">诡</div><div class="bkt" style="font-size:15px">诡秘之主</div></div>
+        <div class="bk"><div class="cover" style="height:92px;background:#f0c9a0">大</div><div class="bkt" style="font-size:15px">大奉</div></div>
+        <div class="bk"><div class="cover" style="height:92px;background:#a8bde0">道</div><div class="bkt" style="font-size:15px">道诡异仙</div></div>
+        <div class="bk"><div class="cover" style="height:92px;background:#e0a8b6">赤</div><div class="bkt" style="font-size:15px">赤心</div></div>
+        <div class="bk"><div class="cover" style="height:92px;background:#b7d99a">夜</div><div class="bkt" style="font-size:15px">夜无疆</div></div>
+      </div></div>
+      <div class="scrim"></div>
+      <div class="float" style="top:12px; left:18px; right:18px">
+        <div class="ttl xxs" style="color:#fff">书架</div><div class="gr"></div>
+        <div class="ic xs ghost" style="margin-left:10px"></div><div class="ic xs ghost"></div></div>
+    </div></div>
+    <div class="desc" style="color:var(--warn)">代价：列表第一排要留 26 dp 顶距，否则被标题压住。滚动时标题会与内容打架。</div>
+  </div>
+
+</div>
+
+<h2>三 · 活预览（拖动切栏）</h2>
+<p>这台跟着上面的选择变：换顶栏方案，它上面的栏也跟着换；换指示点尺寸，底下三点也跟着缩。</p>
+
+<div class="stage">
+  <div>
+    <div class="watch"><div class="screen" id="screen">
+      <div class="track" id="track">
+        <div class="page"><div class="p-top" data-i="0"></div>
+          <div class="content"><div class="shelf">
+            <div class="bk"><div class="cover" style="background:#c7b9ff">剑</div><div class="bkt">剑来</div></div>
+            <div class="bk"><div class="cover" style="background:#9ad0c2">诡</div><div class="bkt">诡秘之主</div></div>
+            <div class="bk"><div class="cover" style="background:#f0c9a0">大</div><div class="bkt">大奉打更人</div></div>
+            <div class="bk"><div class="cover" style="background:#a8bde0">道</div><div class="bkt">道诡异仙</div></div>
+            <div class="bk"><div class="cover" style="background:#e0a8b6">赤</div><div class="bkt">赤心巡天</div></div>
+            <div class="bk"><div class="cover" style="background:#b7d99a">夜</div><div class="bkt">夜无疆</div></div>
+          </div></div></div>
+
+        <div class="page"><div class="p-top" data-i="1"></div>
+          <div class="content"><div class="dir">
+            <div class="chip">阅读</div><div class="chip">月票</div>
+            <div class="chip">新书</div><div class="chip">完本</div>
+            <div class="chip">畅销</div><div class="chip">推荐</div>
+            <div class="chip">收藏</div><div class="chip">打赏</div>
+          </div></div></div>
+
+        <div class="page"><div class="p-top" data-i="2"></div>
+          <div class="content">
+            <div class="grp"><div class="gi"><div class="ic"></div><div class="git">书源管理</div></div>
+              <div class="gi"><div class="ic"></div><div class="git">替换净化</div></div></div>
+            <div class="grp"><div class="gi"><div class="ic"></div><div class="git">设置</div></div>
+              <div class="gi"><div class="ic"></div><div class="git">书签</div></div>
+              <div class="gi"><div class="ic"></div><div class="git">缓存管理</div></div></div>
+          </div></div>
+      </div>
+      <div class="dotsbar" id="dotsbar">
+        <div class="dot on"></div><div class="dot"></div><div class="dot"></div>
+      </div>
+    </div></div>
+    <div class="caption" id="livecap">顶栏 T2 · 32 dp ｜ 指示点 3 dp</div>
+  </div>
+
+  <div style="flex:1; min-width:250px">
+    <div class="ctrl" style="margin-top:0">
+      <div class="seg" id="tabseg">
+        <button data-i="0" class="on">书架</button><button data-i="1">发现</button><button data-i="2">我的</button>
+      </div>
+    </div>
+    <div class="ctrl">
+      <button class="ghost" id="playbtn">暂停轮播</button>
+      <button class="ghost" id="resetbtn">回到 T2</button>
+    </div>
+    <div class="note" style="margin-top:16px">
+      跟手拖动：手指按住往左右拉，三栏实时跟着走。松手时位移超过 42% 或速度超过阈值就切栏，
+      否则弹回原栏，动画 260 ms。<br>
+      划到最左或最右继续拉，会有阻尼，拉不动太多。
+    </div>
+    <div class="note warn">
+      T8 与 T10 在活预览里按滚动后的状态画。要看展开态，点上面对应卡片里的静态图。
+    </div>
+  </div>
+</div>
+
+<h2>四 · 六个方案的取舍</h2>
+<table>
+  <tr><th>方案</th><th>占屏</th><th>搜索入口</th><th>代码量</th><th>主要风险</th></tr>
+  <tr><td>T5 只留 ⋮ 25</td><td class="num">25 dp</td><td>进菜单，多一次点</td><td>小</td><td>无</td></tr>
+  <tr><td>T6 标题居中 26</td><td class="num">26 dp</td><td>左侧图标</td><td>小</td><td>与右滑手势冲突</td></tr>
+  <tr><td>T7 悬浮图标 0</td><td class="num">0 dp</td><td>右上浮标</td><td>小</td><td>压住首排封面</td></tr>
+  <tr><td>T8 折叠标题 44→24</td><td class="num">24–44 dp</td><td>图钉在右侧</td><td><b>最大</b></td><td>滚动插值的手感</td></tr>
+  <tr><td>T9 分段页签 24</td><td class="num">24 dp</td><td>无位置，需另放</td><td>中</td><td>与 B4 重复，二选一</td></tr>
+  <tr><td>T10 透明叠加 0</td><td class="num">0 dp</td><td>右上浮标</td><td>中</td><td>滚动时文字重叠</td></tr>
+</table>
+
+<div class="note">
+  我的建议是 <b>T5</b>。它比 T2 再省 7 dp，且把搜索收进菜单后，顶栏只剩标题与一枚按钮，
+  在 189 dp 宽里不再拥挤。要更激进就 T7，但首排封面得留 20 dp 顶距。
+</div>
+
+<script>
+var VARIANTS = {
+  t2:  {h:64, name:'T2 · 32 dp',
+        tpl:'<div class="tb" style="height:64px;padding:0 20px"><div class="ttl sm">{T}</div><div class="gr"></div><div class="ic sm"></div><div class="ic sm" style="margin-left:10px"></div></div>'},
+  t5:  {h:50, name:'T5 · 25 dp',
+        tpl:'<div class="tb" style="height:50px;padding:0 18px"><div class="ttl xs">{T}</div><div class="gr"></div><div class="ic sm"></div></div>'},
+  t6:  {h:52, name:'T6 · 26 dp',
+        tpl:'<div class="tb" style="height:52px;padding:0 12px;position:relative"><div class="ic xs"></div><div class="ttl xs" style="position:absolute;left:0;right:0;text-align:center">{T}</div><div class="gr"></div><div class="ic xs"></div></div>'},
+  t7:  {h:0,  name:'T7 · 0 dp 悬浮',
+        tpl:'<div style="height:0"></div>', floatIcons:true},
+  t8:  {h:48, name:'T8 · 折叠后 24 dp',
+        tpl:'<div class="tb" style="height:48px;padding:0 18px"><div class="ttl xxs">{T}</div><div class="gr"></div><div class="ic xs"></div></div>'},
+  t9:  {h:48, name:'T9 · 24 dp 页签',
+        tpl:'<div class="tb" style="height:48px;padding:0 18px;justify-content:center"><div class="segment"><div class="segitem" data-s="0">书架</div><div class="segitem" data-s="1">发现</div><div class="segitem" data-s="2">我的</div></div></div>', segmented:true},
+  t10: {h:0,  name:'T10 · 透明叠加',
+        tpl:'<div style="height:0"></div>', overlay:true}
+};
+var TITLES = ['书架','发现','我的'];
+var cur = {top:'t2', ds:3};
+
+var screen = document.getElementById('screen');
+var track = document.getElementById('track');
+var W = 378, N = 3, idx = 0;
+var dragging = false, startX = 0, startT = 0, delta = 0, auto = true, timer = null;
+
+function renderTop(){
+  var v = VARIANTS[cur.top];
+  document.querySelectorAll('.p-top').forEach(function(el){
+    var i = +el.dataset.i;
+    el.innerHTML = v.tpl.replace('{T}', TITLES[i]);
+    if (v.segmented) {
+      el.querySelectorAll('.segitem').forEach(function(s){
+        s.classList.toggle('on', +s.dataset.s === i);
+      });
+    }
+  });
+  // 清掉旧的浮层
+  document.querySelectorAll('.live-float, .live-scrim').forEach(function(e){ e.remove(); });
+  if (v.floatIcons || v.overlay) {
+    var wrap = document.createElement('div');
+    wrap.className = 'live-float';
+    wrap.style.cssText = 'position:absolute;top:' + (v.overlay ? 12 : 14) + 'px;left:0;right:0;' +
+      'display:flex;align-items:center;padding:0 18px;z-index:8;pointer-events:none';
+    wrap.innerHTML = (v.overlay ? '<div class="ttl xxs" style="color:#fff">' + TITLES[idx] + '</div>' : '') +
+      '<div style="flex:1"></div><div class="ic xs ghost" style="' + (v.overlay?'margin-right:10px':'') + '"></div>' +
+      (v.overlay ? '<div class="ic xs ghost"></div>' : '<div class="ic xs ghost" style="margin-left:10px"></div>');
+    screen.appendChild(wrap);
+    if (v.overlay) {
+      var sc = document.createElement('div');
+      sc.className = 'live-scrim';
+      sc.style.cssText = 'position:absolute;top:0;left:0;right:0;height:56px;z-index:7;' +
+        'background:linear-gradient(#14181ee0,#14181e00);pointer-events:none';
+      screen.appendChild(sc);
+    }
+    if (v.overlay) {
+      document.querySelectorAll('.page .content').forEach(function(c){
+        c.style.paddingTop = '40px';
+      });
+    }
+  } else {
+    document.querySelectorAll('.page .content').forEach(function(c){
+      c.style.paddingTop = '';
+    });
+  }
+  document.getElementById('livecap').textContent =
+    '顶栏 ' + v.name + ' ｜ 指示点 ' + cur.ds + ' dp';
+}
+
+function applyDs(){
+  document.getElementById('dotsbar').style.setProperty('--ds', cur.ds);
+}
+function pickDs(v, el){
+  cur.ds = v; applyDs();
+  document.querySelectorAll('.dz').forEach(function(d){ d.classList.toggle('on', +d.dataset.ds === v); });
+  renderTop();
+  if (typeof window.syncChecks === 'function') window.syncChecks();
+}
+
+/* ── 拖动 ── */
+function setT(x, animate){
+  track.style.transition = animate ? 'transform .26s cubic-bezier(.2,.8,.2,1)' : 'none';
+  track.style.transform = 'translateX(' + (-x) + 'px)';
+}
+function paint(){
+  document.querySelectorAll('#dotsbar .dot').forEach(function(d,i){
+    d.classList.toggle('on', i === idx);
+  });
+  document.querySelectorAll('#tabseg button').forEach(function(b,i){
+    b.classList.toggle('on', i === idx);
+  });
+  if (VARIANTS[cur.top].overlay) {
+    var t = document.querySelector('.live-float .ttl');
+    if (t) t.textContent = TITLES[idx];
+  }
+}
+function go(i, animate){
+  idx = Math.max(0, Math.min(N-1, i));
+  setT(idx * W, animate !== false);
+  paint();
+}
+function startAuto(){
+  if (timer) clearInterval(timer);
+  if (!auto) return;
+  timer = setInterval(function(){ if (!dragging) go(idx === N-1 ? 0 : idx + 1); }, 2400);
+}
+screen.style.touchAction = 'none';
+screen.addEventListener('pointerdown', function(e){
+  dragging = true; startX = e.clientX; startT = Date.now(); delta = 0;
+  track.style.transition = 'none';
+  try { screen.setPointerCapture(e.pointerId); } catch(err){}
+});
+screen.addEventListener('pointermove', function(e){
+  if (!dragging) return;
+  delta = e.clientX - startX;
+  var edge = (idx === 0 && delta > 0) || (idx === N-1 && delta < 0);
+  setT(idx * W - (edge ? delta * 0.3 : delta), false);
+});
+function endDrag(){
+  if (!dragging) return;
+  dragging = false;
+  var dt = Math.max(Date.now() - startT, 1);
+  var v = Math.abs(delta) / dt;
+  var far = Math.abs(delta) > W * 0.42;
+  var fast = v > 0.5 && Math.abs(delta) > 22;
+  if (delta < 0 && (far || fast)) go(idx + 1);
+  else if (delta > 0 && (far || fast)) go(idx - 1);
+  else go(idx);
+  startAuto();
+}
+screen.addEventListener('pointerup', endDrag);
+screen.addEventListener('pointercancel', endDrag);
+
+document.querySelectorAll('#tabseg button').forEach(function(b){
+  b.addEventListener('click', function(){ go(+b.dataset.i); startAuto(); });
+});
+document.getElementById('playbtn').addEventListener('click', function(){
+  auto = !auto;
+  this.textContent = auto ? '暂停轮播' : '继续轮播';
+  this.classList.toggle('on', !auto);
+  startAuto();
+});
+document.getElementById('resetbtn').addEventListener('click', function(){
+  cur.top = 't2'; cur.ds = 3;
+  document.querySelectorAll('.opt').forEach(function(o){ o.classList.remove('on'); });
+  document.querySelectorAll('.opt input').forEach(function(c){ c.checked = false; });
+  pickDs(3, document.querySelector('.dz[data-ds="3"]'));
+  applyDs();
+});
+
+/* ── 方案卡联动 ── */
+document.querySelectorAll('.opt').forEach(function(opt){
+  var cb = opt.querySelector('input');
+  cb.addEventListener('change', function(){
+    document.querySelectorAll('.opt').forEach(function(o){ o.classList.remove('on'); });
+    document.querySelectorAll('.opt input').forEach(function(c){ if (c !== cb) c.checked = false; });
+    if (!cb.checked) { renderTop(); return; }
+    opt.classList.add('on');
+    cur.top = cb.dataset.top;
+    renderTop();
+    go(0, false);
+  });
+  var label = opt.querySelector('label');
+  if (label) label.addEventListener('click', function(e){ e.preventDefault(); cb.click(); });
+});
+
+applyDs();
+renderTop();
+go(0, false);
+paint();
+startAuto();
+</script>
+
+</body>
+</html>

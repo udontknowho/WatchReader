@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>还没做的功能 · 与缓存导出方案</title>
+<style>
+:root{
+  --surface:#141218; --surface1:#1d1b20; --surface2:#211f26; --surface3:#2b2930; --surface4:#36343b;
+  --on:#e6e0e9; --onvar:#cac4d0; --outline-v:#49454f;
+  --primary:#d0bcff; --on-primary:#381e72; --secondary-c:#4a4458; --on-secondary-c:#e8def8;
+  --ok:#7bd88f; --warn:#f2b8b5;
+  --bg:#0b0a0e; --page:#16151a;
+}
+*{box-sizing:border-box}
+body{margin:0;padding:14px 14px 96px;background:var(--bg);color:var(--on);
+  font:14px/1.6 system-ui,"Noto Sans SC","PingFang SC",sans-serif;-webkit-text-size-adjust:100%}
+h1{font-size:17px;margin:0 0 4px}
+h2{font-size:14px;margin:22px 0 8px;color:var(--primary)}
+.sub{color:var(--onvar);font-size:12px;margin:0 0 14px}
+.card{background:var(--page);border:1px solid var(--outline-v);border-radius:10px;padding:12px;margin:0 0 14px}
+.card.best{border-color:var(--primary)}
+.card.tap{cursor:pointer;transition:border-color .15s,background .15s}
+.card.tap:active{background:var(--surface1)}
+.card.sel{border-color:var(--ok);box-shadow:0 0 0 1px var(--ok) inset}
+.card.sel .tag{background:var(--ok);color:#0b0a0e}
+.head{display:flex;align-items:baseline;gap:8px;margin:0 0 2px}
+.tag{flex:none;min-width:24px;height:22px;padding:0 6px;border-radius:6px;background:var(--surface4);
+  display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:var(--onvar)}
+.card.best .tag{background:var(--primary);color:var(--on-primary)}
+.q{font-size:14px;font-weight:600;margin:0}
+.hint{font-size:12px;color:var(--onvar);margin:4px 0 10px}
+.note{font-size:12px;color:var(--onvar);margin-top:10px}
+.note b{color:var(--on)}
+.good{color:var(--ok)} .bad{color:var(--warn)}
+table{border-collapse:collapse;width:100%;font-size:12px;margin-top:6px}
+th,td{border-bottom:1px solid var(--outline-v);padding:5px 6px;text-align:left;vertical-align:top}
+th{color:var(--onvar);font-weight:600;white-space:nowrap}
+td.n{white-space:nowrap;color:var(--onvar)}
+.pill{display:inline-block;font-size:10.5px;padding:1px 7px;border-radius:9px;
+  background:var(--surface3);color:var(--onvar);white-space:nowrap}
+.pill.p0{background:var(--primary);color:var(--on-primary)}
+.pill.p1{background:var(--secondary-c);color:var(--on-secondary-c)}
+.pill.no{background:#3a2124;color:var(--warn)}
+table tr.tap{cursor:pointer}
+table tr.tap:active td{background:var(--surface1)}
+table tr.sel td{background:rgba(123,216,143,.10)}
+table tr.sel td:first-child{box-shadow:inset 3px 0 0 var(--ok)}
+table tr.sel td b{color:var(--ok)}
+ul{margin:6px 0 0;padding-left:18px}
+li{margin:3px 0}
+code{background:var(--surface2);padding:1px 4px;border-radius:4px;font-size:11.5px}
+.selbar{position:fixed;left:0;right:0;bottom:0;background:var(--surface1);
+  border-top:1px solid var(--outline-v);padding:10px 14px;display:flex;gap:10px;align-items:center}
+.selbar .txt{flex:1;min-width:0;font-size:12.5px;color:var(--onvar);line-height:1.4;white-space:pre-line}
+.selbar .txt b{color:var(--ok)}
+.selbar button{flex:none;height:36px;padding:0 16px;border-radius:18px;border:0;
+  background:var(--primary);color:var(--on-primary);font:600 13px system-ui,sans-serif}
+</style>
+</head>
+<body>
+
+<h1>还没做的功能 · 与缓存导出方案</h1>
+<p class="sub">2026-11-04 · 基于 HEAD <code>f54029a</code> · 9 屏 legado 同步已收官，这里是剩下的活</p>
+
+<h2>一、还没做的功能</h2>
+
+<table>
+<tr><th>优先级</th><th>功能</th><th>现状</th></tr>
+<tr><td class="n"><span class="pill p0">缺口最大</span></td><td><b>听书（TTS / 朗读）</b></td>
+  <td>全无。源码里没有任何 tts 相关代码，阅读页也没有朗读条。legado 的朗读是一整套：选音、语速、定时、跳章。</td></tr>
+<tr><td class="n"><span class="pill p0">缺口最大</span></td><td><b>本地书籍导入</b></td>
+  <td>只能从书源下。txt / epub 放进来读不了，这是「手表阅读器」最说不过去的一条。</td></tr>
+<tr><td class="n"><span class="pill p1">有依赖</span></td><td><b>EPUB 导出</b></td>
+  <td>只有 TXT。<code>Downloader.exportText</code> 已支持分章与标题清洗，加 EPUB 是套一层 zip + XHTML。</td></tr>
+<tr><td class="n"><span class="pill p1">有依赖</span></td><td><b>备份与恢复</b></td>
+  <td>没有 WebDav。设置页已明写不做，书架「远程书籍」是占位提示。要做得先定同步到哪里。</td></tr>
+<tr><td class="n"><span class="pill p1">已定方案</span></td><td><b>缓存页导出入口</b></td>
+  <td>导出能力已有（目录页 ⋮、阅读页 ⋮），缓存页没有入口。方案见第二节，已按 A + C 落地。</td></tr>
+<tr><td class="n"><span class="pill p1">已定方案</span></td><td><b>批量导出</b></td>
+  <td>一次只导一本。已加「导出全部」，范围为当前筛选出的这一批。</td></tr>
+<tr><td class="n"><span class="pill">要改模型</span></td><td><b>书籍分组 / 标签、收藏书架</b></td>
+  <td>缓存页的「书架书籍 / 未在书架」是按“下没下完”临时分的。真分组要加收藏动作与分组字段。</td></tr>
+<tr><td class="n"><span class="pill">要动取数</span></td><td><b>市场内搜索、批量导入对话框</b></td>
+  <td>市场只能翻页找。legado 的网络导入有「批量导入」对话框与搜索。</td></tr>
+<tr><td class="n"><span class="pill">要动取数</span></td><td><b>按书源分组的发现</b></td>
+  <td>我们的榜是 <code>RankConfig</code> 硬表，没有 <code>exploreUrl</code>，做不出 legado 那种「每个书源自己的发现页」。</td></tr>
+<tr><td class="n"><span class="pill">主动砍</span></td><td><b>阅读页查词 / 翻译、章节图片、段评</b></td>
+  <td>没做，理由写在对应屏注释里。</td></tr>
+<tr><td class="n"><span class="pill no">不做</span></td><td><b>创建堆转储、检查更新、版本日志列表</b></td>
+  <td><code>Debug.dumpHwHeap</code> 只对 debuggable 包有效；没有发布渠道；日志只有一个 dev.log。</td></tr>
+</table>
+
+<p class="note">按价值排：<b>TTS</b> 与 <b>本地书籍导入</b> 是两条真正的功能缺口，其余是打磨。<b>点表格里任意一行可以勾选</b>，选中的会出现在屏底。</p>
+
+<h2>二、缓存管理加导出键</h2>
+
+<p class="hint">前提：导出能力已经有了——<code>MainActivity.exportTxt(info)</code> 带目录顺序重排、原子写、写「文档/」重名自动加 (2)。缓存页缺的只是入口。</p>
+
+<p class="hint">不能随手加：书卡末行现在是「状态汇总 + 播放/停止 + 删除」两颗 32dp 图标。再塞第三颗，汇总只剩约 61dp，四段文字必被截成「下载中 0 ·…」。</p>
+
+<p class="note">下面三张卡<b>可以点</b>，可多选，选完底部点「复制回执」。不选也行，已按 A + C 落地。</p>
+
+<div class="card tap" data-plan="A">
+  <div class="head"><span class="tag">A</span><p class="q">展开书卡后加一行通栏按钮「导出 TXT · 已下 N 章」</p></div>
+  <div class="hint">章窗口上方一行，只在展开时占 40dp。</div>
+  <p class="note"><b class="good">已落地。</b>展开本身就是“要对这本动手”的信号，默认不多占一行。没下过章的书这一行换成灰字「还没下到内容」；没下全时回执补一句「共 N 章，未下的不导」。</p>
+</div>
+
+<div class="card tap" data-plan="B">
+  <div class="head"><span class="tag">B</span><p class="q">书卡末行加第三颗图标</p></div>
+  <div class="hint">常驻可见，但要把状态汇总挪到独立一行，多占约 26dp 高。</div>
+  <p class="note">189dp 的屏上，一屏少一行书卡。没做。</p>
+</div>
+
+<div class="card best tap" data-plan="C">
+  <div class="head"><span class="tag">C</span><p class="q">屏底加「导出全部 · N 本」</p></div>
+  <div class="hint">与「全部开始 / 全部停止」并排，串行导出，导出中再点变「取消导出」。</div>
+  <p class="note"><b class="good">已落地。</b>范围是当前筛选出的这一批。导完汇总「已导出 X 本，失败 Y 本，跳过 Z 本（已存在）」。</p>
+</div>
+
+<h2>三、落地状态</h2>
+<ul>
+  <li><b>第一步（A）</b>：完成。抽了 <code>exportOneSync</code>，目录页 ⋮、阅读页 ⋮、进度屏三处行为不变。</li>
+  <li><b>第二步（C）</b>：完成。串行 + 进度 toast + 中途取消（已导出的文件保留）。同名文件在「文档」里已存在则整本跳过，不堆 (2)(3) 副本。</li>
+  <li><b>屏底宽度</b>：两颗并排时一颗约 78dp，带数量的标签会被截，所以并排时只留动词（「全部开始」「导出全部」），数量看上面的段标题。</li>
+  <li><b>下一步（P1）</b>：EPUB。TXT 链路不动，另起一条打包路径。</li>
+</ul>
+
+<div class="selbar">
+  <div class="txt" id="seltxt">点方案卡片，或点表格里的一行</div>
+  <button id="selcopy" type="button">复制回执</button>
+</div>
+
+<script>
+(function () {
+  var picked = {};
+  var txt = document.getElementById('seltxt');
+  /** 方案卡片与表格行分开收：前者选做法，后者选要做的活。 */
+  var items = [];
+  Array.prototype.slice.call(document.querySelectorAll('.card.tap')).forEach(function (c) {
+    items.push({ el: c, key: '方案' + c.dataset.plan });
+  });
+  Array.prototype.slice.call(document.querySelectorAll('table tr')).forEach(function (tr) {
+    var tds = tr.querySelectorAll('td');
+    if (tds.length < 2) return; // 表头
+    tr.classList.add('tap');
+    items.push({ el: tr, key: tds[1].textContent.trim() });
+  });
+
+  function keys() {
+    return Object.keys(picked).filter(function (k) { return picked[k]; }).sort();
+  }
+
+  function render() {
+    var ks = keys();
+    items.forEach(function (it) {
+      if (picked[it.key]) it.el.classList.add('sel');
+      else it.el.classList.remove('sel');
+    });
+    if (!ks.length) {
+      txt.textContent = '点方案卡片，或点表格里的一行';
+      return;
+    }
+    var feats = ks.filter(function (k) { return k.indexOf('方案') !== 0; });
+    var plans = ks.filter(function (k) { return k.indexOf('方案') === 0; })
+      .map(function (k) { return k.slice(2); });
+    var lines = [];
+    if (feats.length) lines.push('功能：' + feats.join('、'));
+    if (plans.length) {
+      var p = '方案：' + plans.join(' + ');
+      if (plans.indexOf('A') >= 0 && plans.indexOf('C') >= 0) p += ' · 与已落地一致';
+      if (plans.indexOf('B') >= 0) p += ' · B 要挤掉状态汇总';
+      lines.push(p);
+    }
+    txt.textContent = lines.join('\n');
+  }
+
+  items.forEach(function (it) {
+    it.el.addEventListener('click', function () {
+      picked[it.key] = !picked[it.key];
+      render();
+    });
+  });
+
+  document.getElementById('selcopy').addEventListener('click', function () {
+    var ks = keys();
+    var feats = ks.filter(function (k) { return k.indexOf('方案') !== 0; });
+    var plans = ks.filter(function (k) { return k.indexOf('方案') === 0; })
+      .map(function (k) { return k.slice(2); });
+    var msg = '缓存导出：';
+    if (!feats.length && !plans.length) {
+      msg = '缓存导出：没选，按 A + C 走';
+    } else {
+      if (feats.length) msg += '要做 ' + feats.join('、');
+      if (plans.length) msg += (feats.length ? '；' : '') + '方案 ' + plans.join(' + ');
+    }
+    var ta = document.createElement('textarea');
+    ta.value = msg;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand('copy');
+      txt.textContent = '已复制：' + msg;
+    } catch (e) {
+      txt.textContent = msg;
+    }
+    document.body.removeChild(ta);
+  });
+
+  render();
+})();
+</script>
+
+</body>
+</html>

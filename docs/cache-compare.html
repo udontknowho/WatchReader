@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>缓存管理：分段与队列入口，画图对比</title>
+<style>
+:root{
+  --surface:#141218; --surface1:#1d1b20; --surface2:#211f26; --surface3:#2b2930; --surface4:#36343b;
+  --on:#e6e0e9; --onvar:#cac4d0; --outline-v:#49454f;
+  --primary:#d0bcff; --on-primary:#381e72; --err:#f2b8b5;
+  --bg:#0b0a0e; --page:#16151a;
+}
+*{box-sizing:border-box}
+body{margin:0;padding:14px 12px 140px;background:var(--bg);color:var(--on);
+  font:14px/1.6 system-ui,"Noto Sans SC","PingFang SC",sans-serif;-webkit-text-size-adjust:100%}
+h1{font-size:16px;margin:0 0 4px}
+h2{font-size:14px;margin:22px 0 8px;color:var(--primary)}
+.sub{color:var(--onvar);font-size:12px;margin:0 0 14px}
+.wrap{background:var(--page);border:1px solid var(--outline-v);border-radius:10px;padding:10px 12px 12px;margin:0 0 12px;cursor:pointer}
+.wrap.on{border-color:var(--primary);background:var(--surface1)}
+.wrap.on .h .k{background:var(--primary)}
+footer{position:fixed;left:0;right:0;bottom:0;background:var(--surface);border-top:1px solid var(--outline-v);
+  padding:10px 12px calc(10px + env(safe-area-inset-bottom))}
+.sum{font-size:12px;color:var(--onvar);margin:0 0 8px;max-height:76px;overflow:auto;white-space:pre-wrap}
+.row{display:flex;gap:8px}
+button{flex:1;height:40px;border:0;border-radius:20px;font:600 14px system-ui,sans-serif}
+#copy{background:var(--primary);color:var(--on-primary)}
+#clear{flex:none;width:96px;background:transparent;color:var(--primary);border:1px solid var(--outline-v)}
+#toast{position:fixed;left:50%;transform:translateX(-50%);bottom:150px;background:var(--surface3);
+  color:var(--on);padding:8px 14px;border-radius:8px;font-size:12px;opacity:0;transition:.25s;pointer-events:none}
+#toast.on{opacity:1}
+.h{font-size:13px;font-weight:600;margin:0 0 2px}
+.h .k{display:inline-block;min-width:20px;height:20px;line-height:20px;text-align:center;border-radius:6px;
+  background:var(--primary);color:var(--on-primary);font-size:12px;font-weight:700;margin-right:6px}
+.d{font-size:12px;color:var(--onvar);margin:0 0 10px}
+
+/* 189 × 248 dp 的表盘：按 1.5 倍画，裁掉溢出，越界就真的看不见 */
+.watch{width:284px;height:372px;margin:0 auto;background:var(--surface);border:1px solid var(--outline-v);
+  border-radius:20px;overflow:hidden;display:flex;flex-direction:column;position:relative}
+.tb{display:flex;align-items:center;gap:4px;padding:4px 8px;flex:none}
+.tb .ttl{flex:1;min-width:0}
+.tb .t1{font-size:15px;font-weight:700;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tb .t2{font-size:12px;color:var(--onvar);opacity:.85;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.body{flex:1;min-height:0;padding:0 12px;overflow:hidden}
+.sec{font-size:13px;font-weight:700;color:var(--primary);padding:3px 0}
+.card{border:1px solid var(--outline-v);border-radius:10px;padding:9px;margin-bottom:6px}
+.head{display:flex;align-items:flex-start;gap:6px}
+.titles{flex:1;min-width:0}
+.name{font-size:14px;font-weight:700;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.author{font-size:11px;color:var(--onvar);line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chip{flex:none;font-size:11px;font-weight:700;color:var(--primary);background:var(--surface4);
+  border-radius:8px;padding:1px 5px;line-height:1.4}
+.bar{height:4px;border-radius:2px;background:var(--outline-v);margin:6px 0 5px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--primary)}
+.foot{display:flex;align-items:center;gap:2px}
+.sum{flex:1;min-width:0;font-size:11px;color:var(--onvar);line-height:1.3;overflow:hidden}
+.btn-ico{flex:none;width:26px;height:24px;display:flex;align-items:center;justify-content:center}
+.ch{display:flex;align-items:flex-start;gap:4px;padding:3px 2px}
+.ch .ct{flex:1;min-width:0}
+.ch .c1{font-size:11px;font-weight:700;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ch .c2{font-size:10px;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ch .bar{height:3px;margin:3px 0 0}
+.ch .ico{flex:none;width:24px;height:20px;display:flex;align-items:center;justify-content:center}
+.bottom{flex:none;padding:4px 12px 6px}
+.btnfull{height:26px;border-radius:13px;background:var(--primary);color:var(--on-primary);
+  font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center}
+.btnfull.tonal{background:var(--surface4);color:var(--on)}
+.fab{position:absolute;right:10px;bottom:10px;width:40px;height:40px;border-radius:20px;
+  background:var(--primary);color:var(--on-primary);display:flex;align-items:center;justify-content:center;
+  box-shadow:0 2px 6px #0009}
+.fabwrap{position:relative}
+.note{font-size:11px;margin:6px 0 0;color:var(--onvar)}
+.note b{color:var(--err);font-weight:600}
+.note.ok b{color:var(--primary)}
+.legend{font-size:11px;color:var(--onvar);margin:14px 0 0}
+</style>
+</head>
+<body>
+<h1>缓存管理：分段与队列入口</h1>
+<p class="sub">按 189 × 248 dp 表盘原尺寸画（放大 1.5 倍）。卡片内容与已落地的实现一致：
+副标题五段、书名加作者、<code>已缓存/总章</code> 小牌、四项汇总、播放与垃圾桶、章行三键。溢出的部分就是屏幕上真会被裁掉的部分。</p>
+<div id="out"></div>
+<footer>
+  <div class="sum" id="sum">还没选。</div>
+  <div class="row"><button id="clear">清空</button><button id="copy">复制结果</button></div>
+</footer>
+<div id="toast"></div>
+<p class="legend">图标取自本项目的 Material Symbols 路径，与真机同一套字形。</p>
+
+<script>
+const P = {
+  back:"M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z",
+  search:"M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z",
+  list:"M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z",
+  download:"M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z",
+  play:"M8 5v14l11-7z",
+  stop:"M6 6h12v12H6z",
+  del:"M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z",
+};
+const ico = (n, s = 13, c = "var(--onvar)") =>
+  `<svg viewBox="0 0 24 24" width="${s}" height="${s}" fill="${c}" aria-hidden="true"><path d="${P[n]}"/></svg>`;
+
+function topbar(sub) {
+  return `<div class="tb">
+    <span style="width:18px;display:flex;justify-content:center">${ico("back", 15)}</span>
+    <div class="ttl"><div class="t1">缓存管理</div><div class="t2">${sub}</div></div>
+    <span style="width:16px;display:flex;justify-content:center">${ico("search", 14)}</span>
+    <span style="width:16px;display:flex;justify-content:center">${ico("list", 14)}</span>
+  </div>`;
+}
+function card(c) {
+  const pct = c.total ? Math.round(c.cached / c.total * 100) : 0;
+  return `<div class="card">
+    <div class="head">
+      <div class="titles"><div class="name">${c.name}</div><div class="author">${c.author}</div></div>
+      <div class="chip">${c.cached}/${c.total}</div>
+    </div>
+    <div class="bar"><i style="width:${pct}%"></i></div>
+    <div class="foot">
+      <div class="sum">${c.sum}</div>
+      ${c.key === false ? "" : `<span class="btn-ico">${ico(c.playing ? "stop" : "play", 14, c.playing ? "var(--err)" : "var(--primary)")}</span>`}
+      <span class="btn-ico">${ico("del", 14, "var(--err)")}</span>
+    </div>
+  </div>`;
+}
+function ch(title, status, keys, tone, bar) {
+  const col = tone === "err" ? "var(--err)" : tone === "ok" ? "var(--primary)" : "var(--onvar)";
+  return `<div class="ch">
+    <div class="ct">
+      <div class="c1">${title}</div>
+      <div class="c2" style="color:${col}">${status}</div>
+      ${bar ? '<div class="bar"><i style="width:0%"></i></div>' : ""}
+    </div>
+    ${keys.includes("stop") ? `<span class="ico">${ico("stop", 12, "var(--err)")}</span>` : ""}
+    ${keys.includes("down") ? `<span class="ico">${ico("download", 12, "var(--primary)")}</span>` : ""}
+    <span class="ico">${ico("del", 12, "var(--err)")}</span>
+  </div>`;
+}
+const SUB = "下载中:1 | 等待:12 | 暂停:0 | 失败:0 | 已缓存:245";
+const B1 = { name: "剑来", author: "烽火戏诸侯", cached: 245, total: 300, sum: "下载中 1 · 等待 12 · 暂停 0 · 失败 0", playing: true };
+const B2 = { name: "诡秘之主", author: "爱潜水的乌贼", cached: 30, total: 30, sum: "下载中 0 · 等待 0 · 暂停 0 · 失败 0", key: false };
+const B3 = { name: "赤心巡天", author: "情何以甚", cached: 0, total: 210, sum: "下载中 1 · 等待 209 · 暂停 0 · 失败 0", playing: true };
+
+function watch(inner, extra = "") {
+  return `<div class="watch">${inner}${extra}</div>`;
+}
+function box(q, k, title, desc, inner, note, ok) {
+  return `<div class="wrap" data-q="${q}" data-k="${k}">
+    <div class="h"><span class="k">${k}</span>${title}</div>
+    <div class="d">${desc}</div>
+    ${inner}
+    <div class="note${ok ? " ok" : ""}">${note}</div>
+  </div>`;
+}
+
+const OUT = [];
+
+/* ---------- 分段 ---------- */
+const chapOpen = `
+  ${ch("第 244 章 剑意", "下载中", ["stop"], "var")}
+  ${ch("第 245 章 收剑", "待下载", ["stop"], "var")}
+  ${ch("第 246 章 问剑", "待下载", ["stop"], "var")}
+  ${ch("第 243 章 出鞘", "下载完成", ["del"], "ok")}
+  ${ch("第 242 章 旧事", "下载完成", ["del"], "ok")}
+  ${ch("第 241 章 归途", "下载失败", ["down", "del"], "err")}
+  ${ch("第 240 章 夜行", "未缓存", ["down", "del"], "var")}`;
+
+OUT.push(box("section", "A", "分段维持现状：有正文 / 待重新下载",
+  "按磁盘上有没有正文分两段，段标题带本数与体积。已落地。",
+  watch(topbar(SUB) + `<div class="body">
+    <div class="sec">有正文 2 本 · 12.4 MB</div>
+    ${card(B1)}${card(B2)}
+    <div class="sec">待重新下载 1 本</div>
+    ${card(B3)}
+  </div>`),
+  "读起来像「磁盘清单」：下全的与下了一半的混在同一段，看不出哪本还没下完。"));
+
+OUT.push(box("section", "B", "分段改成：已下全 / 还有缺章",
+  "与顶栏五段数同口径，按完整性分。改动约 20 分钟。",
+  watch(topbar(SUB) + `<div class="body">
+    <div class="sec">已下全 1 本</div>
+    ${card(B2)}
+    <div class="sec">还有缺章 2 本 · 缺 235 章</div>
+    ${card(B1)}${card(B3)}
+  </div>`),
+  "第一屏先给出「都下好了」的那几本，剩下的按缺多少排。这一页的用途就是补下与清理。", true));
+
+OUT.push(box("section", "C", "分段照 legado：书架书籍 / 未在书架",
+  "要在 job.json 里加快照标记「来自书架」，旧作业补不上。改动约 3 小时。",
+  watch(topbar(SUB) + `<div class="body">
+    <div class="sec">书架书籍 2 本</div>
+    ${card(B1)}${card(B2)}
+    <div class="sec">未在书架 1 本</div>
+    ${card(B3)}
+  </div>`),
+  "与 legado 结构最像，但手表上没有书架分组概念；分出来两段对「今天要补哪本」没有帮助。"));
+
+/* ---------- 队列入口 ---------- */
+const listTall = `<div class="body">
+    <div class="sec">有正文 2 本 · 12.4 MB</div>
+    ${card(B1)}${card(B2)}
+    <div class="sec">待重新下载 1 本</div>
+    ${card(B3)}
+    <div class="sec">有正文 1 本 · 800 KB</div>
+    ${card({ name: "凡人修仙传", author: "忘语", cached: 8, total: 900, sum: "下载中 0 · 等待 0 · 暂停 0 · 失败 8", playing: false })}
+  </div>`;
+
+OUT.push(box("queue", "A", "队列入口维持常驻屏底条",
+  "整库动作固定在屏底一条通栏按钮，任何时候都在。已落地。",
+  watch(topbar(SUB) + listTall + `<div class="bottom"><div class="btnfull tonal">全部停止</div></div>`),
+  "按钮不遮内容，代价是常占一行：没活干时白少一行列表。"));
+
+OUT.push(box("queue", "B", "队列入口照 legado：右下角 FAB",
+  "只在有任务或有缺章时出现。改动约 40 分钟。",
+  `<div class="fabwrap">` + watch(topbar(SUB) + listTall, `<div class="fab">${ico("stop", 18, "var(--on-primary)")}</div>`) + `</div>`,
+  "圆键压住最后一张卡的末行：汇总文字与垃圾桶都被盖掉一半。<b>书卡是能点的，遮住就点错了。</b>"));
+
+OUT.push(box("queue", "C", "队列入口：屏底条，但按需出现",
+  "位置仍是屏底，只在有任务或有缺章时才画。改动约 20 分钟。",
+  watch(topbar(SUB) + `<div class="body">
+    <div class="sec">有正文 2 本 · 12.4 MB</div>
+    ${card(B1)}${card(B2)}
+    <div class="sec">待重新下载 1 本</div>
+    ${card(B3)}
+  </div>` + `<div class="bottom"><div class="btnfull">全部开始 · 2 本</div></div>`) +
+  watch(topbar("下载中:0 | 等待:0 | 暂停:0 | 失败:0 | 已缓存:275") + `<div class="body">
+    <div class="sec">已下全 3 本</div>
+    ${card({ ...B1, cached: 300, sum: "下载中 0 · 等待 0 · 暂停 0 · 失败 0", playing: false })}
+    ${card({ ...B2 })}
+    ${card({ ...B3, cached: 210, sum: "下载中 0 · 等待 0 · 暂停 0 · 失败 0", playing: false })}
+  </div>`),
+  "有活时是屏底条（上），没活时整条消失、列表多一行（下）。既不遮卡，也不白占。", true));
+
+OUT.push(box("bug", "A", "顺手发现的旧 bug：改",
+  "DownloadService.kt 第 210 行，单本启动分支读的是 jobs 目录，其余各处都是 books。一个词的事。",
+  "", "改完「正在下载另一本」时那条通知才会报真实进度。", true));
+OUT.push(box("bug", "B", "顺手发现的旧 bug：不动",
+  "保持现状，另开一次改动处理。", "", "通知里的 0/0/0 继续存在，不影响下载本身。"));
+
+document.getElementById("out").innerHTML = OUT.join("");
+
+/* ---------- 选一条 ---------- */
+const QNAME = { section: "分段", queue: "队列入口", bug: "旧 bug" };
+const picks = JSON.parse(localStorage.getItem("wdl.cachepicks2") || "{}");
+
+function summary() {
+  const lines = [];
+  for (const q of Object.keys(QNAME)) {
+    if (picks[q]) lines.push(`${QNAME[q]} → ${picks[q]}`);
+  }
+  return lines.length ? lines.join("\n") : "还没选。";
+}
+function paint() {
+  document.querySelectorAll(".wrap").forEach((el) => {
+    el.classList.toggle("on", picks[el.dataset.q] === el.dataset.k);
+  });
+  document.getElementById("sum").textContent = summary();
+}
+document.querySelectorAll(".wrap").forEach((el) => {
+  el.onclick = () => {
+    const q = el.dataset.q, k = el.dataset.k;
+    picks[q] = picks[q] === k ? undefined : k;
+    localStorage.setItem("wdl.cachepicks2", JSON.stringify(picks));
+    paint();
+  };
+});
+document.getElementById("clear").onclick = () => {
+  for (const k in picks) delete picks[k];
+  localStorage.setItem("wdl.cachepicks2", "{}");
+  paint();
+};
+document.getElementById("copy").onclick = async () => {
+  const txt = summary();
+  try { await navigator.clipboard.writeText(txt); toast("已复制，粘回对话就行"); }
+  catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = txt; document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); toast("已复制"); }
+    catch (_) { toast("复制失败，长按上面那段文字手动选"); }
+    ta.remove();
+  }
+};
+let tid;
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.className = "on";
+  clearTimeout(tid); tid = setTimeout(() => (t.className = ""), 1600);
+}
+paint();
+</script>
+</body>
+</html>
