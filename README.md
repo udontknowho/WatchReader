@@ -1,9 +1,74 @@
 # 手表端小说下载器
 
-Android 手表（OPPO Watch 3 Pro，方屏）上的小说下载器。自带书源规则引擎与番茄小说适配器，
-不需要手机中转，不需要服务端。
+在 Android 手表上搜书、下载、直接读。方屏适配，不经手机，没有服务端，书源兼容 legado。
 
-## 现在有什么
+vibecoding 项目，代码主要由 AI 写。
+
+<p align="center">
+  <img src="docs/shots-2026-11-08/s1-shelf.png" width="22%">
+  <img src="docs/shots-2026-11-08/s2-search.png" width="22%">
+  <img src="docs/shots-2026-11-08/s3-toc.png" width="22%">
+  <img src="docs/shots-2026-11-08/s4-reader.png" width="22%">
+</p>
+<p align="center"><sub>书架 · 搜索 · 目录 · 阅读（手表实机截图）</sub></p>
+
+## 操作
+
+主界面三栏：书架 / 发现 / 我的，左右滑切栏，底部三个小点指示当前位置。
+
+阅读页翻页不靠左右滑，靠点按，按纵向三段划分：
+
+| 操作 | 效果 |
+|---|---|
+| 点正文上三分之一 | 上一屏 |
+| 点正文下三分之一 | 下一屏 |
+| 点中间三分之一 | 开关菜单 |
+| 转表冠 | 滚动正文，每格 12 px，50 ms 跟手 |
+| 长按书架卡片 / 目录章行 / 搜索结果 | 弹该行的操作菜单 |
+
+不按横向分三列。三列各 63 dp，比一个触摸目标还窄，横着切只会误触。
+
+菜单分两层：顶栏三枚动作（刷新 / 换源 / ⋮），底栏一排工具格（默认
+查找、自动翻页、目录、设置，可换成换源、缓存、书签、更多），
+下面是上一章 / 全书进度条 / 下一章和亮度行。⋮ 打开的「更多操作」里还有
+离线缓存、章内查找、加书签、阅读设置、阅读记录、导出 TXT。
+
+## 适配设备
+
+按 OPPO Watch 3 Pro 实测尺寸设计：物理 378 × 496 px @ 326 ppi →
+density 2.0（320 dpi）→ 逻辑 **189 × 248 dp**。
+
+运行时按 `screenWidthDp` 分两档：≥ 320 走手机档，否则走手表档。
+手表档的顶栏 25 dp、底栏 64 dp、页签 40 dp、底栏指示点 8 dp，
+都比 MD3 标准值收窄——248 dp 的屏高，标准尺寸会吃掉一多半。
+
+正文默认 16 sp，可在阅读设置里调到 10–24 sp。
+
+## 安装
+
+```sh
+adb install -r build/WatchDownloader-1.5.0-release.apk
+```
+
+也可以把 APK 传进手表后用文件管理器点开。minSdk 30（Android 11），targetSdk 34。
+
+## 功能
+
+- **书架**：只列已下载的书，三列网格或列表两档。顶栏显示「N 本 · 在读 M」，
+  ⋮ 里有添加本地文件、更新目录、布局设置、书架管理、日志。
+- **搜索**：多书源并发，结果带上来源数与「结果 N · 进度 x/y」，
+  底栏「换一批（还剩 N 条源）」轮下一批。结果窗口 60 条。
+- **下载**：跑在前台服务里，锁屏不断。进度屏给章数、失败数、章/分、预估剩余，
+  可取消或回目录。
+- **导出**：`书名 - 作者.txt`，UTF-8 带 BOM，重名自动加 `(2)`。
+  优先落系统「文档」目录，失败退回应用私有 `files/export/`。
+- **阅读器**：日 / 夜底色、亮度、字号、行距、段距、缩进、字距、字重、斜体、
+  两端对齐、标题位置与字号、三档边距、滚一屏 / 覆盖两种翻页动画与时长、
+  常亮、1–60 秒自动翻页、恢复默认排版。
+- **我的**：书源管理、替换净化、设置、书签、阅读记录、缓存管理、
+  文件管理、日志、关于。设置里还有配色、表冠每格位移与跟手时长。
+
+## 代码结构
 
 `src/com/watchdl/core/` —— 纯 Kotlin，不依赖 Android API，可单独跑自检：
 
@@ -15,69 +80,57 @@ Android 手表（OPPO Watch 3 Pro，方屏）上的小说下载器。自带书�
 | `JobStore` | 双写状态：`job.json` 原子快照 + `chapters.jsonl` 逐章追加 |
 | `BatchPlan` / `Backoff` | 分批、缩批、退避策略（照抄 TND） |
 | `Downloader` | 串行下载引擎，支持续传、只重跑失败章、导出 TXT |
+| `ReaderStyle` | 阅读排版的全部取值与范围 |
 | `BookJob` / `ChapterRef` | 作业与章节状态 |
 
-Android 层：
+Android 层按屏分包在 `src/com/watchdl/ui/`：`shelf` / `search` / `book` /
+`reader` / `source` / `my`，加公共的 `theme` 与 `Tabs`。`MainActivity.kt`
+管导航栈与返回位置。
 
-- `FanqieSource.kt` —— 番茄三条链路：搜索、目录、正文
-- `MainActivity.kt` —— 方屏界面：搜索 → 目录 → 下载 → 导出
+设计稿与可点原型在 `ui/`：`prototype.html`（含下载进度模拟）、
+`md3-final.html`（8 屏 + 尺寸对照尺）、`density-compare.html`。
+图标用 `python3 tools/make_icon.py` 重新生成。
 
 ## 构建
 
-不用 Gradle/AGP：本机是 Termux，`aapt2` / `d8` / `apksigner` 都是独立命令，整条链路无 Maven 下载。
+不用 Gradle/AGP：本机是 Termux，`aapt2` / `d8` / `apksigner` 都是独立命令，
+整条链路无 Maven 下载。
 
 ```sh
 bash build.sh test   # 跑纯 JVM 自检（不打包）
 bash build.sh        # 打出 build/WatchDownloader-<版本>-release.apk
 ```
 
-注意：脚本必须用 `bash build.sh` 调，不能 `./build.sh` —— 本机没有 `/bin/bash`。
+脚本必须用 `bash build.sh` 调，不能 `./build.sh` —— 本机没有 `/bin/bash`。
 
 依赖：`pkg install kotlin`、JDK 21、`~/android-sdk`（platforms/android-34 + build-tools）。
 
 ### 签名
 
-正式签名信息在 `release.keystore` 与 `keystore-info.txt`（**自行备份**，丢了就没法发升级版）。
-两个文件都在时自动用正式签名；缺任何一个则退回 debug 签名，流水线仍可用。
+正式签名信息在 `release.keystore` 与 `keystore-info.txt`（**自行备份**，
+丢了就没法发升级版）。两个文件都在时自动用正式签名；缺任何一个则退回
+debug 签名，流水线仍可用。
 
 ### 版本号
 
-**每次改动都要升版本号，不能只在发包时升。** 用户要求，2026-10-21。
-
-两个数一起改，改 `build.sh` 的默认值（`app/AndroidManifest.xml` 里的会被覆盖，但发新包时也应同步）：
+每次改动都要升版本号，不能只在发包时升。
 
 | 变量 | 规则 |
 |---|---|
 | `APP_VERSION` | 主版本.次版本.修订，功能改动升次版本，修 bug 升修订 |
-| `APP_VERSION_CODE` | 整数，**只增不减**，每版 +1 |
+| `APP_VERSION_CODE` | 整数，只增不减，每版 +1 |
 
 ```sh
 # 改 build.sh 第 23-24 行的默认值即可；临时覆盖用环境变量：
 APP_VERSION=1.0.1 APP_VERSION_CODE=2 bash build.sh
 ```
 
-`versionCode` 不升的后果（Android 平台行为，**本项目未实测**）：同版本号覆盖安装会被拒，装新包报 `INSTALL_FAILED_VERSION_DOWNGRADE`。
+`versionCode` 不升的后果（Android 平台行为，本项目未实测）：同版本号覆盖安装
+会被拒，装新包报 `INSTALL_FAILED_VERSION_DOWNGRADE`。
 
-## 界面
+## 协议要点
 
-按 OPPO Watch 3 Pro 实测尺寸设计（378×496 px @ 326 ppi → density 2.0 → **189 × 248 dp**）。
-屏高只有 248dp，MD3 标准尺寸（应用栏 56 + 搜索框 48 + 按钮 40 = 144dp）会吃掉 58%，
-所以全部按紧凑档取值（36 / 34 / 42 / 34）。
-
-设计稿与可点原型在 `ui/`：
-
-| 文件 | 说明 |
-|---|---|
-| `prototype.html` | 可点原型，含下载进度模拟 |
-| `md3-final.html` | 静态设计稿，8 屏 + 尺寸对照尺 |
-| `density-compare.html` | density 对照，说明为什么要收窄 |
-| `icon-preview.png` | 图标预览 |
-
-图标用 `python3 tools/make_icon.py` 重新生成。
-
-## 协议要点（2026-10-15 实测）
-
-三条链路**无签名、无 Cookie、无服务端**：
+三条链路无签名、无 Cookie、无服务端：
 
 | 环节 | 接口 |
 |---|---|
@@ -85,21 +138,24 @@ APP_VERSION=1.0.1 APP_VERSION_CODE=2 bash build.sh
 | 目录 | `fanqienovel.com/api/reader/directory/detail?bookId=` |
 | 正文 | `fanqienovel.com/reader/{item_id}` + `charset.json` 查表还原 |
 
-### 踩过的坑（都是实测，别再踩）
+### 踩过的坑
+
+都是实测，别再踩：
 
 1. **书名字段是 `title`，不是 `book_name`。** 搜索接口不返回 `book_name`。
-2. **目录接口只返回两个键**：`allItemIds`（章节顺序）和 `chapterListWithVolume`（分卷嵌套）。
-   没有书名和作者，书名要从搜索结果传入。
-3. **`chapterListWithVolume` 是 `[[{}],[{}]]` 双层嵌套。** 按下标拍平会与 `allItemIds` 错位
-   （实测 2500 章只抽出 75 章）。必须按 `itemId` 建映射连接。
+2. **目录接口只返回两个键**：`allItemIds`（章节顺序）和
+   `chapterListWithVolume`（分卷嵌套）。没有书名和作者，书名要从搜索结果传入。
+3. **`chapterListWithVolume` 是 `[[{}],[{}]]` 双层嵌套。** 按下标拍平会与
+   `allItemIds` 错位（实测 2500 章只抽出 75 章）。必须按 `itemId` 建映射连接。
 4. **付费章返回 HTTP 404**，不是 IP 被封。`isChapterLock == true` 的章一律取不到，
    下载时直接跳过并标 `LOCKED`，不要浪费请求。
-5. **免费章数量会变。** 同一本书（《绝世武神》）早先查是 2435 章免费，后来只有 10 章。
-   这是番茄自己的策略，不是缓存问题，每次下载前重新拉目录。
-6. **不要用回溯正则抽正文。** `"content":"((?:[^"\\]|\\.)*)"` 在 20 KB 以上的正文上会
-   抛 `StackOverflowError`（手表上栈更小）。用 `TinyJson.extractContent` 的线性扫描。
-7. **`fanqienovel.com/reader/{id}` 需要正常章节 id。** 拿"深度解读""某某归来"这类条目
-   的第一条去取正文容易撞 404，按 `isChapterLock` 过滤后再取。
+5. **免费章数量会变。** 同一本书（《绝世武神》）早先查是 2435 章免费，
+   后来只有 10 章。这是番茄自己的策略，不是缓存问题，每次下载前重新拉目录。
+6. **不要用回溯正则抽正文。** `"content":"((?:[^"\\]|\\.)*)"` 在 20 KB 以上的
+   正文上会抛 `StackOverflowError`（手表上栈更小）。用 `TinyJson.extractContent`
+   的线性扫描。
+7. **`fanqienovel.com/reader/{id}` 需要正常章节 id。** 拿"深度解读""某某归来"
+   这类条目去取正文容易撞 404，按 `isChapterLock` 过滤后再取。
 8. **`charset.json` 是 UTF-16 编码**，读的时候要指定字符集。表有两行，区间重叠
    （58344 / 58345 起），消歧靠"按 mode 0 先试 + 表项非 `?`"。
 
@@ -107,5 +163,24 @@ APP_VERSION=1.0.1 APP_VERSION_CODE=2 bash build.sh
 
 - [ ] `nextContentUrl` 分页（部分书源正文分页，现在只取第一页）
 - [ ] EPUB 流式导出（现在只有 TXT）
-- [ ] 阅读器字号调整（现在固定 12sp）
-- [ ] 真机验证：**界面从未在设备上运行过**
+
+## 协议与参考
+
+本项目以 GNU GPL v3.0 发布，全文见 `LICENSE` 或
+<https://www.gnu.org/licenses/gpl-3.0.txt>。使用、修改、再分发需保留版权与许可声明，
+衍生作品同样以 GPL-3.0 发布，不提供担保。
+
+书源由使用者自行添加，正文内容与版权归原作者及原站点，请勿转载或商业分发。
+数据只写在应用私有目录，卸载即删。
+
+下列项目只借鉴方案与结构，未复制其源码：
+
+| 项目 | 借鉴内容 |
+|---|---|
+| `LegadoTeam/legado` | JsEngine 宿主 API 面、书源规则字段定义、按屏分包的目录结构 |
+| `hapelee/legado-with-MD3` | MD3 尺寸阶与主题取值的思路 |
+| `Zennmn/legado` | 同品牌手表的顶栏 + 内容列 + 底栏三段式布局 |
+| `fanqie-booksource` | 番茄正文字体混淆还原方案与 `charset.json` 字符表 |
+| TND | 分批、缩批、退避的下载策略 |
+
+第三方组件：脚本引擎 Rhino（MPL 2.0），其余依赖各自保留原许可。
