@@ -930,23 +930,26 @@ object JsEngine {
             HtmlSelect.nodesOf(html, RuleNode.parse(q)) ?: emptyList()
 
         fun wrap(html: String, nodes: List<HtmlSelect.Node>): Scriptable {
+            // 节点区间只对 [HtmlSelect] 实际扫的那段文本有效（`<body` 之前被截掉）。
+            // 取值必须用同一份基准：以前传的是原始 html，偏移整体错位，取到错位正文。
+            val src = HtmlSelect.scannedBase(html)
             val arr = cx.newArray(scope, nodes.size)
             nodes.forEachIndexed { i, nd ->
                 val el = cx.newObject(scope)
                 ScriptableObject.putProperty(el, "text", JsFunction(scope) {
-                    HtmlSelect.extractNode(html, nd, Selector.Pick.TEXT, null) ?: ""
+                    HtmlSelect.extractNode(src, nd, Selector.Pick.TEXT, null) ?: ""
                 })
                 ScriptableObject.putProperty(el, "html", JsFunction(scope) {
-                    HtmlSelect.extractNode(html, nd, Selector.Pick.HTML, null) ?: ""
+                    HtmlSelect.extractNode(src, nd, Selector.Pick.HTML, null) ?: ""
                 })
                 ScriptableObject.putProperty(el, "outerHtml", JsFunction(scope) {
-                    HtmlSelect.extractNode(html, nd, Selector.Pick.HTML, null) ?: ""
+                    HtmlSelect.extractNode(src, nd, Selector.Pick.HTML, null) ?: ""
                 })
                 ScriptableObject.putProperty(el, "attr", JsFunction(scope) { a ->
-                    HtmlSelect.extractNode(html, nd, Selector.Pick.ATTR, str(a, 0)) ?: ""
+                    HtmlSelect.extractNode(src, nd, Selector.Pick.ATTR, str(a, 0)) ?: ""
                 })
                 ScriptableObject.putProperty(el, "toString", JsFunction(scope) {
-                    HtmlSelect.extractNode(html, nd, Selector.Pick.TEXT, null) ?: ""
+                    HtmlSelect.extractNode(src, nd, Selector.Pick.TEXT, null) ?: ""
                 })
                 ScriptableObject.putProperty(arr, i, el)
             }
@@ -968,13 +971,13 @@ object JsEngine {
             // 书城网包首页没有目标表单，以前这里 NPE，整条源报「脚本出错：null」。
             val head = nodes.firstOrNull()
             ScriptableObject.putProperty(arr, "text", JsFunction(scope) {
-                head?.let { HtmlSelect.extractNode(html, it, Selector.Pick.TEXT, null) } ?: ""
+                head?.let { HtmlSelect.extractNode(src, it, Selector.Pick.TEXT, null) } ?: ""
             })
             ScriptableObject.putProperty(arr, "html", JsFunction(scope) {
-                head?.let { HtmlSelect.extractNode(html, it, Selector.Pick.HTML, null) } ?: ""
+                head?.let { HtmlSelect.extractNode(src, it, Selector.Pick.HTML, null) } ?: ""
             })
             ScriptableObject.putProperty(arr, "attr", JsFunction(scope) { a ->
-                head?.let { HtmlSelect.extractNode(html, it, Selector.Pick.ATTR, str(a, 0)) } ?: ""
+                head?.let { HtmlSelect.extractNode(src, it, Selector.Pick.ATTR, str(a, 0)) } ?: ""
             })
             return arr
         }

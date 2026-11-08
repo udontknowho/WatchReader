@@ -2008,8 +2008,15 @@ class MainActivity : Activity() {
             runCatching {
                 val dir = jobsDir()
                 var removed = 0
+                var transient = 0
                 dir.listFiles()?.forEach { f ->
                     if (!f.isDirectory) return@forEach
+                    // 导入暂存目录 / 换名时的旧目录：永远不进书架，但会一直占着磁盘。
+                    // 只在启动时清 —— 这个进程里不可能有正在跑的导入，删了就真是孤儿。
+                    if (com.watchdl.core.JobStore.isTransientDirName(f.name)) {
+                        if (f.deleteRecursively()) transient++
+                        return@forEach
+                    }
                     if (File(f, "job.json").isFile) return@forEach
                     val bad = f.name != com.watchdl.core.JobStore.safeDirName(f.name)
                     val empty = f.listFiles()?.isEmpty() ?: true
@@ -2018,6 +2025,8 @@ class MainActivity : Activity() {
                     }
                 }
                 if (removed > 0) DevLog.log("WatchDL", "清掉 $removed 个脏作业目录")
+                // 导入写到一半被杀就留一个暂存目录，不报一声用户根本不知道多了一份占用。
+                if (transient > 0) DevLog.log("WatchDL", "清掉 $transient 个导入残留目录")
             }
         }
     }

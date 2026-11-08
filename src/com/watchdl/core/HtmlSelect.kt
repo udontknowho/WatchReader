@@ -241,7 +241,19 @@ object HtmlSelect {
     fun select(html: String, node: RuleNode?, pick: Selector.Pick, attr: String?): List<String> {
         val hits = nodesOf(html, node) ?: return emptyList()
         // nodesOf 已把 `<body` 之前截掉，取值必须对同一段文本做。
-        return hits.mapNotNull { extract(htmlCache.get() ?: html, it, pick, attr) }
+        return hits.mapNotNull { extract(htmlCache.get() ?: scannedBase(html), it, pick, attr) }
+    }
+
+    /**
+     * [nodesOf] 实际 扫的那段文本。
+     *
+     * 节点区间是「扫的那段」的下标，不是原始 html 的。`<body` 之前被截掉之后，
+     * 拿原始 html 去按偏移切片会整体错位 —— 取出来的不是那一段正文。
+     * 外部（JsEngine 的 Jsoup 壳）取值时也必须用这一份。
+     */
+    internal fun scannedBase(html: String): String {
+        val bodyStart = html.indexOf("<body")
+        return if (bodyStart < 0) html else html.substring(bodyStart)
     }
 
     /**
@@ -257,8 +269,7 @@ object HtmlSelect {
      */
     fun nodesOf(html: String, node: RuleNode?): List<Node>? {
         if (node == null) return null
-        val bodyStart = html.indexOf("<body")
-        val raw = if (bodyStart < 0) html else html.substring(bodyStart)
+        val raw = scannedBase(html)
         htmlCache.set(raw)
         val steps = flatten(node) ?: return null
 

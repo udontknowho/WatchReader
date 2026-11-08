@@ -538,8 +538,58 @@ internal fun MainActivity.showReader(
         return spliceChars.coerceIn(0, layout.text.length)
     }
 
+    // ── 顶部状态条：时间 + 电量 ────────────────────────────
+    // 沉浸阅读时顶栏是浮层，平时整屏都是正文，读着读着想知道几点了只能抬腕另看。
+    // 做成常驻的 12 dp 浅行，正文整体下移同样的高度：不用浮层是因为浮层会压住第一行字。
+    val statusH = Md3.dp(this, 12)
+    val statusTv = Md3.text(this, "", 9f, readerMuted).apply {
+        gravity = Gravity.END or Gravity.CENTER_VERTICAL
+        isSingleLine = true
+        setPadding(0, 0, Md3.dp(this@showReader, 2), 0)
+        // 不可点：12 dp 的条子要是吃掉触摸，上屏「回滚一屏」就在顶部漏一小块死区。
+        isClickable = false
+        isFocusable = false
+    }
+    // 时间格式跟系统走：24 小时制 / 12 小时制由用户在系统里选的，写死 HH:mm 就是逆着用户。
+    val timeFmt = android.text.format.DateFormat.getTimeFormat(this)
+    fun refreshStatus() {
+        // 电量不挂 receiver：直接读 ACTION_BATTERY_CHANGED 的粘性广播，少一条回调链���
+        // 每 15 秒重读一次，电量变化最晚 15 秒后到位，不差这几秒。
+        val pct = runCatching {
+            val i = registerReceiver(
+                null,
+                android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED),
+            )
+            val lvl = i?.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = i?.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1) ?: -1
+            if (lvl >= 0 && scale > 0) lvl * 100 / scale else -1
+        }.getOrDefault(-1)
+        statusTv.text = timeFmt.format(java.util.Date()) + if (pct >= 0) "  $pct%" else ""
+    }
+    // 15 秒对一次表：分钟精度够用，秒级轮询在手表上纯费电。
+    val statusTick = object : Runnable {
+        override fun run() {
+            refreshStatus()
+            statusTv.postDelayed(this, 15_000L)
+        }
+    }
+    // 出屏就摘定时器：换章会整页重建，留着就是每隔 15 秒往已摘下的视图树里写字。
+    statusTv.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+        override fun onViewAttachedToWindow(v: View) {
+            v.removeCallbacks(statusTick)
+            v.post(statusTick)
+        }
+
+        override fun onViewDetachedFromWindow(v: View) { v.removeCallbacks(statusTick) }
+    })
+
     frame.addView(body, FrameLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT).apply {
+        // 正文让出状态条那一条：反之第一行字会被压住，且排版扫描线还会和字叠在一起。
+        topMargin = statusH
+    })
+    frame.addView(statusTv, FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, statusH, Gravity.TOP))
 
     /** 章内百分比：正文滚到哪算哪，0 是章首、100 是章末（有拼接块时按 [mainLimit] 算）。 */
     fun innerPct(): Int {
@@ -984,7 +1034,7 @@ internal fun MainActivity.showReader(
         override fun onProgressChanged(sb: android.widget.SeekBar?, p: Int, fromUser: Boolean) {
             if (!fromUser) return
             val at = (p / 100).coerceIn(0, total - 1)
-            subTv?.text = "第 ${at + 1}/$total 章 · ${info.chapters[at].title}"
+            subTv?.text = "第 ${at + 1}/$total 章 · ${info.chapters.getOrNull(at)?.title.orEmpty()}"
         }
         override fun onStartTrackingTouch(sb: android.widget.SeekBar?) { draggingSeek = true }
         // 松手才跳章：拖的过程中每动一格就取一次正文，等于把整本书拉一遍。
@@ -994,8 +1044,8 @@ internal fun MainActivity.showReader(
             var target = ((sb?.progress ?: atStart) / 100).coerceIn(0, total - 1)
             if (info.chapters.getOrNull(target)?.locked == true) {
                 // 付费章取不到正文：前后各找一章免费的，找不到就退回原处。
-                val free = (target + 1 until total).firstOrNull { !info.chapters[it].locked }
-                    ?: (target - 1 downTo 0).firstOrNull { !info.chapters[it].locked }
+                val free = (target + 1 until total).firstOrNull { info.chapters.getOrNull(it)?.locked == false }
+                    ?: (target - 1 downTo 0).firstOrNull { info.chapters.getOrNull(it)?.locked == false }
                 if (free == null) {
                     toast("该章为付费章")
                     seek.progress = index * 100 + innerPct()

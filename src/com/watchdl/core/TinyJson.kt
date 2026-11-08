@@ -92,16 +92,31 @@ object TinyJson {
         val open = json.indexOf('[', at)
         if (open < 0) return emptyList()
         val out = mutableListOf<String>()
+        // 按**外层数组深度**收尾，不能见到第一个 `]` 就收：
+        // `chapterListWithVolume` 是 `[[{…},{…}],[{…}]]`，内层每卷都收一个 `]`，
+        // 以前第一卷完就 return，2500 章只抽出第一卷。
+        var depth = 1
         var i = open + 1
         while (i < json.length) {
-            when (json[i]) {
-                '{' -> {
-                    val end = objectEnd(json, i)
-                    if (end < 0) return out
-                    out.add(json.substring(i, end + 1))
-                    i = end + 1
-                }
-                ']' -> return out   // 外层数组结束
+            val c = json[i]
+            if (c == '{') {
+                val end = objectEnd(json, i)
+                if (end < 0) return out
+                out.add(json.substring(i, end + 1))
+                i = end + 1
+                continue
+            }
+            if (c == '"') {
+                // 字符串里的 `]` 不能算数组结尾。
+                val end = stringEnd(json, i)
+                if (end < 0) return out
+                i = end + 1
+                continue
+            }
+            if (c == '[') depth++
+            else if (c == ']') {
+                depth--
+                if (depth == 0) return out
             }
             i++
         }
@@ -133,23 +148,28 @@ object TinyJson {
         if (open >= json.length || json[open] != '[') return null
         val out = mutableListOf<String>()
         var i = open + 1
+        // 每个分支自己推进游标（i = end + 1）。以前统一在循环底部 i++，
+        // 那个 i++ 会把紧跟在对象后的 `]` 跳过去 —— 补上的 `']'` 分支永远命中不了。
         while (i < json.length) {
-            when (json[i]) {
-                '{' -> {
-                    val end = objectEnd(json, i)
-                    if (end < 0) return out
-                    path(json.substring(i, end + 1), field)?.let { out.add(it) }
-                    i = end + 1
-                }
-                '"', '\'' -> {
-                    // 纯字符串数组：也当成值收下
-                    val end = stringEnd(json, i)
-                    if (end < 0) return out
-                    if (field == "") out.add(unescape(json.substring(i + 1, end)))
-                    i = end + 1
-                }
+            val c = json[i]
+            if (c == '{') {
+                val end = objectEnd(json, i)
+                if (end < 0) return out
+                path(json.substring(i, end + 1), field)?.let { out.add(it) }
+                i = end + 1
+                continue
             }
-            if (i >= json.length) return out
+            if (c == '"' || c == '\'') {
+                // 纯字符串数组：也当成值收下
+                val end = stringEnd(json, i)
+                if (end < 0) return out
+                if (field == "") out.add(unescape(json.substring(i + 1, end)))
+                i = end + 1
+                continue
+            }
+            // 数组结束就停。没有这一支会越过数组末尾，
+            // 把整篇 JSON 里后面每一个对象都收进来（只取一个数组却拿到全页的字段）。
+            if (c == ']') return out
             i++
         }
         return out

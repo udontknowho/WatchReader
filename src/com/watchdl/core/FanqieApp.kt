@@ -30,6 +30,14 @@ class FanqieApp(
             "com.ss.android.article.news/13400 (Linux; U; Android 10; zh_CN; tb8788p1_64_bsp; " +
                 "Build/QQ3A.200805.001; Cronet/TTNetVersion:fc4cebd3 2024-12-10 QuicVersion:d9628e3d 2024-10-11)"
 
+        /**
+         * 取目录的**整轮**时间预算（毫秒）。
+         *
+         * 以前只有单次 25s 的时限，而重试最多 4 次 —— 最坑的情况下用户盯着屏等 3.5 分钟
+         * 看不到任何进度变化。成整体预算后，4 次加起来仍不超过这个数。
+         */
+        private const val TOC_BUDGET_MS = 25_000L
+
         private const val HOST_DIR = "https://api5-normal-sinfonlineb.fqnovel.com"
 
         /**
@@ -118,16 +126,28 @@ class FanqieApp(
         // 服务端会软限流：HTTP 200 + code:0，但 item_data_list 被省略。
         // 实测约 1/3 概率为空，重试即可拿到。
         // 另外偶发 TLS 握手失败，因此每次重试都**换一个主机**，不在一棵树上吊死。
+        //
+        // 预算：4 次 × 25s + 退避本来能跑到 3.5 分钟，用户看到的就是「点开书一直转圈」。
+        // 改成整轮共 25s，每次尝试只传剩余时间，退避也从预算里扣。
+        val startedAt = System.currentTimeMillis()
+        fun left(): Long = TOC_BUDGET_MS - (System.currentTimeMillis() - startedAt)
         var items = emptyList<String>()
         for (attempt in 0 until 4) {
+            val remain = left()
+            // 不够一次有效尝试就收手：前几次已经全超时，再来一次也一样，只是多等一份预算。
+            if (remain < 1_500) break
             val host = DIR_HOSTS[attempt % DIR_HOSTS.size]
             val url = "$host/reading/bookapi/directory/all_items/v" +
                 "?book_type=0&item_data_list_md5=&catalog_data_md5=&book_id=$bookId" +
                 "&book_info_md5=&need_version=true&device_id=$dev" + DIR_Q
-            val body = runCatching { signedGet(url, aid = 1967, ua = UA_DIR).body }.getOrNull()
+            val body = runCatching {
+                signedGet(url, aid = 1967, ua = UA_DIR, timeoutMs = remain.toInt()).body
+            }.getOrNull()
             items = body?.let { TinyJson.objects(it, "item_data_list") } ?: emptyList()
             if (items.isNotEmpty()) break
-            Thread.sleep(700L * (attempt + 1))
+            val wait = minOf(700L * (attempt + 1), left())
+            if (wait <= 0) break
+            Thread.sleep(wait)
         }
         val chapters = items.mapIndexed { i, obj ->
             val id = TinyJson.path(obj, "item_id")
@@ -211,11 +231,12 @@ class FanqieApp(
     }
 
     // ── 带签名的取数 ──────────────────────────────────────
-    private fun signedGet(url: String, aid: Int, ua: String): Http.Response {
+    private fun signedGet(url: String, aid: Int, ua: String, timeoutMs: Int = 25_000): Http.Response {
         val q = url.substringAfter('?', "")
         val ts = System.currentTimeMillis() / 1000
         val h = TtSign.headers(q, "", ts, dev, iid, aid, rnd.nextInt(Int.MAX_VALUE).toLong())
-        return Http.fetch(url, "GET", null, h + mapOf("User-Agent" to ua), null, timeoutMs = 25_000)
+        return Http.fetch(url, "GET", null, h + mapOf("User-Agent" to ua), null,
+            timeoutMs = timeoutMs.coerceAtLeast(1_000))
     }
 
     private fun signedGetRaw(

@@ -36,7 +36,12 @@ object LocalImport {
     /** epub 单个条目封顶。 */
     private const val ENTRY_CAP = 4 * 1024 * 1024
 
-    /** epub 文本条目累计封顶。 */
+    /**
+     * epub 文本条目累计封顶。
+     *
+     * **不要对齐 [MAX_EPUB_BYTES]」：这里数的是解压后的字节，正文能比压缩包大几倍，
+     * 拿 32MB 卡会把合法 epub 挡在门外。它的作用只是「这本书大得不像话」的兜底。
+     */
     private const val MAX_EPUB_TEXT = 64L * 1024 * 1024
 
     /**
@@ -279,8 +284,10 @@ object LocalImport {
      * 这里只有「当前章」一个 StringBuilder 在长大，加上开头那段候选「开篇」。
      */
     fun splitTxtTo(text: String, emit: (Chapter) -> Unit) {
-        val normalized = text.replace("\r\n", "\n").replace('\r', '\n')
-        if (normalized.isBlank()) return
+        // **不做 CRLF 归一化**：replace 是正则实现，会先造 Pattern 再把整串复制一份 ——
+        // 12MB 正文上就是又占 24MB，手表直接 OOM。lineSequence() 自己按 \r\n / \n / \r
+        // 三种行尾切，拿到的行不含回车，不需要预处理。
+        if (text.isBlank()) return
         var emitted = 0
         var title: String? = null
         val cur = StringBuilder()
@@ -296,7 +303,7 @@ object LocalImport {
             cur.setLength(0)
         }
 
-        for (line in normalized.lineSequence()) {
+        for (line in text.lineSequence()) {
             if (isChapterHead(line)) {
                 val prev = title
                 if (prev != null) {
@@ -318,7 +325,7 @@ object LocalImport {
         }
         flush()
         // 全书只有一个空标题、正文全被当标题吃掉了 —— 退回整篇一章，宁可章名难看也不能空书。
-        if (emitted == 0) emit(Chapter("全书", normalized.trim()))
+        if (emitted == 0) emit(Chapter("全书", text.trim()))
     }
 
     // ══════════════════ epub ══════════════════
@@ -656,12 +663,11 @@ object LocalImport {
         // 带上格式；字节数不能进 id —— 同名重导要落在同一本书上（覆盖旧正文），
         // 进了 id 就变成「每改一次文件多一本」。
         val bookId = PREFIX + JobStore.safeDirName(name) + "_" + format.lowercase(Locale.US)
-        // 重导入：先清掉旧目录（同一本），否则正文会与旧章节混在一起。
-        store.markDeleted(bookId)
-        store.clearDeleted(bookId)
-
+        // 重导入：**不删旧目录**，先写到暂存目录 `<目录>.building`，成功后才整体换名。
+        // 以前这里先 markDeleted 再 produce，produce 中途失败只 abort 了正文 tmp，
+        // 旧 job.json 与旧正文已经没了 —— 重导一本坏 epub 就把书搞丢。
         val titles = ArrayList<String>()
-        val sink = store.openChapters(bookId)
+        val sink = store.openStaging(bookId)
         try {
             produce { c ->
                 val i = titles.size
@@ -679,8 +685,9 @@ object LocalImport {
             }
             sink.commit()
         } catch (t: Throwable) {
-            // 失败就把半截 tmp 删掉，旧正文原样保留 —— 用户重导失败的后果只是「没变」。
+            // 只删暂存目录，旧书原样保留 —— 重导失败的后果只是「没变」。
             sink.abort()
+            store.abortStaging(bookId)
             throw t
         }
 
@@ -698,7 +705,8 @@ object LocalImport {
             "{\"itemId\":${Downloader.quote(itemId(i))},\"title\":${Downloader.quote(t)}," +
                 "\"locked\":false,\"status\":\"DONE\"}"
         }.joinToString(",")
-        store.writeJob(bookId, json + chapterJson + "]}", isCancelled = { false }, resume = { true })
+        // 到这一步整本新书才落定：旧目录在这里才被删掉，书架在这里才看见新书。
+        store.commitStaging(bookId, json + chapterJson + "]}")
 
         return Result(bookId, name, titles.size, format)
     }

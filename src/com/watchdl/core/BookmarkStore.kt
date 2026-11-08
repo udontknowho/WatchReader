@@ -44,9 +44,11 @@ object BookmarkStore {
 
     fun list(): List<Bookmark> {
         val f = file ?: return emptyList()
-        if (!f.isFile) return emptyList()
+        // 主文件不在时回退读 tmp：进程正好死在改名之前，全部书签还在 tmp 里。
+        val src = if (f.isFile) f
+        else File(f.parentFile, f.name + ".tmp").takeIf { it.isFile } ?: return emptyList()
         // 存档坏了不能让阅读页起不来：解析失败就当没有。
-        return runCatching { parse(f.readText(Charsets.UTF_8)) }.getOrDefault(emptyList())
+        return runCatching { parse(src.readText(Charsets.UTF_8)) }.getOrDefault(emptyList())
     }
 
     fun forBook(bookId: String): List<Bookmark> =
@@ -70,12 +72,30 @@ object BookmarkStore {
         return kept
     }
 
-    /** 同步落盘。进程随时可能被杀，异步写会丢。 */
+    /**
+     * 同步落盘。进程随时可能被杀，异步写会丢。
+     *
+     * **必须先写 tmp 再改名**：`writeText` 是「截断后重写」，写到一半被杀就剩半截 json，
+     * [list] 解析失败返回空表，下一次 [add] 又拿空表覆盖 —— 全部书签一起没。
+     * 改名在 Linux 上是原子替换，要么是旧档，要么是完整新档。
+     */
     fun save(items: List<Bookmark>) {
         val f = file ?: return
         runCatching {
             f.parentFile?.mkdirs()
-            f.writeText(dump(items), Charsets.UTF_8)
+            val text = dump(items)
+            val tmp = File(f.parentFile, f.name + ".tmp")
+            // 先 fsync 再改名：只写到页缓存就改名，断电后拿到的是零字节文件。
+            java.io.RandomAccessFile(tmp, "rw").use { raf ->
+                raf.setLength(0)
+                raf.write(text.toByteArray(Charsets.UTF_8))
+                raf.fd.sync()
+            }
+            if (!tmp.renameTo(f)) {
+                // rename 失败时退化为直写：宁可短暂非原子，也不要丢这一次保存。
+                f.writeText(text, Charsets.UTF_8)
+                tmp.delete()
+            }
         }
     }
 
@@ -111,7 +131,9 @@ object BookmarkStore {
                 title = str(obj, "title") ?: "",
                 offset = num(obj, "offset", -1),
                 excerpt = str(obj, "excerpt") ?: "",
-                at = num(obj, "at").toLong(),
+                // at 是 13 位毫秒时间戳，走 num() 的 toIntOrNull 会溢出成 0。
+                // 顺序全靠它，溢出后 MAX 截断会从「最旧」那一头丢，丢的是最新的书签。
+                at = long(obj, "at"),
             )
         }
 
@@ -122,6 +144,9 @@ object BookmarkStore {
 
     private fun num(obj: String, key: String, fallback: Int = 0): Int =
         str(obj, key)?.trim()?.toIntOrNull() ?: fallback
+
+    private fun long(obj: String, key: String, fallback: Long = 0L): Long =
+        str(obj, key)?.trim()?.toLongOrNull() ?: fallback
 
     /** 只转义必须的几个字符：引号、反斜杠、换行、回车、制表。 */
     private fun esc(s: String): String = buildString {

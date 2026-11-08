@@ -298,11 +298,10 @@ class DownloadService : Service() {
                 else ChapterRef(p[0], p[1], p[2] == "true")
             }
             .toList()
-        // 章节优先从 job.json 读（start() 已落盘）。旧协议传来的 extra 仍兼容。
-        val chapters = fromIntent.ifEmpty {
-            Downloader.restore(JobStore(File(filesDir, "books")), bookId)?.chapters ?: emptyList()
-        }
-        return BookInfo(bookId, name, author, chapters)
+        // 章节不在这里读。runJob 一开始就 Downloader.restore 一次，那才是权威版本；
+        // 主线程再读一遍等于把整本 jsonl 加逐章正则在 UI 线程做两次（3000 章秒级卡顿）。
+        // 旧协议传来的 extra 仍然优先（单章重建这类调用就靠它）。
+        return BookInfo(bookId, name, author, fromIntent)
     }
 
     /**

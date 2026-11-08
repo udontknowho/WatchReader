@@ -69,6 +69,22 @@ class JobStore(private val root: File) {
         locks.computeIfAbsent(jobFile(bookId).canonicalPath) { Any() }
 
     companion object {
+        /**
+         * 导入暂存目录的后缀，见 [openStaging]。
+         *
+         * 带 `~` 是刻意的：[safeDirName] 的白名单里没有它，所以**任何** bookId 净化后都不可能
+         * 以 `~building` 结尾 —— 暂存目录与正式目录的命名空间不会重叠。
+         * 顺带让 `cleanDirtyJobs` 的「目录名不是净化结果」那条规则自动认领这些孤儿。
+         */
+        internal const val STAGING_SUFFIX = "~building"
+
+        /** 换名时旧目录的临时后缀，见 [commitStaging]。同样在净化白名单之外。 */
+        internal const val OLD_SUFFIX = "~old"
+
+        /** 这两个后缀的目录都不是书：一律不进书架，进程启动时可安全清掉。 */
+        fun isTransientDirName(name: String): Boolean =
+            name.endsWith(STAGING_SUFFIX) || name.endsWith(OLD_SUFFIX)
+
         private val locks = java.util.concurrent.ConcurrentHashMap<String, Any>()
 
         /** 从 chapters.jsonl 的一行里取 itemId。正文里可能有别的 JSON，只认这个键。 */
@@ -200,8 +216,8 @@ class JobStore(private val root: File) {
      * 仍然先写 tmp 再 rename，中途失败或进程被杀都不会留下半本正文。
      * 生命周期：`openChapters` → `add` × N → `commit`（或 `abort`）。
      */
-    inner class ChapterSink internal constructor(private val bookId: String) {
-        private val tmp = File(dirOf(bookId), "chapters.jsonl.tmp")
+    inner class ChapterSink internal constructor(private val bookId: String, private val dir: File) {
+        private val tmp = File(dir, "chapters.jsonl.tmp")
         private var raf: RandomAccessFile? = null
 
         /** 已写章数。 */
@@ -209,7 +225,7 @@ class JobStore(private val root: File) {
             private set
 
         internal fun open() {
-            dirOf(bookId).mkdirs()
+            dir.mkdirs()
             tmp.parentFile?.mkdirs()
             raf = RandomAccessFile(tmp, "rw").also { it.setLength(0) }
         }
@@ -228,7 +244,7 @@ class JobStore(private val root: File) {
             r.fd.sync()
             r.close()
             synchronized(lockFor(bookId)) {
-                val f = chaptersFile(bookId)
+                val f = File(dir, "chapters.jsonl")
                 if (!tmp.renameTo(f)) {
                     tmp.copyTo(f, overwrite = true)
                     tmp.delete()
@@ -246,7 +262,93 @@ class JobStore(private val root: File) {
     }
 
     /** 开一个流式正文写入器。 */
-    fun openChapters(bookId: String): ChapterSink = ChapterSink(bookId).also { it.open() }
+    fun openChapters(bookId: String): ChapterSink = ChapterSink(bookId, dirOf(bookId)).also { it.open() }
+
+    /** 导入新书时用的暂存目录。带后缀的目录不会有 job.json，所以永远不会被书架当成一本书。 */
+    private fun stagingDir(bookId: String): File = File(root, safeDirName(bookId) + STAGING_SUFFIX)
+
+    /**
+     * 开一个写往暂存目录的正文写入器。
+     *
+     * 重导一本本地书**不能先删旧目录**：produce 中途失败（epub 包坏、编码认不出）
+     * 只会 abort 掉 chapters.jsonl 的 tmp，而旧 job.json 已经被 [markDeleted] 删了 ——
+     * 用户的书连同正文一起消失。改成先写满 `<目录>.building`，成功后再整体换名。
+     */
+    fun openStaging(bookId: String): ChapterSink = ChapterSink(bookId, stagingDir(bookId)).also { it.open() }
+
+    /**
+     * 把暂存目录换成正式目录，并落定 job.json。
+     *
+     * 三步换名，**任何一步断电都至少留一份完整可读的目录**：
+     * 1. 写 `staging/job.json.tmp`（暂存目录里没有 job.json，书架还看不见这本）
+     * 2. 旧目录改名 `<目录>~old`，暂存目录改名成正式目录
+     * 3. 删 `<目录>~old`，再把 `job.json.tmp` 改成 `job.json` —— 到这一步书才「上线」
+     *
+     * 以前是先删旧目录再改名：中间那一下断电只剩一个没有 job.json 的 `.building`，
+     * 书架、缓存页、记录页全看不见，用户视角就是书没了。改成「旧目录让位」之后，
+     * 断电时要么旧目录还在，要么新目录已经在，不会有两头空的时刻。
+     */
+    fun commitStaging(bookId: String, json: String) {
+        synchronized(lockFor(bookId)) {
+            val st = stagingDir(bookId)
+            if (!st.isDirectory) return
+            // 先把 job.json.tmp 写实。**写不成就整单放弃**：这一刻旧书还在，什么都不该动。
+            // 以前这里 runCatching 吞掉结果，磁盘满时会把旧书删了再往上抛，用户的书直接没。
+            val tmp = File(st, "job.json.tmp")
+            val wrote = runCatching {
+                RandomAccessFile(tmp, "rw").use { raf ->
+                    raf.setLength(0)
+                    raf.write(json.toByteArray(Charsets.UTF_8))
+                    raf.fd.sync()
+                }
+            }.isSuccess && tmp.isFile
+            if (!wrote) {
+                abortStaging(bookId)
+                error("暂存目录写不进 job.json：${st.name}")
+            }
+            val dir = dirOf(bookId)
+            val old = File(root, dir.name + OLD_SUFFIX)
+            runCatching { old.deleteRecursively() }
+            var hasOld = false
+            if (dir.isDirectory) {
+                hasOld = dir.renameTo(old)
+                if (hasOld) {
+                    // 旧目录已经让位，但老写入线程还认这个 bookId：立墓碑挡住它们的落盘。
+                    // 走 deleted 而不是 markDeleted：目录已经不在了，再删一次只是白跑一趟。
+                    deleted.add(bookId)
+                } else {
+                    // 改名不成（极少见）就退回「删了再换」：宁可少一层保险，不能把新书堵死。
+                    markDeleted(bookId)
+                }
+            }
+            if (!st.renameTo(dir)) {
+                // 同一分区里 rename 不该失败；真失败了就地逐个搬，**搬不动就报错，绝不删暂存**。
+                // 以前这里忽略每次 renameTo 的返回值，搬失败的文件随后被 deleteRecursively 清掉。
+                dir.mkdirs()
+                val moved = st.listFiles()?.all { f -> f.renameTo(File(dir, f.name)) } ?: true
+                if (!moved) {
+                    // 旧目录还在 `~old` 里，放回原位，用户至少还有一本旧书可读。
+                    if (hasOld && !dir.listFiles().isNullOrEmpty()) dir.deleteRecursively()
+                    if (hasOld) old.renameTo(dir)
+                    error("暂存正文搬不进 ${dir.name}")
+                }
+            }
+            runCatching { old.deleteRecursively() }
+            clearDeleted(bookId)
+            // 到这一步书架才看得见这本书。
+            val staged = File(dir, "job.json.tmp")
+            val job = File(dir, "job.json")
+            if (!staged.renameTo(job)) {
+                job.writeText(json, Charsets.UTF_8)
+                staged.delete()
+            }
+        }
+    }
+
+    /** 放弃这次导入：只删暂存目录，旧书原样留着。 */
+    fun abortStaging(bookId: String) {
+        runCatching { stagingDir(bookId).deleteRecursively() }
+    }
 
     /**
      * 已缓存章的 itemId 集合。

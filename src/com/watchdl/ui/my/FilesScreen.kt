@@ -3,6 +3,7 @@ package com.watchdl.ui.my
 import android.widget.LinearLayout
 import com.watchdl.MainActivity
 import com.watchdl.core.Screen
+import com.watchdl.core.TinyJson
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
 import java.io.File
@@ -308,8 +309,33 @@ private fun MainActivity.askDeleteFile(row: FileRow) {
     ).show()
 }
 
+/**
+ * 目录若是一本作业（books/ 下带 job.json 的一级目录），就按作业删。
+ *
+ * @return true 表示已经交给 [purgeBookCache]，调用方不要再自己删。
+ *         读不出 bookId 时退回普通删除：那是已进不书架的孤儿目录，删了不丢书。
+ */
+private fun MainActivity.purgeBookDir(row: FileRow): Boolean {
+    if (row.file.parentFile?.absolutePath != File(filesDir, "books").absolutePath) return false
+    val raw = runCatching {
+        File(row.file, "job.json").takeIf { it.isFile }?.readText()
+            ?: File(row.file, "job.json.tmp").takeIf { it.isFile }?.readText()
+    }.getOrNull() ?: return false
+    val bookId = TinyJson.path(raw, "bookId")
+    if (bookId.isNullOrBlank()) return false
+    purgeBookCache(listOf(bookId)) { gone ->
+        toast(if (gone > 0) "已删除 ${row.name}" else "删除失败：${row.name}")
+        showFiles()
+    }
+    return true
+}
+
 /** 落盘删除放后台：books/ 下几百个文件，主线程删会卡住界面。 */
 private fun MainActivity.deleteFileRow(row: FileRow) {
+    // books/ 下一级目录就是一本作业。裸删目录会被后台线程建回来（书「诈尸」）：
+    // 跑着的作业每章落盘一次，目录连同 job.json 一起重新长出来。
+    // 所以先试走整本删除的公用路径：取消服务 → 踢队列 → 落墓碑 → 再删目录。
+    if (row.isDir && purgeBookDir(row)) return
     // 顶层四个目录的路径在下载、导出、书架三处写死，目录本身要留着；
     // 里面更深的子目录没有别人依赖，整个删掉，省得留一堆空壳。
     val keepDir = row.isDir && row.file.parentFile == filesDir &&
