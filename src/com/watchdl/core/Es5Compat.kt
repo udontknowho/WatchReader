@@ -25,6 +25,8 @@ object Es5Compat {
         val sb = StringBuilder(src.length + 64)
         var i = 0
         while (i < src.length) {
+            val literal = literalEnd(src, i)
+            if (literal > i) { sb.append(src, i, literal); i = literal; continue }
             val c = src[i]
             if (c == '\'' || c == '"' || c == '`') {
                 val e = endOfString(src, i); sb.append(src, i, e); i = e; continue
@@ -109,6 +111,13 @@ object Es5Compat {
         var i = 0
         while (i < src.length) {
             at[i] = out.length
+            val literal = literalEnd(src, i)
+            if (literal > i) {
+                if (src[i] == '`') out.append(template(src.substring(i, literal)))
+                else out.append(src, i, literal)
+                i = literal
+                continue
+            }
             val c = src[i]
             if (c == '\'' || c == '"' || c == '`') {
                 val e = endOfString(src, i); out.append(src, i, e); i = e; continue
@@ -122,7 +131,13 @@ object Es5Compat {
             if (c == '?' && i + 1 < src.length && src[i + 1] == '.' &&
                 (i + 2 >= src.length || !src[i + 2].isDigit())) {
                 val r = chain(src, i, out, at, tmp)
-                if (r > i) { i = r; continue }
+                if (r > i) {
+                    // 后续 ?? 会从原文回溯到已消费的链；这些位置必须指向改写后的同一开头。
+                    val head = at[exprStart(src, i)]
+                    for (k in i until r) at[k] = head
+                    i = r
+                    continue
+                }
             }
             if (c == '?' && i + 1 < src.length && src[i + 1] == '?') {
                 val r = nullish(src, i, out, at, tmp)
@@ -130,6 +145,27 @@ object Es5Compat {
             }
             out.append(c)
             i++
+        }
+        return out.toString()
+    }
+
+    /** 模板的文本保持原样，只递归处理 ${'$'}{…} 中的表达式。 */
+    private fun template(src: String): String {
+        val out = StringBuilder()
+        var i = 0
+        while (i < src.length) {
+            if (src[i] == '\\' && i + 1 < src.length) {
+                out.append(src, i, i + 2); i += 2; continue
+            }
+            if (src.startsWith("\${", i)) {
+                val close = matchPair(src, i + 1, '{', '}')
+                if (close != null) {
+                    out.append("\${").append(modern(src.substring(i + 2, close))).append('}')
+                    i = close + 1
+                    continue
+                }
+            }
+            out.append(src[i++])
         }
         return out.toString()
     }
@@ -220,7 +256,7 @@ object Es5Compat {
                 '(' -> return k + 1          // 向后遇到的 `(` 只能是一次没闭合的调用
                 '.' -> k--
                 '?' -> {
-                    if (k + 1 < src.length && src[k + 1] == '.') k -= 2 else return k + 1
+                    if (k + 1 < src.length && src[k + 1] == '.') k-- else return k + 1
                 }
                 '\'', '"', '`' -> {
                     val s = stringStartBack(src, k)
@@ -256,7 +292,9 @@ object Es5Compat {
             when (c) {
                 '(', '[', '{' -> depth++
                 ')', ']', '}' -> { if (depth == 0) return i; depth-- }
-                ',', ';', '?', ':', '\n', '\r' -> if (depth == 0) return i
+                '?' -> if (depth == 0 && !src.startsWith("?.", i) && !src.startsWith("??", i) &&
+                    (i == 0 || src[i - 1] != '?')) return i
+                ',', ';', ':', '\n', '\r' -> if (depth == 0) return i
             }
             i++
         }
@@ -282,17 +320,57 @@ object Es5Compat {
         return -1
     }
 
-    /** 从收尾符号往回找开符号。 */
+    /** 正向配平后查找开符号，忽略字符串与正则中的括号。 */
     private fun matchBack(src: String, close: Int, open: Char, closeCh: Char): Int? {
-        var depth = 0
-        var i = close
-        while (i >= 0) {
+        val stack = mutableListOf<Int>()
+        var i = 0
+        while (i <= close) {
             val c = src[i]
-            if (c == closeCh) depth++
-            else if (c == open) { depth--; if (depth == 0) return i }
-            i--
+            val end = literalEnd(src, i)
+            if (end > i) { i = end; continue }
+            if (c == open) stack.add(i)
+            else if (c == closeCh) {
+                if (stack.isEmpty()) return null
+                val start = stack.removeAt(stack.lastIndex)
+                if (i == close) return start
+            }
+            i++
         }
         return null
+    }
+
+    /** 跳过引号、注释及表达式位置的正则字面量。 */
+    private fun literalEnd(src: String, start: Int): Int {
+        val c = src[start]
+        if (c == '\'' || c == '"' || c == '`') return endOfString(src, start)
+        if (c != '/' || start + 1 >= src.length) return start
+        if (src[start + 1] == '/') return endOfLine(src, start)
+        if (src[start + 1] == '*') return endOfBlockComment(src, start)
+        var p = start - 1
+        while (p >= 0 && src[p].isWhitespace()) p--
+        // 除法左侧是一个操作数；正则左侧是表达式的起始标点或 return。
+        val wordEnd = p + 1
+        while (p >= 0 && isIdent(src[p])) p--
+        val word = src.substring(p + 1, wordEnd)
+        val regex = word in setOf("return", "throw", "case") ||
+            (word.isEmpty() && (p < 0 || src[p] in "(=:[,!&|?;{>"))
+        if (!regex) return start
+        var i = start + 1
+        var inClass = false
+        while (i < src.length && src[i] != '\n') {
+            when (src[i]) {
+                '\\' -> { i += 2; continue }
+                '[' -> inClass = true
+                ']' -> inClass = false
+                '/' -> if (!inClass) {
+                    i++
+                    while (i < src.length && src[i].isLetter()) i++
+                    return i
+                }
+            }
+            i++
+        }
+        return start
     }
 
     private fun matchPair(src: String, open: Int, o: Char, c: Char): Int? {
@@ -300,7 +378,8 @@ object Es5Compat {
         var i = open
         while (i < src.length) {
             val ch = src[i]
-            if (ch == '\'' || ch == '"' || ch == '`') { i = endOfString(src, i); continue }
+            val end = literalEnd(src, i)
+            if (end > i) { i = end; continue }
             if (ch == o) depth++ else if (ch == c) { depth--; if (depth == 0) return i }
             i++
         }
@@ -357,8 +436,10 @@ object Es5Compat {
     private fun looksLikeFunction(src: String, open: Int): Boolean {
         var i = open - 1
         while (i >= 0 && src[i].isWhitespace()) i--
-        // 跳过函数名
-        while (i >= 0 && (src[i].isLetterOrDigit() || src[i] == '_' || src[i] == '$')) i--
+        // 匿名函数的前一个单词就是 function，不能当作函数名跳过。
+        val wordEnd = i + 1
+        while (i >= 0 && isIdent(src[i])) i--
+        if (src.substring(i + 1, wordEnd) == "function") return true
         while (i >= 0 && src[i].isWhitespace()) i--
         val end = i + 1
         val start = maxOf(0, end - 8)
@@ -369,9 +450,10 @@ object Es5Compat {
         var depth = 0
         var i = open
         while (i < src.length) {
+            val end = literalEnd(src, i)
+            if (end > i) { i = end; continue }
             val c = src[i]
             when {
-                c == '\'' || c == '"' || c == '`' -> { i = endOfString(src, i); continue }
                 c == '(' -> depth++
                 c == ')' -> { depth--; if (depth == 0) return i }
             }
@@ -393,6 +475,11 @@ object Es5Compat {
         while (i < src.length) {
             when (src[i]) {
                 '\\' -> i += 2
+                '$' -> {
+                    if (q == '`' && i + 1 < src.length && src[i + 1] == '{') {
+                        i = (matchPair(src, i + 1, '{', '}') ?: return src.length) + 1
+                    } else i++
+                }
                 q -> return i + 1
                 else -> i++
             }

@@ -244,6 +244,9 @@ internal fun MainActivity.showReaderSettings(
                 ReaderUi.autoPageSec = it.toInt().coerceIn(1, 60)
             }
             g.addView(Widgets.button(this, "恢复默认排版", "outline") {
+                Widgets.md3Dialog(this, "恢复默认排版",
+                    body = "重置字号、间距、标题与页边距。保留书签、进度及常亮设置。",
+                    confirm = "恢复", onConfirm = {
                 readerSize = Md3.FS_READ
                 readerSpacing = 1.75f
                 ReaderUi.paraLevel = 0
@@ -261,6 +264,7 @@ internal fun MainActivity.showReaderSettings(
                 applyNow()
                 paint()
                 toast("排版已恢复默认")
+                }).show()
             }, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, Md3.BTN)).apply {
                 setMargins(ip, Md3.dp(this@showReaderSettings, 4), ip,

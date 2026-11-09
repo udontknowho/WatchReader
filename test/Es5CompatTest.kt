@@ -57,6 +57,24 @@ fun main() {
     check("老写法不受影响",
         JsEngine.eval("function f(a, b) { return a + b } String(f(1, 2))") == "3")
 
+    println("[Es5Compat] 7.5 真实规则回归")
+    fun evaluates(name: String, code: String, expected: String) {
+        val result = runCatching { JsEngine.eval(code) }
+        check(name, result.getOrNull() == expected,
+            result.exceptionOrNull()?.message ?: "得到 ${result.getOrNull()}，预期 $expected")
+    }
+    evaluates("微博正则含引号与不平衡括号", "var result = '{\"content1\": \"正文\",'; result.match(/\"content1\": \"([^\"]+)\",/)?.[1] ?? ''", "正文")
+    evaluates("微博正则未匹配", "var result = ''; result.match(/\"content1\": \"([^\"]+)\",/)?.[1] ?? ''", "")
+    evaluates("多级链后接空值合并", "var src = '{}'; JSON.parse(src || '[]')?.data?.media_list ?? []", "[]")
+    evaluates("空值合并右侧可选链", "var data = {live: 7}; data?.common ?? data?.live", "7")
+    evaluates("空值合并保留零与空串", "[0 ?? 7, '' ?? 'x', false ?? true]", "[0,\"\",false]")
+    evaluates("链左侧只求值一次", "var calls=0; function f(){calls++;return {x:3}}; var x=f()?.x ?? 8; [x,calls]", "[3,1]")
+    evaluates("正则中的现代运算符不改写", "String(/a?.b/.test('ab'))", "true")
+    evaluates("匿名函数默认值", "var f = function(x = 4) { return x }; f()", "4")
+    evaluates("豆瓣正文模板内可选链", "var item={data:{size:{orig:{src:'cover'}}}}; `<img src=\"\${item.data?.size.orig.src}\">`", "<img src=\"cover\">")
+    evaluates("模板空值合并", "var t=null; `v=\${t??'none'}`", "v=none")
+    evaluates("嵌套模板表达式", "var t=null; `a=\${`b=\${t??'none'}`}`", "a=b=none")
+
     if (failures > 0) {
         println("Es5CompatTest: FAIL ($failures)")
         kotlin.system.exitProcess(1)

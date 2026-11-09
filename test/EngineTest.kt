@@ -769,7 +769,7 @@ fun linkCheck() {
             TinyJson.arrayField(miss, "data.list", "bookId").isEmpty(), "")
     }
     run {
-        check("起点缺省 10 页", RankConfig.defaultPages(RankConfig.Kind.QIDIAN) == 10,
+        check("起点缺省不可翻页", RankConfig.defaultPages(RankConfig.Kind.QIDIAN) == 0,
             "实际 ${RankConfig.defaultPages(RankConfig.Kind.QIDIAN)}")
         check("番茄更新缺省 5 页",
             RankConfig.defaultPages(RankConfig.Kind.FANQIE_UPDATE) == 5,
@@ -778,22 +778,56 @@ fun linkCheck() {
             RankConfig.defaultPages(RankConfig.Kind.FANQIE) == 0,
             "实际 ${RankConfig.defaultPages(RankConfig.Kind.FANQIE)}")
 
-        // 配置里没写 pages 时，解析结果应采用 kind 缺省值。
-        // 样本原先用「番茄更新」，该榜已从产品移除（见 RankConfig.parse），
-        // 再拿它当样本只会测到「被丢弃」。换起点：同样有非 0 缺省页数。
-        val cfg = """{"version":1,"ranks":[
-            {"key":"q","kind":"qidian","board":"yuepiaolist","name":"起点"},
-            {"key":"q2","kind":"qidian","board":"collectlist","name":"起点二"}]}"""
+        // 旧代号仍可读取，但只允许映射到已确认的官网榜。
+        val aliases = mapOf("yuepiaolist" to "yuepiao", "hotsaleslist" to "hotsales",
+            "newbooklist" to "newbook", "updatelist" to "update")
+        val cfg = """{"version":1,"ranks":[""" +
+            aliases.keys.joinToString(",") { """{"key":"$it","kind":"qidian","board":"$it"}""" } +
+            """,{"key":"collect","kind":"qidian","board":"collectlist"}]}"""
         val ranks = RankConfig.parseVersioned(cfg).second
-        val q = ranks.firstOrNull { it.key == "q" }
-        val q2 = ranks.firstOrNull { it.key == "q2" }
-        check("起点榜解析出 10 页", q?.pages == 10, "实际 ${q?.pages}")
-        check("同一 kind 的另一个榜也是 10 页", q2?.pages == 10, "实际 ${q2?.pages}")
+        check("无对应官网榜的 collectlist 被过滤", ranks.none { it.key == "collect" }, ranks.toString())
+        check("过滤收藏榜不影响其它合法榜", ranks.map { it.key }.toSet() == aliases.keys,
+            ranks.map { it.key }.toString())
+        for ((alias, board) in aliases) {
+            val rank = ranks.firstOrNull { it.key == alias }
+            check("旧别名 $alias 归一为 $board", rank?.board == board, rank?.board ?: "未解析")
+            check("$board 缺省不可翻页", rank?.pages == 0, "实际 ${rank?.pages}")
+        }
 
-        // 显式写了 pages 仍以配置为准
+        // 云端的旧页数不能绕过尚未证实的分页协议。
         val cfg2 = """{"version":1,"ranks":[{"key":"q","kind":"qidian","board":"yuepiaolist","name":"起点","pages":3}]}"""
-        check("显式 pages:3 生效",
-            RankConfig.parseVersioned(cfg2).second.firstOrNull()?.pages == 3, "被缺省值盖掉")
+        check("起点显式 pages:3 仍归零",
+            RankConfig.parseVersioned(cfg2).second.firstOrNull()?.pages == 0, "旧配置启用了伪分页")
+
+        val boards = setOf("yuepiao", "hotsales", "readindex", "newfans", "rec", "update",
+            "sign", "newbook", "newauthor")
+        check("起点官网九榜完整", RankConfig.QIDIAN_BOARDS.map { it.first }.toSet() == boards,
+            RankConfig.QIDIAN_BOARDS.toString())
+        val canonicalCfg = """{"ranks":[""" + boards.joinToString(",") {
+            """{"key":"qd:$it","kind":"qidian","board":"$it","pages":10}"""
+        } + "]}"
+        val canonical = RankConfig.parse(canonicalCfg)
+        check("九榜配置均保留且合法", canonical.size == boards.size &&
+            canonical.all { it.kind == RankConfig.Kind.QIDIAN && it.site == RankConfig.Site.QIDIAN &&
+                it.board in boards && it.name.isNotBlank() && it.pages == 0 }, canonical.toString())
+        val builtin = RankConfig.BUILTIN.filter { it.kind == RankConfig.Kind.QIDIAN }
+        check("内置起点榜键唯一", builtin.map { it.key }.distinct().size == builtin.size)
+        for (gender in RankConfig.Gender.values()) {
+            val channel = builtin.filter { it.gender == gender }
+            check("$gender 内置九榜完整且不可翻页", channel.size == boards.size &&
+                channel.map { it.board }.toSet() == boards && channel.all {
+                    it.site == RankConfig.Site.QIDIAN && it.gendered && it.pages == 0
+                }, channel.toString())
+        }
+        val rank = canonical.first { it.board == "yuepiao" }
+        // page=2 应在请求前拒绝；deadline=0 防止回归时意外发起真实请求。
+        val page2 = runCatching { RankSource.fetch(rank, "male", 2, deadline = 0) }
+        check("统一入口不支持起点第 2 页", page2.exceptionOrNull() is IllegalArgumentException &&
+            page2.exceptionOrNull()?.message?.contains("分页") == true, page2.exceptionOrNull().toString())
+        val legacyPage2 = runCatching { RankSource.qidian("yuepiaolist", "male", 2, deadline = 0) }
+        check("旧入口不支持起点第 2 页", legacyPage2.exceptionOrNull() is IllegalArgumentException &&
+            legacyPage2.exceptionOrNull()?.message?.contains("分页") == true,
+            legacyPage2.exceptionOrNull().toString())
     }
 
     // ── S15：导入的大小与深度上限 ──

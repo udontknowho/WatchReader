@@ -18,7 +18,8 @@ fun main() {
     check("三条全解析", ok.size == 3, "实际 ${ok.size}")
     check("名字正确", ok[1].name == "番茄某榜")
     check("页码正确", ok[1].pages == 5)
-    check("起点 board 带上", ok[2].board == "yuepiaolist")
+    check("旧 board 归一为页面路径", ok[2].board == "yuepiao")
+    check("起点不接受云端伪分页", ok[2].pages == 0)
     check("gendered 读成 true", ok[2].gendered)
 
     println("[RankConfig] 非法项要被拒（远程不能塞新逻辑）")
@@ -61,13 +62,13 @@ fun main() {
         "实际 ${fq.count { it.gender == RankConfig.Gender.FEMALE }}")
     // 2026-11-03：起点 5 个 board 各建男女两条（`qd:<board>` / `qd:female:<board>`），
     // 共 10 条。男频老键名不变 —— 存档与云端 ranks.json 里已经有它们。
-    check("起点男女频各 5 个榜",
-        RankConfig.BUILTIN.count { it.site == RankConfig.Site.QIDIAN } == 10,
+    check("起点男女频各 9 个榜",
+        RankConfig.BUILTIN.count { it.site == RankConfig.Site.QIDIAN } == 18,
         "实际 ${RankConfig.BUILTIN.count { it.site == RankConfig.Site.QIDIAN }}")
     check("起点男频沿用老键",
-        RankConfig.BUILTIN.any { it.key == "qd:yuepiaolist" && it.gender == RankConfig.Gender.MALE })
+        RankConfig.BUILTIN.any { it.key == "qd:yuepiao" && it.gender == RankConfig.Gender.MALE })
     check("起点女频另立键",
-        RankConfig.BUILTIN.any { it.key == "qd:female:yuepiaolist" &&
+        RankConfig.BUILTIN.any { it.key == "qd:female:yuepiao" &&
             it.gender == RankConfig.Gender.FEMALE })
     check("key 不重复", RankConfig.BUILTIN.map { it.key }.toSet().size == RankConfig.BUILTIN.size)
     // 新书榜已移除。这条守着「别哪天又加回来」。

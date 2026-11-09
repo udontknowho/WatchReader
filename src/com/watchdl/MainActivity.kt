@@ -16,6 +16,7 @@ import android.widget.*
 import com.watchdl.core.*
 import com.watchdl.ui.book.showDetail
 import com.watchdl.ui.handleTabSwipe
+import com.watchdl.ui.download.*
 import com.watchdl.ui.book.showSwap
 import com.watchdl.ui.my.showMy
 import com.watchdl.ui.my.showAbout
@@ -143,7 +144,8 @@ class MainActivity : Activity() {
     /** 当前屏是不是底栏的三个根屏（书架 / 发现目录 / 我的）。 */
     internal fun isRootTabScreen(): Boolean = when (val s = screen) {
         Screen.Shelf, Screen.My -> true
-        is Screen.Discover -> s.rankKey.isEmpty()
+        is Screen.Discover -> s.stage == "sites"
+        is Screen.Settings -> s.page == DOWNLOAD_PAGE
         else -> false
     }
 
@@ -175,6 +177,9 @@ class MainActivity : Activity() {
         }
         cancelReturnScroll?.invoke()
         pendingReturnPoint = null
+        if (!replayingReturn && next is Screen.Reader && screen !is Screen.Reader && screen !is Screen.ReaderSettings)
+            rememberReturn()
+        if (!replayingReturn && next is Screen.Progress && screen !is Screen.Progress) rememberReturn()
         // 书架阅读页的顶栏直接 showShelf，不经过 goBackToPrevious。
         val shelfReturn = if (next == Screen.Shelf && returnStack.lastOrNull()?.screen == next)
             returnStack.removeLast() else null
@@ -294,7 +299,9 @@ class MainActivity : Activity() {
         // 同一屏不要重复压：重复调用会让返回要按两次才动。
         val body = (0 until root.childCount).map { root.getChildAt(it) }
             .filterIsInstance<ScrollView>().firstOrNull()
-        returnStack.remember(ReturnPoint(screen, body?.scrollY ?: 0, hitsWinStart, tocWinStart))
+        val saved = if (screen is Screen.Discover)
+            (screen as Screen.Discover).copy(scrollY = body?.scrollY ?: 0) else screen
+        returnStack.remember(ReturnPoint(saved, body?.scrollY ?: 0, hitsWinStart, tocWinStart))
     }
 
     /** 回到进来的那一屏；没有记录就回首页。 */
@@ -317,11 +324,8 @@ class MainActivity : Activity() {
             is Screen.Market -> showMarket(s.page, s.hits)
             is Screen.Sources -> showSources()
             is Screen.Progress -> showProgress(s.info)
-            // 发现页返回时**清空旧数据**重新拉：榜单是时效内容，
-            // 隔几分钟回来还显示旧列表，用户看不出它已过期。
-            // rankKey 空串是目录页，非空是内容页 —— 重放时按同一个 key 回到那一屏。
-            is Screen.Discover -> showDiscover(s.rankKey)
-            is Screen.Settings -> showSettings(s.page)
+            is Screen.Discover -> showDiscoverSnapshot(s)
+            is Screen.Settings -> if (s.page == DOWNLOAD_PAGE) showDownloads() else showSettings(s.page)
             is Screen.Marks -> showMarks(s.info)
             Screen.MarksAll -> showAllMarks()
             Screen.Records -> showRecords()
@@ -332,6 +336,7 @@ class MainActivity : Activity() {
             Screen.About -> showAbout()
             is Screen.Swap -> showSwap(s.info, s.src)
             Screen.Shelf -> showShelf()
+            Screen.My -> showSettingsRoot()
             is Screen.Detail -> showDetail(s.info, s.src)
             else -> showShelf()
         }
@@ -497,6 +502,8 @@ class MainActivity : Activity() {
         if (prevIndex != index) e.putInt("off_$tag", 0)
         // commit 而非 apply：进程被杀时 apply 的异步写入可能还没落盘。
         e.commit()
+        runCatching { ReadingHistory.record(filesDir, bookId, index) }
+            .onFailure { DevLog.log("History", "阅读记录保存失败：${it.message}") }
     }
 
     /** 历史包袱：分节版本用过 `章号 * 1000 + 节号`，只用来识别并还原旧值。 */
@@ -582,6 +589,8 @@ class MainActivity : Activity() {
         if (DevLog.enabled) watchFrames()
         root = Widgets.screenRoot(this)
         setContentView(root)
+        runCatching { ensureShelfMigration() }
+            .onFailure { toast("收藏迁移失败：${it.message}") }
         cleanDirtyJobs()
         ensureNotifyPermission()
         // S19：进程被回收后重建时回到原来那一屏，别让用户重搜书名。
@@ -685,6 +694,11 @@ class MainActivity : Activity() {
             // 「已导入，回书架能看到」，去书架找不到，反手再导一遍。
             if (isGone()) return@runOnUiThread
             res.onSuccess {
+                runCatching {
+                    Downloader.restoreLight(jobsStore(), it.bookId)?.let { job ->
+                        shelfStore().add(BookInfo(job.bookId, job.name, job.author, job.chapters), "本地")
+                    }
+                }.onFailure { e -> toast("收藏失败：${e.message}") }
                 toast("已导入《${it.name}》（${it.format}）${it.chapters} 章")
                 // 还在书架就重画；已经走开了只提示一句，回来刷新时能看到。
                 if (screenId(screen) == screenId(Screen.Shelf)) showShelf(keepScroll = true)
@@ -843,6 +857,8 @@ class MainActivity : Activity() {
             // 倒序时同一个章号在显示顺序里的位置是镜像的，不能直接拿章号当滑动位置。
             tocWinStart = (tocPos(info, readProgress(info.bookId)) - TOC_WINDOW / 2).coerceAtLeast(0)
         }
+        if (shelfStore().contains(info.bookId)) runCatching { shelfStore().add(info) }
+            .onFailure { DevLog.log("Shelf", "更新收藏目录失败：${it.message}") }
         setScreen(Screen.Toc(info, useSrc))
         // 换源成功后回到原来那一章：loadToc → showToc 两步都拿不到章号，只能靠标题找回。
         val wantTitle = ReaderUi.swapReturnTitle
@@ -1075,8 +1091,11 @@ class MainActivity : Activity() {
         setScreen(Screen.Progress(info))
         if (same) { refreshProgressLive(); return }
         progressNum = null
+        val snapshot = Downloader.restoreLight(jobsStore(), info.bookId)
+        progressDone = snapshot?.count(ChapterStatus.DONE) ?: 0
+        progressFailed = snapshot?.count(ChapterStatus.FAILED) ?: 0
         root.removeAllViews()
-        root.addView(Widgets.topBar(this, "下载中", onBack = { showToc(info) }))
+        root.addView(Widgets.topBar(this, "任务详情", onBack = { goBackToPrevious() }))
 
         val body = Widgets.scrollBody(this, crownStep, crownGlide)
         val col = Widgets.contentColumn(body)
@@ -1097,7 +1116,7 @@ class MainActivity : Activity() {
         // shortcut: 进度屏首次进入时在主线程完整读一次，用来列出失败章。
         // 按章数线性增长：167 章实测 10.6 ms，3000 章约 190 ms（超一帧）。
         // 真要治得把失败章列表挪进后台线程或单独存文件，等有 3000 章的真实抱怨再说。
-        val currentJob = Downloader.restore(jobsStore(), info.bookId)
+        val currentJob = Downloader.restoreLight(jobsStore(), info.bookId)
         if (currentJob?.failedIndexes?.isNotEmpty() == true) {
             card.addView(Md3.text(this, "失败：" + currentJob.failedIndexes.take(5).joinToString { currentJob.chapters[it].title }, Md3.FS_SM, Md3.error))
         }
@@ -1165,6 +1184,9 @@ class MainActivity : Activity() {
      * 拉不到云端时用内置清单，所以发现页永远不会因此打不开。
      */
     internal var rankCache: List<RankConfig.Rank>? = null
+
+    /** 成员入口统一接管旧 source 扩展入口，页面实现在 search/SearchScreen.kt。 */
+    internal fun showDiscover(rankKey: String = "") = showDiscoverPage(rankKey)
 
     /**
      * 云端刷新**成功过**就不再重复问镜像。
@@ -1330,15 +1352,17 @@ class MainActivity : Activity() {
 
         setScreen(Screen.Toc(BookInfo(bookId, name, author, emptyList())))
         root.removeAllViews()
-        root.addView(Widgets.topBar(this, name, onBack = { showShelf() }))
+        root.addView(Widgets.topBar(this, name, onBack = { goBackToPrevious() }))
         val body = Widgets.scrollBody(this, crownStep, crownGlide)
         (Widgets.contentColumn(body)).addView(Widgets.emptyState(this, "⏳", "正在取目录…"))
         root.addView(body)
 
         val owner: Screen = Screen.Toc(BookInfo(bookId, name, author, emptyList()))
-        bg(owner, { source.toc(bookId, name, author) }) { res ->
-            res.onSuccess { showToc(it, source) }
-                .onFailure { toast("目录失败：${it.message}"); showShelf() }
+        val resolved = sourceForBook(bookId)
+        if (resolved == null) { toast("原书源不可用，请从详情换源"); goBackToPrevious(); return }
+        bg(owner, { resolved.toc(bookId, name, author) }) { res ->
+            res.onSuccess { showToc(it, resolved) }
+                .onFailure { toast("目录失败：${it.message}"); goBackToPrevious() }
         }
     }
 
@@ -1917,9 +1941,10 @@ class MainActivity : Activity() {
                     // 结束时书架上的进度数字要变成最终值。
                     if (info != null) showToc(info)
                     else if (screen is Screen.Shelf) showShelf()
+                    else if (isDownloadsScreen()) showDownloads(keepScroll = true)
                 } else if (info != null) {
                     showProgress(info)
-                }
+                } else if (isDownloadsScreen()) showDownloads(keepScroll = true)
             }.onFailure { e ->
                 DevLog.log("WatchDL", "进度刷新失败（已忽略）：${e.message}")
             }
@@ -2022,9 +2047,10 @@ class MainActivity : Activity() {
             is Screen.Market -> showMarket(s.page, s.hits)
             is Screen.Sources -> showSources()
             is Screen.Progress -> showProgress(s.info)
-            is Screen.Settings -> showSettings(s.page)
-            // 配置变更重建**不刷新**：这里只是重画，联网会让旋转/展开后卡一下。
-            is Screen.Discover -> showDiscover(s.rankKey)
+            is Screen.Settings -> if (s.page == DOWNLOAD_PAGE) showDownloads() else showSettings(s.page)
+            // 配置变更只重绘快照，不刷新。
+            is Screen.Discover -> showDiscoverSnapshot(s.copy(scrollY =
+                Widgets.firstScroll(root)?.scrollY ?: s.scrollY))
             Screen.Shelf -> showShelf()
             is Screen.Marks -> showMarks(s.info)
             Screen.MarksAll -> showAllMarks()
@@ -2035,7 +2061,7 @@ class MainActivity : Activity() {
             Screen.Logs -> showLogs()
             Screen.About -> showAbout()
             is Screen.Swap -> showSwap(s.info, s.src)
-            Screen.My -> showMy()
+            Screen.My -> showSettingsRoot()
             is Screen.Detail -> showDetail(s.info, s.src)
         }
     }
@@ -2046,29 +2072,37 @@ class MainActivity : Activity() {
             Screen.Shelf -> super.onBackPressed()
             // 另外两栏按返回回书架栏，不退出 —— 手势返回在手表上很容易误触。
             // 榜的内容页先退回榜单目录，不一步跳到底栏。
-            is Screen.Discover -> if (s.rankKey.isBlank()) showShelf() else showDiscover()
+            is Screen.Discover -> backFromDiscover(s)
             Screen.My -> showShelf()
             is Screen.Toc -> goBackToPrevious()
             is Screen.Hits -> goBackToPrevious()
             // 菜单是浮层不是新的一屏：展开时先收菜单，收起时再回目录。
-            is Screen.Reader -> if (!ReaderMenu.consumeBack()) showToc(s.info)
+            is Screen.Reader -> if (!ReaderMenu.consumeBack()) returnFromReader(s.info)
             // 设置页是一屏，不是浮层：返回直接回阅读页（设置已即时生效，不必再确认）。
             is Screen.ReaderSettings -> showReader(s.info, s.index, s.text, s.src)
             is Screen.Sources -> goBackToPrevious()
             is Screen.Market -> showSources()
-            is Screen.Progress -> showToc(s.info)
-            is Screen.Settings -> goBackToPrevious()
+            is Screen.Progress -> goBackToPrevious()
+            is Screen.Settings -> if (s.page == DOWNLOAD_PAGE) showShelf() else goBackToPrevious()
             is Screen.Marks -> showToc(s.info)
-            Screen.MarksAll -> showMy()
-            Screen.Records -> showMy()
-            Screen.Cache -> showMy()
-            Screen.Files -> showMy()
-            Screen.Replace -> showMy()
-            Screen.Logs -> showMy()
-            Screen.About -> showMy()
+            Screen.MarksAll -> showSettingsRoot()
+            Screen.Records -> showSettingsRoot()
+            Screen.Cache -> showSettingsRoot()
+            Screen.Files -> showSettingsRoot()
+            Screen.Replace -> showSettingsRoot()
+            Screen.Logs -> showSettingsRoot()
+            Screen.About -> showSettingsRoot()
             is Screen.Swap -> goBackToPrevious()
             is Screen.Detail -> goBackToPrevious()
         }
+    }
+
+    /** 正文出口共用真实进入栈；翻章不会覆盖这个落点。 */
+    internal fun returnFromReader(info: BookInfo) {
+        ReaderUi.fromShelf = false
+        val previous = returnStack.lastOrNull()?.screen
+        if (previous != null && previous !is Screen.Reader) goBackToPrevious()
+        else showToc(info)
     }
 
     // ══════════════════ 存储 ══════════════════

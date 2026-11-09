@@ -1,6 +1,5 @@
 package com.watchdl.core
 
-import java.net.URLEncoder
 
 /**
  * 榜单取数：番茄推荐榜、起点月票榜/畅销榜。
@@ -34,12 +33,16 @@ object RankSource {
         deadline: Long = System.currentTimeMillis() + PAGE_BUDGET_MS,
         /** 字体还原器，只有番茄分类榜用得上；其它榜忽略。 */
         decoder: CharsetFontDecoder? = null,
+        filter: RankConfig.QidianFilter = RankConfig.QidianFilter(),
     ): List<BookHit> = when (rank.kind) {
         RankConfig.Kind.FANQIE -> fanqie(deadline)
         RankConfig.Kind.FANQIE_UPDATE -> fanqieUpdate(page, deadline)
         // 番茄分类 ID 男女频不通用，以榜单自身绑定的频道为准，不信调用方传的值。
         RankConfig.Kind.FANQIE_RANK -> fanqieRank(rank, deadline, decoder)
-        RankConfig.Kind.QIDIAN -> qidian(rank.board, gender, page, deadline)
+        RankConfig.Kind.QIDIAN -> {
+            require(page == 1) { "起点后续分页尚未确认，不把周期尾段当页码" }
+            qidian(rank, filter, deadline).books
+        }
     }
 
     /**
@@ -189,64 +192,87 @@ object RankSource {
     }
 
     // ── 起点 ──────────────────────────────────────────────
-    /**
-     * 起点榜单。[board] 取 [QIDIAN_BOARDS] 的代号，[gender] 是 `male`/`female`，[page] 从 1 起。
-     *
-     * 必须走 `m.qidian.com`：`www.qidian.com` 有 WAF，回 HTTP 202 + 挑战脚本，取不到数据。
-     * `majax` 接口要 `_csrfToken`，值从榜单页的 Set-Cookie 拿，且要和 cookie 一起发。
-     */
-    fun qidian(
-        board: String,
-        gender: String,
-        page: Int,
-        deadline: Long = System.currentTimeMillis() + PAGE_BUDGET_MS,
-    ): List<BookHit> = retry(deadline) {
-        val url = "https://m.qidian.com/majax/rank/$board" +
-            "?gender=$gender&pageNum=$page&_csrfToken=" + enc(token())
-        val body = Http.fetch(
-            url, "GET", null,
-            mapOf(
-                "Cookie" to "_csrfToken=${token()}",
-                "Accept" to "application/json, text/plain, */*",
-            ),
-            referer = "https://m.qidian.com/rank/yuepiao", timeoutMs = left(deadline),
-        ).body
-        // S18：同上。起点用 bid。
-        val ids = TinyJson.arrayFieldOrThrow(body, "data.records", "bid")
-            ?: error("起点榜接口字段变了（缺 data.records）")
-        val names = TinyJson.arrayField(body, "data.records", "bName")
-        val authors = TinyJson.arrayField(body, "data.records", "bAuth")
-        val abstracts = TinyJson.arrayField(body, "data.records", "desc")
-        ids.mapIndexed { i, id ->
-            BookHit(
-                bookId = id,
-                name = names.getOrNull(i) ?: "",
-                author = authors.getOrNull(i) ?: "",
-                abstractText = abstracts.getOrNull(i) ?: "",
-                sourceName = "起点",
-            )
-        }.filter { it.name.isNotBlank() }
+    private const val QIDIAN_UA =
+        "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36"
+
+    /** total/isLast 仅用于展示原站元数据。canLoadMore 不从它们推断。 */
+    data class QidianPage(
+        val books: List<BookHit>,
+        val total: Int?,
+        val isLast: Boolean?,
+        val url: String,
+        val canLoadMore: Boolean = false,
+    )
+    class RankAccessException(message: String) : IllegalStateException(message)
+
+    /** 只构造已确认的筛选路径。女频是独立站点，不是假造 gender 参数。 */
+    fun qidianUrl(rank: RankConfig.Rank, filter: RankConfig.QidianFilter = RankConfig.QidianFilter()): String {
+        RankConfig.validateQidianFilter(rank, filter)
+        val host = if (rank.gender == RankConfig.Gender.FEMALE) "m.qdmm.com" else "m.qidian.com"
+        val board = RankConfig.qidianBoard(rank.board)!!
+        val suffix = when {
+            rank.gender == RankConfig.Gender.MALE && board == "readindex" -> "catid${filter.categoryId}/"
+            rank.gender == RankConfig.Gender.MALE && board == "newfans" ->
+                "catid${filter.categoryId}/${filter.period.path}/"
+            else -> ""
+        }
+        return "https://$host/rank/$board/$suffix"
     }
 
-    /** 起点的 csrf token。一年有效，进程内缓存一次就够。 */
-    @Volatile
-    private var cachedToken: String? = null
+    /** 首批页面 SSR，不请求未证实的 majax 分页接口，不自动重试 WAF。 */
+    fun qidian(
+        rank: RankConfig.Rank,
+        filter: RankConfig.QidianFilter = RankConfig.QidianFilter(),
+        deadline: Long = System.currentTimeMillis() + PAGE_BUDGET_MS,
+    ): QidianPage {
+        val url = qidianUrl(rank, filter)
+        val remaining = (deadline - System.currentTimeMillis()).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        require(remaining > 0) { "起点榜请求预算已用完" }
+        val raw = Http.fetchRaw(url, "GET", null, null,
+            mapOf("Accept" to "text/html", "Referer" to "https://m.qidian.com/rank"),
+            QIDIAN_UA, timeoutMs = remaining)
+        return parseQidianPage(String(raw.bytes, Charsets.UTF_8), url)
+    }
 
-    private fun token(): String {
-        cachedToken?.let { return it }
-        val raw = Http.fetchRaw(
-            "https://m.qidian.com/rank/yuepiao", "GET", null, null,
-            emptyMap(), UA, timeoutMs = 20_000,
-        )
-        // HttpURLConnection 把多个 Set-Cookie 折叠成一个逗号分隔的值，
-        // 而 cookie 的 Expires 属性本身带逗号（"Mon, 18-Oct-2027"），
-        // 所以不能按逗号切 —— 用正则直接找 _csrfToken 的值。
-        val t = Regex("_csrfToken=([^;,\\s]+)")
-            .find(raw.headers["set-cookie"].orEmpty())
-            ?.groupValues?.get(1)
-        require(!t.isNullOrEmpty()) { "起点没下发 _csrfToken" }
-        cachedToken = t
-        return t
+    /** 保留旧调用接口，但不继续伪造第 2 页及以后。 */
+    fun qidian(board: String, gender: String, page: Int,
+        deadline: Long = System.currentTimeMillis() + PAGE_BUDGET_MS): List<BookHit> {
+        require(page == 1) { "起点后续分页尚未确认" }
+        require(gender == "male" || gender == "female") { "未知起点频道" }
+        val rank = RankConfig.Rank("qd:$board", "起点", RankConfig.Kind.QIDIAN,
+            site = RankConfig.Site.QIDIAN, board = board,
+            gender = if (gender == "female") RankConfig.Gender.FEMALE else RankConfig.Gender.MALE)
+        return qidian(rank, deadline = deadline).books
+    }
+
+    /** 按每条记录作用域取字段，缺作者不会导致后续书目字段错位。 */
+    fun parseQidianPage(html: String, url: String = ""): QidianPage {
+        // 正常页面也含 x-waf-captcha-referer 通用脚本，不能仅凭 captcha 字样拦截。
+        val json = Regex("<script\\b[^>]*\\bid=[\"']vite-plugin-ssr_pageContext[\"'][^>]*>([\\s\\S]*?)</script>")
+            .find(html)?.groupValues?.get(1)
+            ?: throw RankAccessException(
+                if (Regex("WAF拦截|访问受限|访问验证|安全验证|captcha", RegexOption.IGNORE_CASE)
+                        .containsMatchIn(html)) "起点访问受限，请稍后重试或切换网络"
+                else "起点页面未返回榜单数据，可能访问受限或页面结构变更")
+        val context = TinyJson.field(json, "pageContext") ?: error("起点页面缺 pageContext")
+        val props = TinyJson.field(context, "pageProps") ?: error("起点页面缺 pageProps")
+        val data = TinyJson.field(props, "pageData") ?: error("起点页面缺 pageData")
+        val records = TinyJson.field(data, "records") ?: error("起点页面缺 records，不作为空榜处理")
+        require(records.trimStart().startsWith("[") && records.trimEnd().endsWith("]")) { "起点 records 格式错误" }
+        val items = TinyJson.objectItems(records)
+        require(records.trim() == "[]" || items.isNotEmpty()) { "起点 records 不是记录数组" }
+        val books = items.map { record ->
+            val id = TinyJson.path(record, "bid")?.takeIf { it.isNotBlank() }
+                ?: error("起点榜记录缺 bid")
+            val name = TinyJson.path(record, "bName")?.takeIf { it.isNotBlank() }
+                ?: error("起点榜记录缺 bName")
+            BookHit(bookId = id, name = name, author = TinyJson.path(record, "bAuth").orEmpty(),
+                abstractText = TinyJson.path(record, "desc").orEmpty(), sourceName = "起点",
+                extra = listOfNotNull(TinyJson.path(record, "cat"), TinyJson.path(record, "cnt"),
+                    TinyJson.path(record, "rankCnt")).filter { it.isNotBlank() }.joinToString(" · "))
+        }
+        return QidianPage(books, TinyJson.path(data, "total")?.toIntOrNull(),
+            when (TinyJson.path(data, "isLast")) { "1", "true" -> true; "0", "false" -> false; else -> null }, url)
     }
 
     // ── 小工具 ────────────────────────────────────────────
@@ -270,7 +296,6 @@ object RankSource {
                 if (r.isNotEmpty()) return r
             } catch (e: Exception) {
                 last = e
-                cachedToken = null
             }
             val wait = minOf(600L * (i + 1), (left(deadline) - 500).coerceAtLeast(0).toLong())
             if (i < times - 1 && wait > 0) Thread.sleep(wait)
@@ -283,5 +308,4 @@ object RankSource {
     private fun left(deadline: Long): Int =
         (deadline - System.currentTimeMillis()).coerceAtLeast(1_000L).toInt()
 
-    private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
 }

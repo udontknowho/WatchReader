@@ -153,7 +153,7 @@ private fun MainActivity.settingsTheme(col: LinearLayout) {
         g.addView(Widgets.groupItem(
             ctx = this,
             title = "恢复默认",
-            subtitle = "配色回到默认的紫。阅读设置、书架排序都不动。",
+            subtitle = "恢复墨绿书页。保留阅读设置与书架排序。",
             onClick = { askResetPalette() },
         ))
     })
@@ -163,7 +163,7 @@ private fun MainActivity.settingsTheme(col: LinearLayout) {
 private fun MainActivity.askResetPalette() {
     Widgets.md3Dialog(
         this, "恢复默认配色",
-        body = "配色回到默认的紫。阅读设置、书架排序都不动。",
+        body = "应用配色恢复为墨绿书页，不改阅读排版与书架排序。",
         confirm = "恢复",
         onConfirm = {
             pickTheme(Palette.DEFAULT_ID)

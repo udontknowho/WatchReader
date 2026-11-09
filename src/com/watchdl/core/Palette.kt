@@ -37,9 +37,20 @@ class Palette(
     companion object {
 
         /** 默认色。紫，与原写死的 MD3 基线色最接近。 */
-        const val DEFAULT_ID = "yuuka"
+        const val DEFAULT_ID = "inkgreen"
 
         val all: List<Palette> = listOf(
+            Palette(
+                id = "inkgreen", name = "墨绿书页",
+                primary = 0xFFB6E1C8.toInt(), onPrimary = 0xFF14251C.toInt(),
+                primaryContainer = 0xFF294B39.toInt(), onPrimaryContainer = 0xFFD5F2DF.toInt(),
+                secondaryContainer = 0xFF303F35.toInt(), onSecondaryContainer = 0xFFD9E8DD.toInt(),
+                surface = 0xFF131A17.toInt(), surface1 = 0xFF19231D.toInt(), surface2 = 0xFF1D2721.toInt(),
+                surface3 = 0xFF202C25.toInt(), surface4 = 0xFF2D3B32.toInt(),
+                onSurface = 0xFFEDF1EC.toInt(), onSurfaceVariant = 0xFFA5B8AC.toInt(),
+                outline = 0xFF81998A.toInt(), outlineVariant = 0xFF3E5448.toInt(),
+                error = 0xFFEFB5A6.toInt(),
+            ),
             Palette(
                 id = "yuuka", name = "紫",
                 primary = 0xFFBFC2FF.toInt(), onPrimary = 0xFF272B60.toInt(),

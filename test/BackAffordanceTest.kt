@@ -1,5 +1,5 @@
 /**
- * 每一屏都必须自带回退按钮 —— 除了底栏那三个根屏。
+ * 每一屏都必须自带回退按钮 —— 除了底栏四个根屏。
  *
  * 这块表没有实体返回键，也没有手势导航栏 —— 屏上不画「←」就等于死路，
  * 用户只能长按手表按钮杀进程。所以把「新增一屏忘了画返回」变成一条自检，
@@ -7,7 +7,7 @@
  *
  * 2026-11-01 起分两类：
  * - **子屏**用 `Widgets.topBar(...)`，必须传 `onBack = {`。
- * - **根屏**（底栏三栏：书架 / 发现 / 我的）用 `Widgets.headerRow(...)`，不挂返回 ——
+ * - **根屏**（底栏四栏：发现 / 书架 / 下载 / 设置）用 `Widgets.headerRow(...)`，不挂返回 ——
  *   它们是平级入口，靠底栏互相切换，给返回箭头等于暗示「上一步」存在，是错的。
  *
  * 判据仍是源码文本：扫调用点，不跑 Activity。
@@ -50,12 +50,12 @@ fun main() {
     check("子屏调用点还在（≥12）", topBars >= 12, "$topBars 处")
     check("每屏都有返回", dead.isEmpty(), dead.joinToString(", "))
 
-    // 三个根屏：必须是 headerRow，且不得再挂 topBar（那会带出返回箭头）。
+    // 四个根屏：必须有 headerRow，且不得挂 topBar（那会带出返回箭头）。
     println("[Back] 根屏")
     val roots = listOf(
         "src/com/watchdl/ui/shelf/ShelfScreen.kt",
         "src/com/watchdl/ui/source/SourceScreen.kt",
-        "src/com/watchdl/ui/my/MyScreen.kt",
+        "src/com/watchdl/ui/download/DownloadScreen.kt",
     )
     for (path in roots) {
         val f = File(path)
@@ -68,7 +68,7 @@ fun main() {
     check("书架有搜索入口", shelf.contains("askKeyword()"))
     check("书架有 ⋮ 菜单", shelf.contains("showShelfMenu()"))
 
-    // 根屏只允许这三个：把「新开一屏忘了给回路」卡在这里。
+    // 四个根入口分布在三个文件；下载与设置共用一个文件。
     check("发现页不挂返回", !File(roots[1]).let { p ->
         var from = 0; var hit = false
         val t = p.readText()
@@ -80,16 +80,23 @@ fun main() {
         }
         hit
     })
-    check("我的页不挂返回", !File(roots[2]).readText().contains("Widgets.topBar("))
+    val download = File(roots[2]).readText()
+    check("下载与设置根页不挂返回", !download.contains("Widgets.topBar("))
+    check("下载根页有头栏与对应底栏", download.contains("Widgets.headerRow(this, \"下载\"") &&
+        download.contains("attachTabs(2)"))
+    check("设置根页有头栏与对应底栏", download.contains("Widgets.headerRow(this, \"设置\"") &&
+        download.contains("attachTabs(3)"))
+    check("旧我的入口转到设置根页", File("src/com/watchdl/ui/my/MyScreen.kt")
+        .readText().contains("showMy() = showSettingsRoot()"))
 
-    // 底部三栏是三屏各自收尾挂上的：漏一屏，那屏就没有跨栏入口。
+    // 四个底部根入口分别挂底栏：漏一个，该屏就没有跨栏入口。
     for ((f, n) in listOf(
         roots[0] to 3,
         roots[1] to 2,
-        roots[2] to 1,
+        roots[2] to 2,
     )) {
         val c = File(f).readText().split("attachTabs(").size - 1
-        check("${File(f).name} 挂着底部三栏", c >= n, "$c 处，应 ≥$n")
+        check("${File(f).name} 挂着底部四栏", c >= n, "$c 处，应 ≥$n")
     }
 
     if (bad > 0) { println("\nBackAffordanceTest: $bad 项不通过"); kotlin.system.exitProcess(1) }

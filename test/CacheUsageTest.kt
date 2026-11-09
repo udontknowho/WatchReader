@@ -553,8 +553,11 @@ fun main() {
             replaceValidate("有名字", "  ") == "查找内容不能空" &&
                 replaceValidate(" ", "有模式") == "名称不能空")
         check("校验放过正常规则", replaceValidate("名", "模式") == null)
-        check("行的副标题写清正则与否和替换成什么",
-            replaceRowSubtitle(rules[1]) == "纯文本 · 正文+标题 · 替换为「[投票]」")
+        check("行的副标题写清正则与否、全局范围和替换成什么",
+            replaceRowSubtitle(rules[1]) == "纯文本 · 正文+标题 · 全局 · 替换为「[投票]」")
+        check("本书规则副标题不标成全局",
+            replaceRowSubtitle(ReplaceRule("本书", "广告", "", true, "text", true, "book-a")) ==
+                "正则 · 正文 · 本书 · 替换为空")
         check("空替换写成一个空字", replaceRowSubtitle(rules[0]).endsWith("替换为空"))
         check("顶栏统计夹住越界", replaceSubtitle(3, 5) == "3 条 · 启用 3 条" &&
             replaceSubtitle(-1, 0) == "0 条 · 启用 0 条")

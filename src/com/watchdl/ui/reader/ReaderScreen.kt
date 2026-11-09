@@ -17,7 +17,6 @@ import com.watchdl.core.*
 import com.watchdl.ui.book.showSwap
 import com.watchdl.ui.search.askText
 import com.watchdl.ui.theme.Icons
-import com.watchdl.ui.shelf.showShelf
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
 import java.io.File
@@ -129,6 +128,7 @@ internal object ReaderUi {
      * -1 表示没有这个落点。
      */
     var restoreChars = -1
+    var restoreDelta = 0
 
     /**
      * 正在显示的正文与标题。
@@ -155,8 +155,8 @@ internal object ReaderUi {
      * 拼接块只显示下一章开头，但整章已经在手上。换章时直接用这份，不再起线程读盘，
      * 换页的等待就只剩排版。内容取的是过完替换规则、没截头的全文（与 preview 同口径）。
      */
-    var openingKey = ""
-    var openingText = ""
+    data class Opening(val key: String, val text: String)
+    var opening: Opening? = null
 
     /** 换章前抓下的旧屏位图与滑动方向（1 顺读 / -1 回读）。 */
     var snap: Bitmap? = null
@@ -508,8 +508,8 @@ internal fun MainActivity.showReader(
     // legado 是窗口替换、邻页同屏绘制；这里一次性只装一章，章末剩三行时用户必须再戳一下。
     // 做法：正文 tv 之后接一条分隔线 + 下一章标题 + 下一章开头，滚到底才真跳章。
     var tvNext: TextView? = null
-    /** 实际塞进 tvNext 的字符数（按缩进后的串算，与下一章正文的偏移同一套）。 */
-    var spliceChars = 0
+    var chapterPending = false
+    var userMoved = false
     /** 本页的拼接世代号：回调里先比它，页面重建了就把旧结果丢掉。 */
     val spliceGen = ++ReaderUi.spliceGen
 
@@ -532,10 +532,15 @@ internal fun MainActivity.showReader(
      * 排在整章正文之后，拿它的绝对 y 到新页去落位会多出一个章的高度。
      * 未排版时退回 0：宁可让新页落回章首（最多重读一屏），也不按猜的行高乱定位。
      */
-    fun spliceReadChars(): Int {
-        val nx = tvNext ?: return 0
-        val layout = nx.layout ?: return 0
-        return spliceChars.coerceIn(0, layout.text.length)
+    fun spliceAnchor(advance: Int): ReaderPaging.Anchor? {
+        val nx = tvNext ?: return null
+        val layout = nx.layout ?: return null
+        val top = childTopIn(body, nx) + nx.paddingTop
+        val viewport = body.height - body.paddingTop - body.paddingBottom
+        val safeAdvance = advance.coerceIn(0, ReaderPaging.step(viewport, nx.lineHeight))
+        val desired = body.scrollY + body.paddingTop + safeAdvance
+        val line = layout.getLineForVertical((desired - top).coerceAtLeast(0))
+        return ReaderPaging.anchor(layout.getLineStart(line), desired, top, layout.getLineTop(line))
     }
 
     // ── 顶部状态条：时间 + 电量 ────────────────────────────
@@ -653,19 +658,47 @@ internal fun MainActivity.showReader(
      * 一屏 220 ms 里连点两下会叠出两层定格位图（且第一层的 withEndAction 会把第二层的层摘掉）。
      * 动画期间不再叠层，直接到位；动画结束复位。
      */
-    var coverBusy = false
+    var clearCover: (() -> Unit)? = null
+    fun cancelPageMotion() {
+        pageAnim?.cancel()
+        pageAnim = null
+        clearCover?.invoke()
+    }
+    fun cancelMotion() {
+        cancelPageMotion()
+        body.cancelCrownAnimation()
+    }
+    body.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+        override fun onViewAttachedToWindow(v: View) = Unit
+        override fun onViewDetachedFromWindow(v: View) { cancelMotion() }
+    })
 
     /** 往下滚到章末：有拼接块就把「读完处」当偏移带过去，没有就整章换。 */
-    fun toNext() {
-        // 先把这一屏抓下来：新页建好后要把它滑出去作过渡（[ReaderUi.takeSnap]）。
+    fun toNext(advance: Int) {
+        if (chapterPending) return
+        val next = (index + 1 until info.chapters.size).firstOrNull { !info.chapters[it].locked }
+        if (next == null) { ReaderAuto.stop(); toast("已是最后一章"); return }
+        cancelMotion()
+        chapterPending = true
+        ReaderUi.anchor = null
+        val resume = if (next == index + 1) spliceAnchor(advance) else null
+        if (resume != null) {
+            ReaderUi.restoreKey = "${info.bookId}#$next"
+            ReaderUi.restoreChars = resume.chars
+            ReaderUi.restoreDelta = resume.delta
+        }
         ReaderUi.capture?.invoke(1)
-        val resume = if (tvNext == null) 0 else spliceReadChars()
-        if (resume > 0) {
-            // 拼接块里已经读过的字，新页跳过：传字符偏移，由新页自己的版式换算行号。
-            ReaderUi.restoreKey = "${info.bookId}#${index + 1}"
-            ReaderUi.restoreChars = resume
-            preview(info, index + 1)
-        } else nextChapter(info, index)
+        preview(info, next)
+    }
+    fun toPrevious() {
+        if (chapterPending) return
+        if ((index - 1 downTo 0).none { !info.chapters[it].locked }) {
+            toast("已是第一章")
+            return
+        }
+        cancelMotion()
+        chapterPending = true
+        prevChapter(info, index, atEnd = true)
     }
 
     /**
@@ -678,12 +711,15 @@ internal fun MainActivity.showReader(
      * 落点再吸附到行顶，行号用落点所在那一块自己的 layout（两块版式相同，坐标独立）。
      */
     fun scrollPage(forward: Boolean) {
+        if (chapterPending || !body.isLaidOut) return
+        cancelMotion()
+        userMoved = true
         val limit = scrollLimit(body)
         val from = body.scrollY
-        // 先判边界：滚不动了才换章，不在章末之前抢跑。
-        if (forward && from >= limit) { toNext(); return }
-        if (!forward && from <= 0) { prevChapter(info, index, atEnd = true); return }
         val vp = (body.height - body.paddingTop - body.paddingBottom).coerceAtLeast(1)
+        val pageStep = ReaderPaging.step(vp, tv.lineHeight)
+        if (forward && from >= limit) { toNext(pageStep); return }
+        if (!forward && from <= 0) { toPrevious(); return }
 
         // 两块的行顶：控件在滚动内容里的顶边 + 自身 paddingTop，与章内查找同一套算法。
         val mainTop = childTopIn(body, tv) + tv.paddingTop
@@ -693,36 +729,22 @@ internal fun MainActivity.showReader(
         // 一屏减一行（legado 的「保留一行」）；一屏不足两行时至少走一行。
         val lineH = (if (nx != null && from >= nxTop) nx.lineHeight else tv.lineHeight)
             .coerceAtLeast(1)
-        val step = (vp - lineH).coerceAtLeast(lineH)
-        var target = (if (forward) from + step else from - step).coerceIn(0, limit)
-
-        // 吸附到行顶：用落点所在那一块自己的 layout，避免一行被切成两半。
-        val inNext = nx != null && target >= nxTop
-        val layout = if (inNext) nx?.layout else tv.layout
-        val top = if (inNext) nxTop else mainTop
-        if (layout != null && layout.lineCount > 0) {
-            val li = layout.getLineForVertical((target - top).coerceAtLeast(0))
-                .coerceIn(0, layout.lineCount - 1)
-            val snapped = (top + layout.getLineTop(li)).coerceIn(0, limit)
-            // 吸反方向（跨块时会落回当前位移之内）就保留原始步距。
-            if (forward && snapped > from) target = snapped
-            if (!forward && snapped < from) target = snapped
+        val step = ReaderPaging.step(vp, lineH)
+        val target = ReaderPaging.target(from, forward, step, limit) { raw ->
+            val inNext = nx != null && raw + body.paddingTop >= nxTop
+            val layout = if (inNext) nx?.layout else tv.layout
+            val top = if (inNext) nxTop else mainTop
+            if (layout == null || layout.lineCount == 0) raw else {
+                val li = layout.getLineForVertical((raw + body.paddingTop - top).coerceAtLeast(0))
+                top + layout.getLineTop(li) - body.paddingTop
+            }
         }
-        if (target == from) {
-            // 只剩不足一行可见：当作到边界。
-            if (forward) toNext() else prevChapter(info, index, atEnd = true)
-            return
-        }
+        if (target == from) return
         // 覆盖：先把当前屏定格成位图，正文瞬间滚到目标，再让定格的旧屏整体滑出，
         // 露出下面的新屏 —— 就是 legado 的「新一屏从下往上盖住旧的」。
         // 只影响章内翻屏；跳章（上面两个 return）不经过这里。
         if (ReaderUi.pageAnim == 1 && body.width > 0 && body.height > 0) {
             pageAnim?.cancel()
-            if (coverBusy) {
-                // 上一次覆盖还没走完：直接到位，不叠层。
-                body.scrollTo(0, target)
-                return
-            }
             val vh = body.height
             val snap = Bitmap.createBitmap(body.width, vh, Bitmap.Config.ARGB_8888)
             body.draw(Canvas(snap))
@@ -735,15 +757,19 @@ internal fun MainActivity.showReader(
             // 插在 body 之后（index 1）：压住正文，又不盖住后面建的菜单浮层。
             frame.addView(iv, 1,
                 FrameLayout.LayoutParams(body.width, vh, Gravity.TOP))
-            coverBusy = true
+            val cleanup = {
+                iv.animate().cancel()
+                (iv.parent as? ViewGroup)?.removeView(iv)
+                if (!snap.isRecycled) snap.recycle()
+                clearCover = null
+            }
+            clearCover = cleanup
             iv.animate().translationY((if (forward) -vh else vh).toFloat())
                 .setDuration(COVER_MS)
                 .setInterpolator(android.view.animation.LinearInterpolator())
                 .withEndAction {
                     // 连点或换页可能已经把它摘了：判空再摘，不重复回收位图。
-                    (iv.parent as? ViewGroup)?.removeView(iv)
-                    snap.recycle()
-                    coverBusy = false
+                    cleanup()
                 }.start()
             return
         }
@@ -772,8 +798,11 @@ internal fun MainActivity.showReader(
         val r = object : Runnable {
             override fun run() {
                 if (!ReaderAuto.on || !body.isAttachedToWindow) { ReaderAuto.stop(); return }
+                if (ReaderMenu.open) return
                 scrollPage(true)
-                ReaderAuto.MAIN.postDelayed(this, ReaderAuto.sec * 1000L)
+                if (ReaderAuto.handle === this && ReaderAuto.on && !chapterPending) {
+                    ReaderAuto.MAIN.postDelayed(this, ReaderAuto.sec * 1000L)
+                }
             }
         }
         ReaderAuto.handle = r
@@ -794,7 +823,22 @@ internal fun MainActivity.showReader(
             return true
         }
     })
+    body.onInputStart = {
+        userMoved = true
+        cancelPageMotion()
+        ReaderAuto.cancel()
+        if (!ReaderMenu.open && ReaderAuto.on) scheduleAuto()
+    }
+    body.onBoundary = { forward, distance ->
+        if (!ReaderMenu.open && !chapterPending && body.isLaidOut) {
+            if (forward) toNext(distance) else toPrevious()
+        }
+    }
     body.setOnTouchListener { _, e ->
+        if (e.actionMasked == MotionEvent.ACTION_DOWN) {
+            cancelMotion()
+            ReaderAuto.cancel()
+        }
         taps.onTouchEvent(e)
         // 返回 false：事件继续交给 ScrollView，滚动、表冠、长按都不受影响。
         false
@@ -822,16 +866,7 @@ internal fun MainActivity.showReader(
     // = 返回 32 + 书名约 45 + 刷新 28 + 换源 28 + ⋮ 48；书名只剩两字多，
     // 所以 14 sp 单行 ellipsize。
     val bar = Widgets.topBar(this, info.name, onBack = {
-        if (ReaderUi.fromShelf) {
-            // 书架点进来的，返回就回书架：legado 里阅读页是从书架直接推上来的，
-            // 退出去还是书架，中间不该凭空多一层目录。
-            ReaderUi.fromShelf = false
-            showShelf()
-        } else {
-            // 去目录挑章之前先记下当前位置，回来时才有「返回刚才那章」。
-            markAnchor(info, index)
-            showToc(info)
-        }
+        returnFromReader(info)
     }, subtitle = subLine)
     bar.setBackgroundColor(readerBackground)
     if (light) Widgets.tintSubtree(bar, readerInk)
@@ -1176,7 +1211,7 @@ internal fun MainActivity.showReader(
         // 自动翻页在菜单展开时暂停、收起后继续（legado 浮动胶囊的 `!menuVisible` 条件同义）：
         // 一边看菜单一边被滑走，改设置就改不成了。只取消待跑的回调，不动用户开关。
         // 胶囊同理：菜单一开就撤掉，否则压在工具格上。
-        if (on) { clearPills(); ReaderAuto.cancel() } else if (ReaderAuto.on) scheduleAuto()
+        if (on) { cancelMotion(); clearPills(); ReaderAuto.cancel() } else if (ReaderAuto.on) scheduleAuto()
         menu.animate().cancel()
         topStack.animate().cancel()
         bottom.animate().cancel()
@@ -1223,10 +1258,12 @@ internal fun MainActivity.showReader(
     // 「返回刚才那章」胶囊回跳时位置是钉死的：落回当时那一屏，不是那一章上次读到的位置。
     val pinned = if (ReaderUi.restoreKey == findKey) ReaderUi.restoreAt else -1
     val pinnedChars = if (ReaderUi.restoreKey == findKey) ReaderUi.restoreChars else -1
+    val pinnedDelta = if (ReaderUi.restoreKey == findKey) ReaderUi.restoreDelta else 0
     if (ReaderUi.restoreKey == findKey) {
         ReaderUi.restoreKey = ""
         ReaderUi.restoreAt = -1
         ReaderUi.restoreChars = -1
+        ReaderUi.restoreDelta = 0
     }
     val restore = readOffset(info.bookId).takeIf { it > 0 }
     if (atEnd) {
@@ -1239,8 +1276,9 @@ internal fun MainActivity.showReader(
         // 旧页的像素坐标在这里没有意义（那个坐标里多着一整章正文）。
         placeBeforeDraw {
             val l = tv.layout
-            if (l == null) 0 else childTopIn(body, tv) + tv.paddingTop +
-                l.getLineTop(l.getLineForOffset(pinnedChars.coerceIn(0, l.text.length)))
+            if (l == null) 0 else ReaderPaging.restore(
+                ReaderPaging.Anchor(pinnedChars, pinnedDelta), childTopIn(body, tv) + tv.paddingTop,
+                l.getLineTop(l.getLineForOffset(pinnedChars.coerceIn(0, l.text.length))), body.paddingTop)
         }
     } else if (pinned >= 0) {
         placeBeforeDraw { pinned.coerceIn(0, mainLimit()) }
@@ -1254,11 +1292,13 @@ internal fun MainActivity.showReader(
     val nextCh = info.chapters.getOrNull(index + 1)
     if (nextCh != null && !nextCh.locked) {
         bg(curScreen, body = { loadOpening(info, nextCh, src) }) { r ->
-            val raw = r.getOrNull().orEmpty().trim()
+            val full = r.getOrNull().orEmpty()
+            val raw = spliceHead(full)
             // 页面已换代（换章 / 改设置重建）：旧章的开头不能往新页上接。
             if (raw.isEmpty() || spliceGen != ReaderUi.spliceGen) return@bg
             // 正文已从视图树摘下（已离开阅读页）也不再接。
-            if (body.parent == null) return@bg
+            if (body.parent == null || chapterPending) return@bg
+            ReaderUi.opening = ReaderUi.Opening("${info.bookId}#${nextCh.itemId}", full)
             col.addView(View(this).apply { setBackgroundColor(hairline) },
                 Md3.lpDp(this, null, 1))
             val nxTitle = Md3.text(this, nextCh.title, readerSize + ReaderUi.titleAdd,
@@ -1273,11 +1313,13 @@ internal fun MainActivity.showReader(
             tvNext = nx
             // 样式与正文完全同一条路：改字号 / 行距时两块一起变。
             styleBody(nx, raw)
-            spliceChars = nx.length()
             // 新标题也得跟上「标题位置 / 字号」设置：它就是一个章标题。
             restyleTitle(readerInk)
             // 从下一章退上来、这一页本应落在「章末」：有拼接块时章末是正文底边。
-            if (atEnd) placeBeforeDraw { mainLimit() }
+            // 用户已输入或程序已翻页时，迟到的预取不能把视口拉回章末。
+            if (atEnd && !userMoved) placeBeforeDraw {
+                if (userMoved) body.scrollY else mainLimit()
+            }
         }
     }
 
@@ -1321,17 +1363,24 @@ internal fun MainActivity.showReader(
         // 插在 body 之后（index 1）：压住新页，又不盖住后面建的菜单浮层。
         frame.addView(iv, 1, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, vh, Gravity.TOP))
+        val cleanup = {
+            iv.animate().cancel()
+            (iv.parent as? ViewGroup)?.removeView(iv)
+            if (!shift.isRecycled) shift.recycle()
+            clearCover = null
+        }
+        clearCover = cleanup
         iv.animate().translationY((if (dir >= 0) -vh else vh).toFloat())
             .setDuration(ReaderUi.pageBaseMs)
             .setInterpolator(android.view.animation.LinearInterpolator())
             .withEndAction {
                 // 连点或换页可能已经把它摘了：判空再摘，不重复回收位图。
-                (iv.parent as? ViewGroup)?.removeView(iv)
-                shift.recycle()
+                cleanup()
             }.start()
     }
     // 本页的抓屏闭包：三个换页调用点在替换页面前调它，抓到的就是“这一屏”。
     ReaderUi.capture = { dir ->
+        cancelMotion()
         if (frame.width > 0 && frame.height > 0) {
             val b = Bitmap.createBitmap(frame.width, frame.height, Bitmap.Config.ARGB_8888)
             frame.draw(Canvas(b))
@@ -1710,11 +1759,9 @@ private fun MainActivity.loadOpening(
     val html = localHtml ?: if (LocalImport.isLocal(info.bookId)) ""
                           else (src ?: source).content(ch.itemId, info.bookId)
     val raw = bodyText(html, LocalImport.isLocal(info.bookId))
-    val full = ReplaceRuleStore.apply(raw, isTitle = false)
-    // 整章存下来给换章直接复用：拼接块只显示开头，但整章已经在手上。
-    ReaderUi.openingKey = "${info.bookId}#${ch.itemId}"
-    ReaderUi.openingText = full
-    spliceHead(full)
+    val full = ReplaceRuleStore.apply(raw, isTitle = false, bookId = info.bookId)
+    // 工作线程只返回数据。缓存由通过世代校验的主线程回调发布。
+    full
 } catch (e: Exception) {
     ""
 }
@@ -1831,11 +1878,10 @@ internal fun MainActivity.preview(info: BookInfo, index: Int, atEnd: Boolean = f
 
     // 拼接块预取时已经把这一章的**整文**取下来了：直接上屏，不起线程、不读盘。
     // 顺读时每章都命中，换页的等待就只剩排版。
-    if (ReaderUi.openingKey == "${info.bookId}#${ch.itemId}" && ReaderUi.openingText.isNotEmpty()) {
-        val cached = ReaderUi.openingText
-        ReaderUi.openingKey = ""
-        ReaderUi.openingText = ""
-        showReader(info, index, cached, src, atEnd)
+    val opening = ReaderUi.opening
+    if (opening?.key == "${info.bookId}#${ch.itemId}" && opening.text.isNotEmpty()) {
+        ReaderUi.opening = null
+        showReader(info, index, opening.text, src, atEnd)
         return
     }
 
@@ -1845,7 +1891,17 @@ internal fun MainActivity.preview(info: BookInfo, index: Int, atEnd: Boolean = f
             val localHtml = line?.let { TinyJson.path(it, "content") }
             // 本地书没有网络源兜底：缺章就是缺章，说明白比拿 local:xxx 去发请求好。
             if (localHtml == null && LocalImport.isLocal(info.bookId)) {
-                postAlive(owner) { if (token == ReaderUi.pageToken) toast("这一章没有正文，导入时丢了") }
+                postAlive(owner) {
+                    if (token == ReaderUi.pageToken) {
+                        ReaderUi.takeSnap()?.recycle()
+                        ReaderUi.restoreKey = ""
+                        ReaderUi.restoreChars = -1
+                        ReaderUi.restoreAt = -1
+                        ReaderUi.restoreDelta = 0
+                        toast("这一章没有正文，导入时丢了")
+                        showToc(info, src)
+                    }
+                }
                 return@thread
             }
             val actualSrc = if (localHtml == null) (src ?: source) else src
@@ -1854,7 +1910,7 @@ internal fun MainActivity.preview(info: BookInfo, index: Int, atEnd: Boolean = f
             // 只过滤正文，章标题**不过滤**：目录里的标题一旦被规则吃掉，用户就找不到章，
             // 这个代价比「标题里的广告尾巴没去掉」大得多。所以在 preview 这一处做，
             // 不在目录、不在 showReader。
-            val text = ReplaceRuleStore.apply(raw, isTitle = false)
+            val text = ReplaceRuleStore.apply(raw, isTitle = false, bookId = info.bookId)
             postAlive(owner) {
                 if (token != ReaderUi.pageToken) return@postAlive
                 showReader(info, index, text, actualSrc, atEnd)

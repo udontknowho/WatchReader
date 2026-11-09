@@ -76,7 +76,7 @@ object Widgets {
         if (onTap != null) {
             bar.isClickable = true
             bar.setOnClickListener { onTap() }
-            bar.contentDescription = "搜索框，点按输入书名"
+            bar.contentDescription = "搜索框，$hint"
         }
         bar.layoutParams = Md3.lpDp(ctx, null, Md3.SEARCH).apply { bottomMargin = Md3.dp(ctx, Md3.GAP) }
         return bar
@@ -368,7 +368,13 @@ object Widgets {
      * 还被二次挤压 —— 这就是上一版弹窗「特别丑」的根因。
      */
     private fun wrapDialog(ctx: Context, box: View): android.app.AlertDialog {
-        val dlg = android.app.AlertDialog.Builder(ctx).setView(box).create()
+        // 内容超出表屏时整体可滚，避免确认与取消被窗口裁掉。
+        val scroll = ScrollView(ctx).apply {
+            isFillViewport = false
+            addView(box, ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+        val dlg = android.app.AlertDialog.Builder(ctx).setView(scroll).create()
         dlg.setOnShowListener {
             dlg.window?.apply {
                 setBackgroundDrawable(Md3.bg(Color.TRANSPARENT, 0f))
@@ -423,7 +429,8 @@ object Widgets {
         }
 
         var dlg: android.app.AlertDialog? = null
-        val actions = Md3.row(ctx).apply { gravity = Gravity.END }
+        // 窄屏长文案使用整行按钮，避免确认文字被挤出窗口。
+        val actions = Md3.column(ctx)
         fun action(label: CharSequence, primary: Boolean, run: () -> Unit) {
             val b = Md3.text(
                 ctx, label, Md3.FS_MD,
@@ -437,8 +444,8 @@ object Widgets {
                 setOnClickListener { dlg?.dismiss(); run() }
             }
             actions.addView(b, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, Md3.dp(ctx, Md3.BTN),
-            ).apply { leftMargin = Md3.dp(ctx, 8) })
+                ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(ctx, Md3.BTN),
+            ).apply { topMargin = Md3.dp(ctx, 4) })
         }
         if (!dismiss.isNullOrBlank()) action(dismiss, false) { onCancel?.invoke() }
         if (!confirm.isNullOrBlank()) action(confirm, true) { onConfirm?.invoke() }
@@ -510,9 +517,9 @@ object Widgets {
                     }
                     if (onTrailingClick != null) {
                         isClickable = true
-                        // 行右侧的 ⋮ 原来热区约 10 dp，手指点不中；补到 HIT。
-                        minimumWidth = Md3.HIT
-                        minimumHeight = Md3.HIT
+                        // HIT 是 dp，必须换算像素，避免高密度表屏热区缩水。
+                        minimumWidth = Md3.dp(ctx, Md3.HIT)
+                        minimumHeight = Md3.dp(ctx, Md3.HIT)
                         setOnClickListener { onTrailingClick() }
                     }
                 }
@@ -523,8 +530,8 @@ object Widgets {
                     setPadding(Md3.dp(ctx, 6), 0, 0, 0)
                     if (onTrailingClick != null) {
                         isClickable = true
-                        minimumWidth = Md3.HIT
-                        minimumHeight = Md3.HIT
+                        minimumWidth = Md3.dp(ctx, Md3.HIT)
+                        minimumHeight = Md3.dp(ctx, Md3.HIT)
                         setOnClickListener { onTrailingClick() }
                     }
                 }
@@ -544,7 +551,6 @@ object Widgets {
             }
             titleRow.addView(titleView, LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            trailingView?.let { titleRow.addView(it) }
             col.addView(titleRow, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
             if (subtitle != null) {
@@ -558,6 +564,8 @@ object Widgets {
             }
             outer.addView(col, LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            // 操作占整行尾槽，标题与副标题共用同一文字宽度。
+            trailingView?.let { outer.addView(it) }
             item.addView(outer, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         } else {
@@ -575,7 +583,7 @@ object Widgets {
         // 两行项不能固定 42dp：标题 + 副标题 + 左侧 emoji 的实际行高会超，
         // 超出的部分上下同时被裁（书源页那两个卡片的副标题就被切了半行）。
         val lp = if (twoLine) {
-            item.minimumHeight = Md3.dp(ctx, Md3.ITEM)
+            item.minimumHeight = Md3.dp(ctx, Md3.ITEM_TALL)
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             )
@@ -664,8 +672,8 @@ object Widgets {
      * 滚动条显式打开并加粗：Android 默认在 2.0 density 下只有约 4px，
      * 手表上既看不见也够不着。
      */
-    fun scrollBody(ctx: Context, crownStep: Float = 60f, crownGlide: Int = 50): ScrollView =
-        ScrollView(ctx).apply {
+    fun scrollBody(ctx: Context, crownStep: Float = 60f, crownGlide: Int = 50): CrownScrollView =
+        CrownScrollView(ctx, crownStep, crownGlide).apply {
             isFillViewport = true
             setPadding(Md3.dp(ctx, Md3.PAD), 0, Md3.dp(ctx, Md3.PAD), Md3.dp(ctx, Md3.PAD))
             clipToPadding = false
@@ -673,37 +681,158 @@ object Widgets {
             isVerticalScrollBarEnabled = true
             // 画在内容内侧，否则会和页面边距一起被挤到屏外
             scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY
-            // 表冠：ColorOS 把转动投成 ACTION_SCROLL，而 ScrollView 默认只认触摸。
-            //
-            // 不能每来一格就 scrollBy：事件之间没有插值，转快了是「跳格子」，
-            // 看着不跟手。这里维护一个目标位置，每格把位移累加进目标，
-            // 再用 ValueAnimator 每帧逼近，手感连续，快转也不丢距离。
-            // 方向键事件不用管：ScrollView 自身就会响应（实测 DPAD_DOWN 能滚）。
-            var crownTarget = 0f
-            var crownAnim: android.animation.ValueAnimator? = null
-            setOnGenericMotionListener { v, e ->
-                if (e.action != android.view.MotionEvent.ACTION_SCROLL) return@setOnGenericMotionListener false
-                val dy = e.getAxisValue(android.view.MotionEvent.AXIS_VSCROLL)
-                if (dy == 0f) return@setOnGenericMotionListener false
-                val sv = v as ScrollView
-                // 上一次动画还在跑时，crownTarget 已经是未到达的目标，不能重置，
-                // 否则快转时的位移会丢（表现为越转越不跟手）。
-                if (crownAnim?.isRunning != true) crownTarget = sv.scrollY.toFloat()
-                crownTarget = (crownTarget - dy * crownStep).coerceIn(0f, maxScrollOf(sv).toFloat())
-                crownAnim?.cancel()
-                crownAnim = android.animation.ValueAnimator.ofFloat(sv.scrollY.toFloat(), crownTarget).apply {
-                    // 追平时长：再短看着抖，再长有拖尾。由设置页给。
-                    duration = crownGlide.toLong()
-                    interpolator = android.view.animation.DecelerateInterpolator()
-                    addUpdateListener { a -> sv.scrollTo(0, (a.animatedValue as Float).toInt()) }
-                    start()
-                }
-                true
-            }
             val col = Md3.column(ctx)
             addView(col, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
+
+    /** 保留原生拖动与外部触摸监听器，只把主动越界输入交给阅读器。 */
+    class CrownScrollView(
+        ctx: Context,
+        private val crownStep: Float = 60f,
+        private val crownGlide: Int = 50,
+    ) : ScrollView(ctx) {
+        var onInputStart: (() -> Unit)? = null
+
+        /** true 表示向后（向下），false 表示向前；位移为正数像素。 */
+        var onBoundary: ((Boolean, Int) -> Unit)? = null
+
+        private var crownTarget = 0f
+        private var crownAnim: android.animation.ValueAnimator? = null
+        private val touchSlop = android.view.ViewConfiguration.get(ctx).scaledTouchSlop
+        private var downX = 0f
+        private var downY = 0f
+        private var lastTouchY = 0f
+        private var touchActive = false
+        private var dragging = false
+        private var boundaryDrag = 0f
+
+        /** 同时终止旧表冠动画和原生惯性，避免多个输入同时改写 scrollY。 */
+        fun cancelCrownAnimation() {
+            crownAnim?.cancel()
+            crownAnim = null
+            fling(0)
+            crownTarget = scrollY.toFloat()
+        }
+
+        override fun onGenericMotionEvent(event: android.view.MotionEvent): Boolean {
+            if (event.action != android.view.MotionEvent.ACTION_SCROLL) {
+                return super.onGenericMotionEvent(event)
+            }
+            val delta = -event.getAxisValue(android.view.MotionEvent.AXIS_VSCROLL) * crownStep
+            if (!delta.isFinite() || delta == 0f) return super.onGenericMotionEvent(event)
+            onInputStart?.invoke()
+            // 原生惯性不参与跨章。保留尚未追平的表冠目标，快转不丢位移。
+            fling(0)
+            val max = maxScrollOf(this)
+            val forward = delta > 0f
+            if ((forward && scrollY >= max) || (!forward && scrollY <= 0)) {
+                cancelCrownAnimation()
+                onBoundary?.invoke(forward, kotlin.math.abs(delta).toInt().coerceAtLeast(1))
+                return true
+            }
+            if (crownAnim?.isRunning != true) crownTarget = scrollY.toFloat()
+            crownTarget = (crownTarget + delta).coerceIn(0f, max.toFloat())
+            crownAnim?.cancel()
+            crownAnim = android.animation.ValueAnimator.ofFloat(scrollY.toFloat(), crownTarget).apply {
+                duration = crownGlide.coerceAtLeast(0).toLong()
+                interpolator = android.view.animation.DecelerateInterpolator()
+                addUpdateListener { a -> scrollTo(0, (a.animatedValue as Float).toInt()) }
+                start()
+            }
+            return true
+        }
+
+        private fun trackBoundaryDrag(event: android.view.MotionEvent) {
+            val delta = lastTouchY - event.y
+            lastTouchY = event.y
+            if (!dragging) {
+                val vertical = kotlin.math.abs(event.y - downY)
+                dragging = vertical > touchSlop && vertical > kotlin.math.abs(event.x - downX)
+            }
+            // 只累计事件到来前已经位于边界的外拖，不把到达边界的正常滚动算进去。
+            val outward = (delta > 0f && scrollY >= maxScrollOf(this)) ||
+                (delta < 0f && scrollY <= 0)
+            if (!outward) {
+                if (delta != 0f) boundaryDrag = 0f
+            } else {
+                if ((boundaryDrag > 0f && delta < 0f) || (boundaryDrag < 0f && delta > 0f)) {
+                    boundaryDrag = 0f
+                }
+                boundaryDrag += delta
+            }
+        }
+
+        override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    cancelCrownAnimation()
+                    onInputStart?.invoke()
+                    downX = event.x
+                    downY = event.y
+                    lastTouchY = event.y
+                    touchActive = true
+                    dragging = false
+                    boundaryDrag = 0f
+                }
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    if (touchActive) trackBoundaryDrag(event)
+                }
+                android.view.MotionEvent.ACTION_UP -> {
+                    if (touchActive) trackBoundaryDrag(event)
+                    val distance = kotlin.math.abs(boundaryDrag).toInt()
+                    val forward = boundaryDrag > 0f
+                    val atBoundary = if (forward) scrollY >= maxScrollOf(this) else scrollY <= 0
+                    val callback = onBoundary
+                    val shouldNotify = touchActive && dragging && distance > touchSlop &&
+                        atBoundary && callback != null
+                    touchActive = false
+                    boundaryDrag = 0f
+                    if (shouldNotify) {
+                        // 不让同一次松手再产生原生 fling；回调只能发生一次。
+                        val cancel = android.view.MotionEvent.obtain(event)
+                        cancel.action = android.view.MotionEvent.ACTION_CANCEL
+                        try { super.onTouchEvent(cancel) } finally { cancel.recycle() }
+                        cancelCrownAnimation()
+                        callback?.invoke(forward, distance)
+                        return true
+                    }
+                }
+                android.view.MotionEvent.ACTION_CANCEL,
+                android.view.MotionEvent.ACTION_POINTER_DOWN -> {
+                    touchActive = false
+                    boundaryDrag = 0f
+                }
+            }
+            return super.onTouchEvent(event)
+        }
+
+        override fun executeKeyEvent(event: android.view.KeyEvent): Boolean {
+            val direction = when (event.keyCode) {
+                android.view.KeyEvent.KEYCODE_DPAD_DOWN,
+                android.view.KeyEvent.KEYCODE_PAGE_DOWN -> true
+                android.view.KeyEvent.KEYCODE_DPAD_UP,
+                android.view.KeyEvent.KEYCODE_PAGE_UP -> false
+                else -> return super.executeKeyEvent(event)
+            }
+            if (event.action != android.view.KeyEvent.ACTION_DOWN) return super.executeKeyEvent(event)
+            cancelCrownAnimation()
+            onInputStart?.invoke()
+            val boundary = if (direction) scrollY >= maxScrollOf(this) else scrollY <= 0
+            if (isLaidOut && boundary && onBoundary != null) {
+                onBoundary?.invoke(direction, crownStep.toInt().coerceAtLeast(1))
+                return true
+            }
+            return super.executeKeyEvent(event)
+        }
+
+        override fun onDetachedFromWindow() {
+            touchActive = false
+            boundaryDrag = 0f
+            cancelCrownAnimation()
+            super.onDetachedFromWindow()
+        }
+    }
 
     /**
      * 取出 [scrollBody] 里真正放内容的列。
@@ -715,7 +844,7 @@ object Widgets {
     fun emptyState(ctx: Context, glyph: String, message: CharSequence): LinearLayout {
         val box = Md3.column(ctx)
         box.gravity = Gravity.CENTER
-        box.setPadding(Md3.dp(ctx, 12), Md3.dp(ctx, 24), Md3.dp(ctx, 12), Md3.dp(ctx, 24))
+        box.setPadding(Md3.dp(ctx, 8), Md3.dp(ctx, 12), Md3.dp(ctx, 8), Md3.dp(ctx, 12))
         val icon = Icons.name(glyph)
         if (icon != null) {
             box.addView(Icons.view(ctx, icon, Md3.onSurfaceVariant, 32).apply {
@@ -738,7 +867,8 @@ object Widgets {
             gravity = Gravity.CENTER
             setPadding(0, Md3.dp(ctx, 10), 0, 0)
         }
-        box.addView(m)
+        box.addView(m, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         return box
     }
 
@@ -1019,7 +1149,8 @@ object Widgets {
         val bar = Md3.row(ctx)
         bar.background = Md3.bg(Md3.surface4, 9f)
         bar.setPadding(Md3.dp(ctx, 10), Md3.dp(ctx, 9), Md3.dp(ctx, 10), Md3.dp(ctx, 9))
-        bar.addView(Md3.text(ctx, message, Md3.FS_SM, Md3.onSurface))
+        bar.addView(Md3.text(ctx, message, Md3.FS_SM, Md3.onSurface),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         if (action != null) {
             val a = Md3.text(ctx, action, Md3.FS_SM, Md3.primary, bold = true)
             a.setPadding(Md3.dp(ctx, 10), 0, 0, 0)

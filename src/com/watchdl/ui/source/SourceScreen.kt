@@ -1,6 +1,10 @@
 package com.watchdl.ui.source
 
+import android.app.Activity
+import android.app.Fragment
+import android.content.Intent
 import android.graphics.Color
+import android.net.Uri
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -10,6 +14,7 @@ import com.watchdl.core.*
 import com.watchdl.ui.attachTabs
 import com.watchdl.ui.search.askText
 import com.watchdl.ui.search.showHits
+import com.watchdl.ui.search.showDiscoverPage
 import com.watchdl.ui.theme.Icons
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
@@ -110,8 +115,14 @@ internal fun MainActivity.showSources(keepScroll: Boolean = false) {
         root.removeAllViews()
         if (SourceUi.loadFailed) {
             root.addView(Widgets.topBar(this, "书源", onBack = { goBackToPrevious() }))
-            root.addView(Widgets.emptyState(this, "warning", "读取本地书源失败\n请重装或重新导入"),
-                Md3.lpWeight(1f))
+            val body = Widgets.scrollBody(this, crownStep, crownGlide)
+            val col = Widgets.contentColumn(body)
+            col.addView(Widgets.emptyState(this, "warning", "读取本地书源失败\n现有文件未改动"))
+            col.addView(Widgets.button(this, "重新读取", "tonal") {
+                SourceUi.loadFailed = false
+                showSources()
+            })
+            root.addView(body, Md3.lpWeight(1f))
             return
         }
         // 首屏骨架：顶栏先出来，列表位给一句「正在读取」。读完重建整屏。
@@ -457,9 +468,8 @@ private fun MainActivity.askSourceQuery() {
  * 顶栏 ⋮。条目照 legado `dropDownMenuContent`：分组筛选、排序，之后是导入/导出/校验
  * 一类的批量动作。
  *
- * 本应用没有导入/导出/校验（源库靠云端整包与书源市场同步），这一段的三个入口
- * 是本项目独有的（书源市场 / 更新书源库 / 下载线程），功能不变，只是从列表上方
- * 挪到这里，把首屏让给书源列表。
+ * 文件、链接与市场导入均先展示内存预览，确认后才落盘。
+ * 云端整包更新保留独立入口，不与增量导入混用。
  */
 private fun MainActivity.showSourceMenu() {
     val items = mutableListOf<Pair<CharSequence, () -> Unit>>()
@@ -479,6 +489,7 @@ private fun MainActivity.showSourceMenu() {
             showSources()
         }
     }
+    items += "导入书源" to { showSourceImportMenu() }
     items += "书源市场" to { showMarket(1, emptyList()) }
     items += "更新书源库" to { updateFromCloud() }
     // 并发线程数：通用书源默认串行太慢（实测 0.17 章/秒），交给用户自己定。
@@ -713,7 +724,10 @@ private fun MainActivity.showRankContent(rankKey: String) {
  * **现在**直接列榜：站点与频道合成分组标题，一组一张卡，点一行进那个榜。
  * 没有能落到空屏的组合，首屏也不用先做两次选择。
  */
-internal fun MainActivity.showDiscover(rankKey: String = "") {
+/** 旧导入的兼容入口，与 MainActivity 成员使用同一发现实现。 */
+internal fun MainActivity.showDiscover(rankKey: String = "") = showDiscoverPage(rankKey)
+
+private fun MainActivity.showDiscoverLegacy(rankKey: String = "") {
     setScreen(Screen.Discover(rankKey))
     root.removeAllViews()
     // 指定了榜就是内容页；目录页在下面搭。
@@ -742,8 +756,8 @@ internal fun MainActivity.showDiscover(rankKey: String = "") {
         if (group.isEmpty()) continue
         // 分组标题降成小字说明，不再画卡片：卡片会再吃掉一圈内外边距。
         col.addView(Md3.text(this, g.title, Md3.FS_SM, Md3.onSurfaceVariant).apply {
-            setPadding(Md3.dp(this@showDiscover, 4), Md3.dp(this@showDiscover, 6),
-                0, Md3.dp(this@showDiscover, 2))
+            setPadding(Md3.dp(this@showDiscoverLegacy, 4), Md3.dp(this@showDiscoverLegacy, 6),
+                0, Md3.dp(this@showDiscoverLegacy, 2))
         })
         // 两列。一列时 20 个榜排下来是 20 × 48 dp = 960 dp，四屏才能到底；
         // 两列 × 32 dp 压到 341 dp，一屏半就完。
@@ -752,13 +766,13 @@ internal fun MainActivity.showDiscover(rankKey: String = "") {
             pair.forEachIndexed { i, r ->
                 row.addView(rankChip(r), LinearLayout.LayoutParams(
                     0, Md3.dp(this, 32), 1f).apply {
-                    if (i > 0) leftMargin = Md3.dp(this@showDiscover, 4)
-                    topMargin = Md3.dp(this@showDiscover, 4)
+                    if (i > 0) leftMargin = Md3.dp(this@showDiscoverLegacy, 4)
+                    topMargin = Md3.dp(this@showDiscoverLegacy, 4)
                 })
             }
             // 落单的最后一格补一个空位，撑住半列宽度，不让它变成整行宽。
             if (pair.size == 1) row.addView(View(this), LinearLayout.LayoutParams(
-                0, Md3.dp(this, 1), 1f).apply { leftMargin = Md3.dp(this@showDiscover, 4) })
+                0, Md3.dp(this, 1), 1f).apply { leftMargin = Md3.dp(this@showDiscoverLegacy, 4) })
             col.addView(row)
         }
     }
@@ -994,9 +1008,11 @@ internal fun MainActivity.showMarket(page: Int, accumulated: List<YioveSource.It
             renderMarket(col, all, page, p.total, p.pages)
         }.onFailure { e ->
             col.removeAllViews()
+            // 加载下一页失败仍保留已看条目，不把旧结果替换成整屏错误。
+            if (accumulated.isNotEmpty()) renderMarket(col, accumulated, (page - 1).coerceAtLeast(1))
             col.addView(Widgets.emptyState(this, "warning",
-                "加载失败：${e.message?.take(60) ?: "网络不可用"}"))
-            col.addView(Widgets.button(this, "重试", "tonal") { showMarket(page, accumulated) })
+                "第 $page 页加载失败：${e.message?.take(60) ?: "网络不可用"}"))
+            col.addView(Widgets.button(this, "重试本页", "tonal") { showMarket(page, accumulated) })
         }
     }
 }
@@ -1016,7 +1032,7 @@ private fun MainActivity.renderMarket(
         val card = Widgets.card(this, outlined = true)
         card.addView(Md3.text(this, "共 $total 条 · 已看 $page/$pages 页", Md3.FS_MD, Md3.onSurface))
         card.addView(Md3.text(this,
-            "点一条即拉取并导入。全量太大，只按需拉", Md3.FS_SM, Md3.onSurfaceVariant))
+            "点一条预览规则，确认后导入", Md3.FS_SM, Md3.onSurfaceVariant))
         col.addView(card)
     }
 
@@ -1048,15 +1064,185 @@ private fun MainActivity.renderMarket(
     }
 }
 
-/** 拉单条规则并导入（约 1 秒），成功后回列表把该条标成已导入。 */
+/** 市场只取规则，不调用会直接落盘的 YioveSource.install。 */
 private fun MainActivity.installFromMarket(name: String, id: String, page: Int, shown: List<YioveSource.Item>) {
-    toast("正在导入「$name」…")
     val owner: Screen = Screen.Market(shown, 0, page)
-    bg(owner, { YioveSource.install(sourcesDir(), YioveSource.Item(id, name, "", 0)) }) { res ->
-        res.onSuccess { r ->
-            toast(if (r.ok) "已导入：${r.name}" else "不支持：${r.issue ?: "未知原因"}")
-            showMarket(page, shown.filter { it.name != name })
-        }.onFailure { toast("导入失败：${it.message?.take(50)}") }
+    prepareSourceImport(owner, "市场 · $name", { YioveSource.fetchRule(id) },
+        marketId = id, onDone = { showMarket(page, shown) })
+}
+
+private fun MainActivity.showSourceImportMenu() {
+    Widgets.longMenuDialog(this, "导入书源", listOf(
+        "选择本地 JSON 文件" to { pickSourceImportFile() },
+        "粘贴书源链接" to {
+            askText("书源链接", "https://…", "请输入链接") { input ->
+                val url = input.trim()
+                val uri = runCatching { java.net.URI(url) }.getOrNull()
+                if (uri == null || uri.scheme?.lowercase() !in listOf("http", "https") || uri.host.isNullOrBlank()) {
+                    toast("请输入完整的 HTTP 或 HTTPS 链接")
+                } else {
+                    prepareSourceImport(Screen.Sources, "网络书源", {
+                        val body = Http.fetch(url, "GET", null, emptyMap(), null, 20_000).body
+                        require(body.toByteArray(Charsets.UTF_8).size <= SOURCE_IMPORT_MAX_BYTES) { "书源文件超过 8 MB" }
+                        body
+                    })
+                }
+            }
+        },
+    )).show()
+}
+
+private const val SOURCE_IMPORT_MAX_BYTES = 8 * 1024 * 1024
+
+/** 独立 Fragment 接收 SAF 回调，不占用 MainActivity 的本地小说请求码。 */
+class SourceImportPickerFragment : Fragment() {
+    internal var onPicked: ((Uri) -> Unit)? = null
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        val callback = onPicked
+        onPicked = null
+        if (isAdded) fragmentManager?.beginTransaction()?.remove(this)?.commitAllowingStateLoss()
+        if (requestCode == 4102 && resultCode == Activity.RESULT_OK) data?.data?.let { callback?.invoke(it) }
+    }
+}
+
+private fun MainActivity.pickSourceImportFile() {
+    val picker = SourceImportPickerFragment().apply {
+        onPicked = { uri ->
+            prepareSourceImport(Screen.Sources, "本地书源", {
+                contentResolver.openInputStream(uri)?.use { input ->
+                    val bytes = java.io.ByteArrayOutputStream()
+                    val buffer = ByteArray(8192)
+                    while (true) {
+                        val n = input.read(buffer)
+                        if (n < 0) break
+                        require(bytes.size() + n <= SOURCE_IMPORT_MAX_BYTES) { "书源文件超过 8 MB" }
+                        bytes.write(buffer, 0, n)
+                    }
+                    bytes.toString("UTF-8")
+                } ?: error("无法读取所选文件")
+            })
+        }
+    }
+    runCatching {
+        fragmentManager.beginTransaction().add(picker, "source-import-picker").commit()
+        fragmentManager.executePendingTransactions()
+        picker.startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+        }, 4102)
+    }.onFailure {
+        picker.onPicked = null
+        if (picker.isAdded) fragmentManager.beginTransaction().remove(picker).commitAllowingStateLoss()
+        toast("无法打开文件选择器：${it.message?.take(50)}")
+    }
+}
+
+/** 后台只读：即使切屏取消回调，也没有正式源文件需要撤销。 */
+private fun MainActivity.prepareSourceImport(
+    owner: Screen,
+    label: String,
+    readText: () -> String,
+    marketId: String? = null,
+    onDone: () -> Unit = { showSources() },
+) {
+    toast("正在生成导入预览…")
+    bg(owner, {
+        val text = readText()
+        val existing = buildLocalSourceRows().rows.mapTo(HashSet()) { it.name }
+        SourceImportPreview.parse(text, existing)
+    }) { result ->
+        result.onSuccess { preview -> showSourceImportPreview(label, preview, marketId, onDone) }
+            .onFailure { toast("读取失败：${it.message?.take(70)}") }
+    }
+}
+
+/** 明确确认是唯一写入入口。取消、返回、点外部只关闭对话框。 */
+private fun MainActivity.showSourceImportPreview(
+    label: String,
+    preview: SourceImportPreview.Preview,
+    marketId: String?,
+    onDone: () -> Unit,
+) {
+    val body = Widgets.scrollBody(this, crownStep, crownGlide)
+    val col = Widgets.contentColumn(body)
+    col.addView(Md3.text(this, label, Md3.FS_SM, Md3.onSurfaceVariant))
+    val summary = Widgets.card(this, outlined = true)
+    summary.addView(Md3.text(this,
+        "可导入 ${preview.ready} · 失败 ${preview.failed} · 重复 ${preview.duplicates}",
+        Md3.FS_MD, Md3.primary, bold = true))
+    summary.addView(Md3.text(this, "重复与失败条目跳过。现有源不覆盖。\n规则可导入不代表站点可联网。",
+        Md3.FS_SM, Md3.onSurfaceVariant))
+    col.addView(summary)
+    preview.entries.forEach { entry ->
+        val status = when (entry.status) {
+            SourceImportPreview.Status.READY -> "可导入"
+            SourceImportPreview.Status.FAILED -> "失败"
+            SourceImportPreview.Status.DUPLICATE -> "重复"
+        }
+        col.addView(Md3.text(this, "$status · ${entry.name}", Md3.FS_MD,
+            if (entry.status == SourceImportPreview.Status.FAILED) Md3.error else Md3.onSurface))
+        col.addView(Md3.text(this, entry.issue ?: "规则检查无问题", Md3.FS_SM, Md3.onSurfaceVariant))
+    }
+    val dialog = android.app.Dialog(this)
+    dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
+    dialog.setContentView(Widgets.screenRoot(this).apply {
+        addView(Widgets.topBar(this@showSourceImportPreview, "导入预览", onBack = { dialog.dismiss() }))
+        addView(body, Md3.lpWeight(1f))
+        addView(Widgets.button(this@showSourceImportPreview, "确认导入 ${preview.ready} 条") {
+            dialog.dismiss()
+            commitSourceImport(preview, marketId, onDone)
+        }.apply { isEnabled = preview.ready > 0 })
+        addView(Widgets.button(this@showSourceImportPreview, "取消", "tonal") { dialog.dismiss() })
+    })
+    dialog.show()
+    dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+}
+
+/** 不用可取消的页面 bg：确认后写入必须有回执，并在成功后重建实际搜索池。 */
+private fun MainActivity.commitSourceImport(preview: SourceImportPreview.Preview, marketId: String?, onDone: () -> Unit) {
+    if (preview.ready == 0) return
+    toast("正在导入…")
+    thread(isDaemon = true) {
+        val result = runCatching {
+            val dir = sourcesDir()
+            // 预览期间源库可能已更新，确认时再核对，避免把过期预览里的同名源写入。
+            val current = buildLocalSourceRows().rows.mapTo(HashSet()) { it.name }
+            check(preview.entries.none { it.status == SourceImportPreview.Status.READY && it.name in current }) {
+                "预览期间书源已变化，请重新预览"
+            }
+            val first = preview.entries.first { it.status == SourceImportPreview.Status.READY }
+            val safe = first.name.replace(Regex("[^\\p{L}\\p{N}]"), "_").take(40)
+            val prefix = marketId?.take(8)?.replace(Regex("[^A-Za-z0-9_-]"), "_")
+                ?: "import_${java.util.UUID.randomUUID()}"
+            val destination = File(dir, "${prefix}_$safe.json")
+            check(!destination.exists()) { "目标书源已存在，请重新预览" }
+            // 临时文件不以 json 结尾，任何失败都不会被源池读到。
+            val temporary = File.createTempFile(".source-import-", ".tmp", dir)
+            try {
+                temporary.writeText(preview.payload, Charsets.UTF_8)
+                check(temporary.renameTo(destination)) { "书源文件保存失败" }
+            } finally {
+                temporary.delete()
+            }
+            try {
+                rebuildSources()
+            } catch (e: Exception) {
+                destination.delete()
+                runCatching { rebuildSources() }
+                throw e
+            } finally {
+                SourceUi.data = null
+                SourceUi.loadFailed = false
+            }
+        }
+        runOnUiThread {
+            if (!isFinishing && !isDestroyed) {
+                result.onSuccess { toast("已导入 ${preview.ready} 条，书源池已重建"); onDone() }
+                    .onFailure { toast("导入失败：${it.message?.take(70)}") }
+            }
+        }
     }
 }
 
@@ -1071,6 +1257,8 @@ private fun MainActivity.updateFromCloud() {
             DevLog.log("WatchDL", "云端更新失败：${e.message}")
             CloudSource.Result(false, "更新异常：${e.message?.take(60)}")
         }
+        SourceUi.data = null
+        SourceUi.loadFailed = false
         toast(r.message)
         // 不管成没成都会书源页 —— 失败时用户能看到当前条数，知道没被弄坏。
         showSources()

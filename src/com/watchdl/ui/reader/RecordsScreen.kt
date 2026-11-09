@@ -8,6 +8,7 @@ import com.watchdl.MainActivity
 import com.watchdl.core.BookInfo
 import com.watchdl.core.Downloader
 import com.watchdl.core.Screen
+import com.watchdl.core.ReadingHistory
 import com.watchdl.core.markSelectionPrune
 import com.watchdl.core.markSelectionSelectAll
 import com.watchdl.core.markSelectionToggle
@@ -15,34 +16,13 @@ import com.watchdl.core.recordClearMessage
 import com.watchdl.core.recordDeleteMessage
 import com.watchdl.core.recordMatch
 import com.watchdl.core.recordSubtitle
-import com.watchdl.core.recordSubtitleText
 import com.watchdl.ui.my.showMy
 import com.watchdl.ui.search.askText
 import com.watchdl.ui.theme.Icons
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
 
-/**
- * 阅读记录（#25）：跨书列出读过的书。
- *
- * 单书的进度屏只能从目录进，用户想「接着上次那本」得先想起是哪本；
- * 而进度本来就在 SharedPreferences 里存着，缺的只是这一页。
- *
- * 抄的是本地参考仓 `~/ref/legado-novel`（Compose/MD3，3.26.21）的
- * `ui/book/readRecord/ReadRecordScreen.kt`：
- *
- * | legado | 这里（189 × 248 dp 表盘） |
- * |---|---|
- * | 三种显示模式（聚合 / 时间线 / 最新）+ 切模式按钮 | 只有一档「按最近阅读排列」，等于它的 LATEST |
- * | 顶栏 切模式 / search / ⋮ 三动作 | 顶栏 search + ⋮ 两动作，副标题写死排序口径 |
- * | 长按进选择态，选择态顶栏改删除 | 长按进选择态，✕ / 已选 N / 全选 + 屏底「删除记录」 |
- * | 行 = 书名 + 章节 + 时间 + 进度 | 行 = 书名 + 「读至 12/345 章 · 3%」+ 28 dp ⋮ |
- * | 空态 no_read_record | 同口径文案：没有阅读记录 / 读过的书会出现在这里 |
- * | ⋮ 更多动作里有导出与统计 | 只有「清空全部阅读记录」 |
- *
- * 不做三模式：聚合与时间线要逐章历史，我们只存每本书的最后位置与最后时刻，
- * 造不出那两档历史，就不该在菜单里给假选项。
- */
+/** 真实位置保存事件按时间倒序，旧存档只显示最后位置，不推算阅读时长。 */
 
 /** 一行的数据。目录只取总量，不读正文。 */
 private class RecordRow(
@@ -52,13 +32,16 @@ private class RecordRow(
     val total: Int,
     val index: Int,
     val at: Long,
-)
+    val eventId: Long? = null,
+) {
+    val key: String get() = eventId?.let { "event:$it" } ?: "legacy:$bookId"
+}
 
 /**
  * 屏内状态：搜索词与多选。
  *
  * 与书签页同样放文件级 object：只属于这一屏，离开就重来。
- * 选择集存 bookId —— 一本书只有一条记录，不会重名。
+ * 选择集存事件键，旧存档使用带前缀的书号键。
  */
 internal object RecordsUi {
 
@@ -86,17 +69,17 @@ internal fun MainActivity.showRecords() {
     val all = loadRecords()
     val shown = all.filter { recordMatch(it.name, it.author, RecordsUi.query) }
     // 选中的书可能被删掉或被搜索过滤掉：留着会停在「已选 0」的死界面。
-    if (RecordsUi.selecting && !markSelectionPrune(RecordsUi.selected, shown.map { it.bookId })) {
+    if (RecordsUi.selecting && !markSelectionPrune(RecordsUi.selected, shown.map { it.key })) {
         RecordsUi.exit()
     }
 
     root.removeAllViews()
     if (RecordsUi.selecting) {
-        root.addView(recordsSelectBar(shown.map { it.bookId }))
+        root.addView(recordsSelectBar(shown.map { it.key }))
     } else {
         // 统计与排序口径都放顶栏副标题：248 dp 高的屏上，多一行统计就少一本书记录。
         root.addView(Widgets.topBar(this, "阅读记录", onBack = { showMy() },
-            subtitle = recordSubtitleText(shown.size),
+            subtitle = "真实时间线 · ${shown.size} 条",
             trailing = listOf(
                 "search" to { askRecordsQuery() },
                 "more" to { showRecordsMenu(all) },
@@ -115,7 +98,7 @@ internal fun MainActivity.showRecords() {
         return
     }
 
-    col.addView(Widgets.sectionLabel(this, "共 ${shown.size} 本"))
+    col.addView(Widgets.sectionLabel(this, "共 ${shown.size} 条"))
     for (r in shown) col.addView(recordsRow(r))
 
     root.addView(body)
@@ -130,24 +113,34 @@ internal fun MainActivity.showRecords() {
  */
 private fun MainActivity.loadRecords(): List<RecordRow> {
     val store = jobsStore()
-    return store.listBooks().mapNotNull { id ->
+    val events = ReadingHistory.list(filesDir)
+    val jobs = store.listBooks().mapNotNull { id ->
+        Downloader.restoreLight(store, id)?.let { id to it }
+    }.toMap()
+    val timeline = events.mapNotNull { e ->
+        val job = jobs[e.bookId] ?: return@mapNotNull null
+        RecordRow(e.bookId, job.name.ifBlank { e.bookId }, job.author, job.chapters.size,
+            e.index, e.at, e.id)
+    }
+    val recorded = events.map { it.bookId }.toSet()
+    val legacy = store.listBooks().filter { it !in recorded }.mapNotNull { id ->
         val at = readTime(id)
         if (at <= 0L) return@mapNotNull null
         val job = Downloader.restoreLight(store, id) ?: return@mapNotNull null
         RecordRow(id, job.name.ifBlank { id }, job.author, job.chapters.size,
             readProgress(id), at)
-    }.sortedByDescending { it.at }
+    }
+    return (timeline + legacy).sortedByDescending { it.at }
 }
 
 /**
  * 一条记录。
  *
- * 照 legado 记录行的信息量（书名 + 章节 + 进度），但把「时间」从行里去掉：
- * 列表本来就按时间倒序，再写一遍「昨天」只是多占一行。
+ * 行内显示书名、章节进度、保存时刻和记录来源。
  * 选择态收起 ⋮，整行点击变成选中。
  */
 private fun MainActivity.recordsRow(r: RecordRow): LinearLayout {
-    val picked = r.bookId in RecordsUi.selected
+    val picked = r.key in RecordsUi.selected
 
     val row = Md3.row(this)
     row.minimumHeight = Md3.dp(this, Md3.ITEM_TALL)
@@ -169,6 +162,8 @@ private fun MainActivity.recordsRow(r: RecordRow): LinearLayout {
     text.addView(Md3.ellipsize(Md3.text(this, r.name, Md3.FS_MD, Md3.onSurface)))
     text.addView(Md3.ellipsize(Md3.text(this, recordSubtitle(r.index, r.total), Md3.FS_SM,
         Md3.onSurfaceVariant)).apply { alpha = 0.7f })
+    val stamp = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.CHINA).format(java.util.Date(r.at))
+    text.addView(Md3.text(this, "$stamp · ${if (r.eventId == null) "旧存档最后位置" else "位置保存"}", 10f, Md3.onSurfaceVariant))
     row.addView(text, LinearLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
@@ -184,14 +179,14 @@ private fun MainActivity.recordsRow(r: RecordRow): LinearLayout {
 
     row.isClickable = true
     row.setOnClickListener {
-        if (RecordsUi.selecting) toggleRecordSelection(r.bookId) else openRecord(r.bookId)
+        if (RecordsUi.selecting) toggleRecordSelection(r.key) else openRecord(r.bookId, r.index)
     }
     row.setOnLongClickListener {
         if (!RecordsUi.selecting) {
-            RecordsUi.enter(r.bookId)
+            RecordsUi.enter(r.key)
             showRecords()
         } else {
-            toggleRecordSelection(r.bookId)
+            toggleRecordSelection(r.key)
         }
         true
     }
@@ -270,7 +265,7 @@ private fun MainActivity.showRecordsMenu(all: List<RecordRow>) {
         }
     }
     items += "清空全部阅读记录（${all.size} 条）" to {
-        if (all.isEmpty()) toast("还没有阅读记录") else confirmClearRecords(all.map { it.bookId })
+        if (all.isEmpty()) toast("还没有阅读记录") else confirmClearRecords(all.map { it.key })
     }
     Widgets.longMenuDialog(this, "阅读记录", items).show()
 }
@@ -283,22 +278,21 @@ private fun MainActivity.showRecordsMenu(all: List<RecordRow>) {
  */
 private fun MainActivity.showRecordRowMenu(r: RecordRow) {
     val items = mutableListOf<Pair<CharSequence, () -> Unit>>()
-    items += "跳到这一章" to { openRecord(r.bookId) }
-    items += "删除这条记录" to { confirmDeleteRecords(listOf(r.bookId)) }
+    items += "跳到这一章" to { openRecord(r.bookId, r.index) }
+    items += "删除这条记录" to { confirmDeleteRecords(listOf(r.key)) }
     Widgets.longMenuDialog(this, r.name, items).show()
 }
 
 /** 多选：点一条切选中。 */
-private fun MainActivity.toggleRecordSelection(bookId: String) {
-    markSelectionToggle(RecordsUi.selected, bookId)
+private fun MainActivity.toggleRecordSelection(key: String) {
+    markSelectionToggle(RecordsUi.selected, key)
     showRecords()
 }
 
 /**
  * 删记录，二次确认写明「只删记录」。
  *
- * 我们的「记录」就是 SharedPreferences 里的最后位置与时刻，
- * 所以删记录 = 清掉那四个键，书与正文（job 目录）一个字都不动。
+ * 删除选中的事件。删除某书最后一个事件时同时清掉旧位置，避免回退重现。
  */
 private fun MainActivity.confirmDeleteRecords(bookIds: List<String>) {
     if (bookIds.isEmpty()) return toast("先选记录")
@@ -307,7 +301,7 @@ private fun MainActivity.confirmDeleteRecords(bookIds: List<String>) {
         body = recordDeleteMessage(bookIds.size),
         confirm = "删除",
         onConfirm = {
-            for (id in bookIds) clearRecord(id)
+            deleteRecordKeys(bookIds)
             RecordsUi.exit()
             toast("已删除 ${bookIds.size} 条")
             showRecords()
@@ -321,7 +315,7 @@ private fun MainActivity.confirmClearRecords(bookIds: List<String>) {
         body = recordClearMessage(),
         confirm = "清空",
         onConfirm = {
-            for (id in bookIds) clearRecord(id)
+            deleteRecordKeys(bookIds, clearAll = true)
             RecordsUi.exit()
             toast("已清空 ${bookIds.size} 条")
             showRecords()
@@ -336,6 +330,19 @@ private fun MainActivity.confirmClearRecords(bookIds: List<String>) {
  * 只删 `last_` 的话这本书还在 ShelfScreen 里带进度，与「记录已删」自相矛盾。
  * tag 截 64 位与 [readTime] / [readProgress] 同口径，否则键对不上。
  */
+private fun MainActivity.deleteRecordKeys(keys: List<String>, clearAll: Boolean = false) {
+    val events = ReadingHistory.list(filesDir)
+    val ids = keys.mapNotNull { it.removePrefix("event:").toLongOrNull() }.toSet()
+    val books = keys.filter { it.startsWith("legacy:") }.map { it.removePrefix("legacy:") }.toMutableSet()
+    // 删除最后一条事件时一并清除对应旧位置，避免回退成旧记录重新出现。
+    for (book in events.filter { it.id in ids }.map { it.bookId }.distinct()) {
+        if (events.none { it.bookId == book && it.id !in ids }) books += book
+    }
+    ReadingHistory.remove(filesDir, if (clearAll) events.map { it.id }.toSet() else ids)
+    if (clearAll) books += events.map { it.bookId }
+    for (book in books) clearRecord(book)
+}
+
 private fun MainActivity.clearRecord(bookId: String) {
     val tag = bookId.take(64)
     getSharedPreferences("reader", android.content.Context.MODE_PRIVATE).edit()
@@ -348,14 +355,13 @@ private fun MainActivity.clearRecord(bookId: String) {
 }
 
 /** 点一条回到那本书那章。目录现读：换过源或删过，章号可能已经失效。 */
-private fun MainActivity.openRecord(bookId: String) {
+private fun MainActivity.openRecord(bookId: String, index: Int) {
     val job = Downloader.restore(jobsStore(), bookId)
     if (job == null) {
         toast("这本书已经不在本地了")
         return
     }
     val info = BookInfo(bookId, job.name.ifBlank { bookId }, job.author, job.chapters)
-    val index = readProgress(bookId)
     // 换了源之后目录长度会变，旧章号可能越界；说一句比默默打开第一章好。
     if (index !in info.chapters.indices) {
         toast("这一章已经失效了")

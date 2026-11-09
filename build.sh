@@ -20,8 +20,8 @@ KOTLIN_LIB="${KOTLIN_LIB:-$PREFIX/opt/kotlin/lib}"
 OUT="$ROOT/build"
 MIN_SDK=30
 TARGET_SDK=34
-APP_VERSION="${APP_VERSION:-1.5.2}"
-APP_VERSION_CODE="${APP_VERSION_CODE:-39}"
+APP_VERSION="${APP_VERSION:-1.6.0}"
+APP_VERSION_CODE="${APP_VERSION_CODE:-40}"
 
 # kotlinc 读 JAVA_OPTS（$PREFIX/bin/kotlinc 只在未设置时用默认 -Xmx512M）。
 # 本机内存被系统压到只剩几百兆，编译峰值必须自己封顶：串行 GC 不占并发 GC 线程池，
@@ -66,7 +66,7 @@ run_kotlinc() {
   local log; log="$(mktemp)"
   # -nowarn 压掉无害噪音；目标 11 便于 d8 处理。
   # 不能吞掉编译器输出：之前用 `|| true` 把报错也消了，导致后续步骤盲跑。
-  if ! kotlinc -jvm-target 11 -nowarn -classpath "$CLASSPATH_ALL" -d "$out" "$@" >"$log" 2>&1; then
+  if ! timeout "${COMPILE_TIMEOUT:-300}" kotlinc -jvm-target 11 -nowarn -classpath "$CLASSPATH_ALL" -d "$out" "$@" >"$log" 2>&1; then
     grep -viE 'jansi|UnsatisfiedLinkError|Failed to load native library|osinfo:' "$log" >&2
     rm -f "$log"
     die "kotlinc 编译失败"
@@ -185,11 +185,13 @@ if [ "${1:-}" = "test" ]; then
   run_kotlinc "$OUT/uicheck.jar" $(find "$ROOT/src" -name '*.kt')
   rm -f "$OUT/uicheck.jar"
   echo "== 运行 =="
-  for t in CoreTest ChapterOrderTest CloudSourceTest DownloadTest EngineTest HttpTest P0RegressionTest FinishTest SignTest RankConfigTest RotationTest AsyncGuardTest NavProgressTest JobLockTest CacheUsageTest com.watchdl.core.RuleBoundaryTest TocBudgetTest TextSelectorTest LegadoDefaultTest DevLogTest JsSyntaxProbeTest Es5CompatTest JsApiSurfaceTest UrlJsTest SearchPartialTest PaletteTest BackAffordanceTest IconDataTest; do
+  for t in CoreTest CharsetFontDecoderTest ChapterOrderTest CloudSourceTest DownloadTest EngineTest HttpTest P0RegressionTest FinishTest SignTest RankConfigTest RankFilterTest ShelfStoreTest RotationTest AsyncGuardTest NavProgressTest JobLockTest CacheUsageTest com.watchdl.core.RuleBoundaryTest TocBudgetTest TextSelectorTest LegadoDefaultTest DevLogTest JsSyntaxProbeTest Es5CompatTest JsApiSurfaceTest UrlJsTest SearchPartialTest PaletteTest BackAffordanceTest IconDataTest ReaderPagingTest com.watchdl.core.SourceImportPreviewTest SecondaryFeaturesTest; do
     echo "--- $t ---"
-    CHARSET_JSON="${CHARSET_JSON:-$HOME/novel/sources/fanqie-booksource/charset.json}" \
-      SONOVEL_RULES="${SONOVEL_RULES:-$HOME/novel/sonovel/rules/main.json}" \
-      java -cp "$OUT/test.jar:$STDLIB${DEPS:+:$DEPS}" "${t}Kt" || exit 1
+    test_env=(env -u SONOVEL_RULES "CHARSET_JSON=${CHARSET_JSON:-$ROOT/app/assets/charset.json}")
+    sonovel_rules="${SONOVEL_RULES:-$HOME/novel/sonovel/rules/main.json}"
+    [ ! -f "$sonovel_rules" ] || test_env+=("SONOVEL_RULES=$sonovel_rules")
+    "${test_env[@]}" timeout "${TEST_TIMEOUT:-120}" java -Xmx384m \
+      -cp "$OUT/test.jar:$STDLIB${DEPS:+:$DEPS}" "${t}Kt" || exit 1
   done
   exit 0
 fi

@@ -51,10 +51,11 @@ data class ReplacePrefs(
  * 分隔符取不可见控制符 U+0000：规则名里不可能出现它，拼出来的键不会撞。
  * 落盘时转义成 `\u0000`，见 [replaceStateJson]。
  */
-fun replaceKey(name: String, pattern: String): String = "$name\u0000$pattern"
+fun replaceKey(name: String, pattern: String, bookId: String = ""): String =
+    "$name\u0000$pattern" + if (bookId.isEmpty()) "" else "\u0000$bookId"
 
 /** 一条规则的键。 */
-fun replaceKeyOf(r: ReplaceRule): String = replaceKey(r.name, r.pattern)
+fun replaceKeyOf(r: ReplaceRule): String = replaceKey(r.name, r.pattern, r.bookId)
 
 /** 一批规则的键，顺序同传入顺序。 */
 fun replaceKeys(rules: List<ReplaceRule>): List<String> = rules.map { replaceKeyOf(it) }
@@ -76,7 +77,8 @@ fun replaceScopeLabel(scope: String): String = when (scope) {
 fun replaceRowSubtitle(r: ReplaceRule): String {
     val kind = if (r.isRegex) "正则" else "纯文本"
     val to = if (r.replacement.isBlank()) "空" else "「${r.replacement}」"
-    return "$kind · ${replaceScopeLabel(r.scope)} · 替换为$to"
+    val target = if (r.bookId.isBlank()) "全局" else "本书"
+    return "$kind · ${replaceScopeLabel(r.scope)} · $target · 替换为$to"
 }
 
 /** 顶栏副标题：`N 条 · 启用 M 条`。legado 那里没有统计，这里补一个。 */
@@ -166,7 +168,7 @@ fun replaceSetEnabled(
     enabled: Boolean,
 ): List<ReplaceRule> = rules.map {
     if (replaceKeyOf(it) in keys) ReplaceRule(
-        it.name, it.pattern, it.replacement, it.isRegex, it.scope, enabled,
+        it.name, it.pattern, it.replacement, it.isRegex, it.scope, enabled, it.bookId,
     ) else it
 }
 

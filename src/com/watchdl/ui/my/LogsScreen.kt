@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.widget.LinearLayout
 import com.watchdl.MainActivity
 import com.watchdl.core.DevLog
+import com.watchdl.core.LogFilter
 import com.watchdl.core.Screen
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
@@ -38,6 +39,8 @@ private class LogTail(val bytes: Long, val lines: Int, val tail: List<String>)
  * 换屏也不清 —— 反正每次进日志页都会重写一次。
  */
 private var lastTail: LogTail? = null
+private var logTagFilter = ""
+private var logErrorsOnly = false
 
 internal fun MainActivity.showLogs() {
     setScreen(Screen.Logs)
@@ -62,7 +65,11 @@ internal fun MainActivity.showLogs() {
     // 整页一次画完（含开关行）：开关状态与文件内容属于同一次快照，
     // 分两段拼会出现「开关说开着、下面还是关着时的空态」。
     bg(Screen.Logs, body = { readLogTail() }) { r ->
-        renderLogs(col, r.getOrNull())
+        renderLogs(col, r.getOrNull(), r.isFailure)
+        r.exceptionOrNull()?.let {
+            col.addView(Widgets.emptyState(this, "warning", "日志读取失败\n${it.message?.take(48) ?: "文件不可读"}"))
+            col.addView(Widgets.button(this, "重新读取", "tonal") { showLogs() })
+        }
     }
 }
 
@@ -118,21 +125,21 @@ private fun MainActivity.readLogTail(): LogTail? {
     // 刚点的那个操作就看不到，看着像功能没生效。
     DevLog.forceFlush()
     var count = 0
+    val filter = LogFilter(logTagFilter, logErrorsOnly)
     val ring = ArrayDeque<String>()
-    runCatching {
-        f.bufferedReader().useLines { seq ->
-            for (line in seq) {
-                if (line.isBlank()) continue
-                count++
-                ring.addLast(line)
-                if (ring.size > TAIL_LINES) ring.removeFirst()
-            }
+    f.bufferedReader().useLines { seq ->
+        for (line in seq) {
+            if (line.isBlank()) continue
+            count++
+            if (!filter.matches(line)) continue
+            ring.addLast(line)
+            if (ring.size > TAIL_LINES) ring.removeFirst()
         }
-    }.onFailure { return null }
+    }
     return LogTail(f.length(), count, ring.toList())
 }
 
-private fun MainActivity.renderLogs(col: LinearLayout, tail: LogTail?) {
+private fun MainActivity.renderLogs(col: LinearLayout, tail: LogTail?, failed: Boolean = false) {
     col.removeAllViews()
     // ⋮ 里的「复制」读的是这一份，不再读盘。
     lastTail = tail
@@ -158,6 +165,7 @@ private fun MainActivity.renderLogs(col: LinearLayout, tail: LogTail?) {
         // 手表存储放不下，导到文档也没法看。
     })
 
+    if (failed) return
     if (tail == null) {
         // 空态照 legado `EmptyMessage`：图标 + 一句「暂无日志」，
         // 再跟一句指向开关的话 —— 这一页的空屏十有八九是开关没开。
@@ -167,15 +175,20 @@ private fun MainActivity.renderLogs(col: LinearLayout, tail: LogTail?) {
     }
 
     col.addView(Widgets.sectionLabel(this, "$LOG_NAME · ${humanBytes(tail.bytes)} · ${tail.lines} 行"))
-    if (tail.tail.isEmpty()) {
-        col.addView(Widgets.emptyState(this, "history",
-            "暂无日志\ndev.log 是空的，开关打开后产生的日志会显示在这里"))
-    } else {
-        // legado 的日志先列文件名、点开才看正文（CrashLogSheet → LogDetailSheet）。
-        // 我们只有一个 dev.log，正文直接摊在页里：手表上多一次点击换不来什么，
-        // 而「点了没反应」正是要当场看见的那件事。
-        col.addView(Widgets.sectionLabel(this, "最后 ${tail.tail.size} 行"))
-        col.addView(logBlock(tail.tail))
+    run {
+        col.addView(Widgets.sectionLabel(this, "筛选后最新 ${tail.tail.size} 行"))
+        col.addView(Widgets.button(this, "标签：${logTagFilter.ifBlank { "全部" }}", "text") {
+            Widgets.longMenuDialog(this, "日志标签", listOf("全部", "WatchDL", "UI", "Source", "History").map { tag ->
+                tag to { logTagFilter = if (tag == "全部") "" else tag; showLogs() }
+            }).show()
+        })
+        col.addView(Widgets.button(this, if (logErrorsOnly) "仅错误：开" else "仅错误：关", "text") {
+            logErrorsOnly = !logErrorsOnly; showLogs()
+        })
+        val filtered = tail.tail
+        col.addView(Widgets.sectionLabel(this, "匹配 ${filtered.size} / ${tail.tail.size} 行"))
+        if (filtered.isEmpty()) col.addView(Widgets.emptyState(this, "search", "没有匹配日志"))
+        else col.addView(logBlock(filtered))
     }
 }
 

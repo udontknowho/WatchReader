@@ -458,6 +458,22 @@ private fun MainActivity.askReplaceRule(existing: ReplaceRule?) {
     val oldKey = existing?.let { replaceKeyOf(it) }
     fun open() {
         var scope = existing?.scope ?: "text"
+        var targetBook = existing?.bookId.orEmpty()
+        val target = Md3.text(this, "", Md3.FS_SM, Md3.primary).apply {
+            minimumHeight = Md3.dp(this@askReplaceRule, 36)
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        fun paintTarget() { target.text = if (targetBook.isBlank()) "适用：全局 · 点此选书" else "适用：本书 · 点此切换" }
+        paintTarget()
+        target.setOnClickListener {
+            val choices = mutableListOf<Pair<CharSequence, () -> Unit>>()
+            choices += "全局" to { targetBook = ""; paintTarget() }
+            for (id in jobsStore().listBooks()) {
+                val job = com.watchdl.core.Downloader.restoreLight(jobsStore(), id) ?: continue
+                choices += "本书：${job.name.ifBlank { id }}" to { targetBook = id; paintTarget() }
+            }
+            Widgets.longMenuDialog(this, "规则适用范围", choices).show()
+        }
 
         val name = replaceField("名称", existing?.name ?: "")
         val pattern = replaceField("查找内容（纯文本或正则）", existing?.pattern ?: "")
@@ -513,6 +529,7 @@ private fun MainActivity.askReplaceRule(existing: ReplaceRule?) {
                 topMargin = Md3.dp(this@askReplaceRule, 5)
             })
         }
+        col.addView(target)
         col.addView(chipRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, 28)).apply {
             topMargin = Md3.dp(this@askReplaceRule, 5)
@@ -542,7 +559,7 @@ private fun MainActivity.askReplaceRule(existing: ReplaceRule?) {
                 } else {
                     val rule = ReplaceRule(
                         n, p, repl.text.toString().trim(), regex.isChecked, scope,
-                        existing?.enabled ?: true,
+                        existing?.enabled ?: true, targetBook,
                     )
                     ReplaceRuleStore.save(replaceUpsert(ReplaceRuleStore.list(), oldKey, rule))
                     // 改名或改模式就换了键，手动顺序表里的旧键要一起换，

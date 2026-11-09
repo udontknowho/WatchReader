@@ -163,20 +163,17 @@ internal fun MainActivity.showCache() {
     // 「有正文 10 本」「正文已清空 2 本」，189 × 248 dp 上三行标题就把第一张
     // 书卡挤出屏了。现在只留分组标题，数写在标题里。
     //
-    // 两段照 legado 的「书架书籍 / 未在书架」（2026-11-02 用户拍板 C）：
-    // 我们的书架就是下好的书，所以「已下全」即在书架，「还有缺章」即不在书架。
-    // legado 那边靠书的分组字段分，本项目没有收藏书架这个动作，下完就上架，
-    // 所以只能按下没下完来分。真要按用户收藏分，得先加「收藏书架」。
+    // 收藏与下载已分离，这里的判据只有正文覆盖数，不再把完整下载称为在架。
     val onShelf = shown.filter { it.cached >= it.total }
     val offShelf = shown.filter { it.cached < it.total }
     if (onShelf.isNotEmpty()) {
         col.addView(Widgets.sectionLabel(this,
-            "书架书籍 ${onShelf.size} 本 · ${humanBytes(onShelf.sumOf { it.bytes })}"))
+            "已缓存完整 ${onShelf.size} 本 · ${humanBytes(onShelf.sumOf { it.bytes })}"))
         for (u in onShelf) addCacheBook(col, u)
     }
     if (offShelf.isNotEmpty()) {
         col.addView(Widgets.sectionLabel(this,
-            "未在书架 ${offShelf.size} 本 · 缺 ${offShelf.sumOf { it.total - it.cached }} 章"))
+            "尚有缺章 ${offShelf.size} 本 · 缺 ${offShelf.sumOf { it.total - it.cached }} 章"))
         for (u in offShelf) addCacheBook(col, u)
     }
     // 搜索框搬到顶栏后，关键词得有个地方看得见，否则用户不知道自己在筛什么。

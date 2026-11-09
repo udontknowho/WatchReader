@@ -6,6 +6,7 @@ import android.view.ViewGroup
 import android.widget.*
 import com.watchdl.MainActivity
 import com.watchdl.core.*
+import com.watchdl.ui.attachTabs
 import com.watchdl.ui.book.showDetail
 import com.watchdl.ui.shelf.showShelf
 import com.watchdl.ui.theme.Icons
@@ -672,4 +673,208 @@ internal fun MainActivity.siblingsOf(hit: BookHit): List<BookHit> {
         it.name.trim() == hit.name.trim() && it.author.trim() == hit.author.trim()
     }
     return (listOf(hit) + same).distinctBy { it.sourceName }
+}
+
+/** 发现页仅保留本次会话快照；主动刷新和更改筛选才重新取数。 */
+private object RankUiSession {
+    var site = RankConfig.Site.QIDIAN
+    var gender = RankConfig.Gender.MALE
+    var requestSerial = 0L
+    val snapshots = LinkedHashMap<String, Screen.Discover>()
+}
+
+private fun MainActivity.availableRanks(): List<RankConfig.Rank> =
+    rankCache ?: RankConfig.local(java.io.File(filesDir, "sources")).also { rankCache = it }
+
+internal fun MainActivity.showDiscoverPage(rankKey: String = "") {
+    if (rankKey.isEmpty()) {
+        showDiscoverSnapshot(Screen.Discover(site = RankUiSession.site, gender = RankUiSession.gender))
+        return
+    }
+    val rank = availableRanks().firstOrNull { it.key == rankKey }
+    val state = Screen.Discover(rankKey, site = rank?.site ?: RankUiSession.site,
+        gender = rank?.gender ?: RankUiSession.gender)
+    val cached = RankUiSession.snapshots.values.lastOrNull { it.rankKey == rankKey }
+    if (cached != null) showDiscoverSnapshot(cached) else requestRank(state)
+}
+
+internal fun MainActivity.backFromDiscover(s: Screen.Discover) {
+    when (s.stage) {
+        "content" -> goBackToPrevious()
+        "boards" -> goBackToPrevious()
+        else -> showShelf()
+    }
+}
+
+/** 每个快照自带 filter、hits、error、loaded 与 scrollY；重放绝不发请求。 */
+internal fun MainActivity.showDiscoverSnapshot(state: Screen.Discover) {
+    setScreen(state)
+    RankUiSession.site = state.site
+    RankUiSession.gender = state.gender
+    root.removeAllViews()
+    val rank = availableRanks().firstOrNull { it.key == state.rankKey }
+    val title = when (state.stage) {
+        "content" -> rank?.rankLabel() ?: "榜单不存在"
+        "boards" -> "选择榜单"
+        else -> "发现"
+    }
+    if (state.stage == "sites") {
+        root.addView(Widgets.headerRow(this, title,
+            trailing = listOf("search" to { rememberReturn(); askKeyword() })))
+    } else {
+        root.addView(Widgets.topBar(this, title, onBack = { backFromDiscover(state) },
+            trailing = if (state.stage == "content") listOf("refresh" to {
+                requestRank(state.copy(scrollY = 0))
+            }) else emptyList()))
+    }
+    val body = Widgets.scrollBody(this, crownStep, crownGlide)
+    val col = Widgets.contentColumn(body)
+    root.addView(body)
+    when (state.stage) {
+        "sites" -> {
+            col.addView(Widgets.button(this, "搜索书名或作者", "tonal") {
+                rememberReturn(); askKeyword()
+            })
+            for ((site, label) in listOf(RankConfig.Site.QIDIAN to "起点中文网",
+                RankConfig.Site.FANQIE to "番茄小说")) {
+                col.addView(Widgets.listItem(this, label,
+                    if (site == RankConfig.Site.QIDIAN) "九类榜单 · 男生 / 女生" else "分类阅读榜 · 男生 / 女生",
+                    twoLine = true, highlight = site == state.site) {
+                    rememberReturn()
+                    showDiscoverSnapshot(state.copy(site = site, stage = "boards", scrollY = 0))
+                })
+            }
+        }
+        "boards" -> {
+            col.addView(Widgets.button(this, "${state.site.siteLabel()} · ${state.gender.genderLabel()} · 切换", "tonal") {
+                chooseRankChannel(state)
+            })
+            for (r in RankConfig.select(availableRanks(), state.site, state.gender)) {
+                col.addView(Widgets.listItem(this, r.rankLabel(), "查看榜单", highlight = false) {
+                    rememberReturn()
+                    showDiscover(r.key)
+                })
+            }
+        }
+        else -> {
+            col.addView(Widgets.button(this, "${state.site.siteLabel()} · ${state.gender.genderLabel()} · 换榜", "tonal") {
+                chooseRankBoard(state)
+            })
+            if (rank != null && (RankConfig.qidianCategories(rank).size > 1 ||
+                    RankConfig.qidianPeriods(rank).isNotEmpty())) {
+                val category = RankConfig.qidianCategories(rank).firstOrNull { it.id == state.filter.categoryId }?.name ?: "全站"
+                val period = if (RankConfig.qidianPeriods(rank).isEmpty()) "" else " · ${state.filter.period.label}"
+                col.addView(Widgets.button(this, "$category$period · 筛选", "tonal") { chooseRankFilter(state, rank) })
+            }
+            if (state.error.isNotBlank()) {
+                col.addView(Widgets.emptyState(this, "warning", state.error))
+                col.addView(Widgets.button(this, "重试当前筛选", "tonal") { requestRank(state.copy(scrollY = 0)) })
+            }
+            if (!state.loaded && state.error.isEmpty()) {
+                col.addView(Widgets.emptyState(this, "refresh", "正在加载榜单…"))
+                // 离开加载页会取消请求；返回快照时提供显式继续入口。
+                col.addView(Widgets.button(this, "重新加载", "text") { requestRank(state.copy(scrollY = 0)) })
+            }
+            state.hits.forEachIndexed { i, hit ->
+                col.addView(Widgets.listItem(this, "${i + 1}  ${hit.name}",
+                    listOf(hit.author, hit.extra).filter { it.isNotBlank() }.joinToString(" · "),
+                    twoLine = true, highlight = false) { openDiscoverHit(hit) })
+            }
+            if (state.loaded && state.error.isEmpty()) {
+                col.addView(Md3.text(this, when {
+                    state.hits.isEmpty() -> "该筛选下暂无书目"
+                    state.site == RankConfig.Site.QIDIAN -> "已展示本站首批 · 后续分页尚未确认"
+                    else -> "已展示全部榜单书目"
+                }, Md3.FS_SM, Md3.onSurfaceVariant))
+            }
+        }
+    }
+    attachTabs(1)
+    // 在离开屏幕前，rememberReturn 还能再取得最新的实际像素位置。
+    body.setOnScrollChangeListener { _: View, _: Int, y: Int, _: Int, _: Int ->
+        val current = curScreen as? Screen.Discover
+        if (current != null && screenId(current) == screenId(state)) {
+            val updated = current.copy(scrollY = y)
+            setScreen(updated)
+            if (updated.loaded) {
+                RankUiSession.snapshots.remove(screenId(updated))
+                RankUiSession.snapshots[screenId(updated)] = updated
+            }
+        }
+    }
+    body.post { if (screenId(curScreen) == screenId(state)) body.scrollTo(0, state.scrollY) }
+}
+
+private fun RankConfig.Site.siteLabel(): String = if (this == RankConfig.Site.QIDIAN) "起点" else "番茄"
+private fun RankConfig.Gender.genderLabel(): String = if (this == RankConfig.Gender.FEMALE) "女生" else "男生"
+private fun RankConfig.Rank.rankLabel(): String = if (site == RankConfig.Site.QIDIAN)
+    name.removePrefix("起点").removePrefix("女频") else name.substringBefore(" · ")
+
+private fun MainActivity.chooseRankChannel(state: Screen.Discover) {
+    val items: List<Pair<CharSequence, () -> Unit>> = RankConfig.Gender.values().map { gender ->
+        "${gender.genderLabel()}${if (gender == state.gender) " · 当前" else ""}" to {
+            showDiscoverSnapshot(state.copy(gender = gender, scrollY = 0))
+        }
+    }
+    Widgets.longMenuDialog(this, "${state.site.siteLabel()}频道", items).show()
+}
+
+private fun MainActivity.chooseRankBoard(state: Screen.Discover) {
+    val items = mutableListOf<Pair<CharSequence, () -> Unit>>()
+    items += "切换站点与频道" to {
+        rememberReturn()
+        showDiscoverSnapshot(Screen.Discover(site = state.site, gender = state.gender))
+    }
+    for (rank in RankConfig.select(availableRanks(), state.site, state.gender)) {
+        items += (rank.rankLabel() + if (rank.key == state.rankKey) " · 当前" else "") to {
+            if (rank.key != state.rankKey) showDiscover(rank.key)
+        }
+    }
+    Widgets.longMenuDialog(this, "选择榜单", items).show()
+}
+
+private fun MainActivity.chooseRankFilter(state: Screen.Discover, rank: RankConfig.Rank) {
+    val items = mutableListOf<Pair<CharSequence, () -> Unit>>()
+    for (category in RankConfig.qidianCategories(rank)) {
+        items += (category.name + if (category.id == state.filter.categoryId) " · 当前" else "") to {
+            val next = state.filter.copy(categoryId = category.id)
+            if (next != state.filter) requestRank(state.copy(filter = next, scrollY = 0))
+        }
+    }
+    for (period in RankConfig.qidianPeriods(rank)) {
+        items += (period.label + if (period == state.filter.period) " · 当前" else "") to {
+            val next = state.filter.copy(period = period)
+            if (next != state.filter) requestRank(state.copy(filter = next, scrollY = 0))
+        }
+    }
+    Widgets.longMenuDialog(this, "榜单筛选", items).show()
+}
+
+private fun MainActivity.requestRank(state: Screen.Discover) {
+    val rank = availableRanks().firstOrNull { it.key == state.rankKey }
+    if (rank == null) {
+        showDiscoverSnapshot(state.copy(loaded = true, error = "这个榜已不在榜单清单里"))
+        return
+    }
+    val requestSerial = ++RankUiSession.requestSerial
+    val loading = state.copy(hits = emptyList(), error = "", loaded = false, canLoadMore = false)
+    showDiscoverSnapshot(loading)
+    bg(loading, {
+        val decoder = runCatching { CharsetFontDecoder.fromFile(java.io.File(filesDir, "charset.json").absolutePath) }
+            .getOrNull()?.takeIf { it.isReady }
+        RankSource.fetch(rank, if (rank.gender == RankConfig.Gender.FEMALE) "female" else "male",
+            1, decoder = decoder, filter = state.filter)
+    }) { result ->
+        if (requestSerial != RankUiSession.requestSerial) return@bg
+        val current = (curScreen as? Screen.Discover) ?: return@bg
+        val ready = result.fold(
+            onSuccess = { current.copy(hits = it, loaded = true, error = "", canLoadMore = false) },
+            onFailure = { current.copy(loaded = true, error =
+                if (it is RankSource.RankAccessException) it.message ?: "起点访问受限"
+                else "榜单暂时无法获取：${it.message ?: "网络不可用"}", canLoadMore = false) })
+        RankUiSession.snapshots.remove(screenId(ready))
+        RankUiSession.snapshots[screenId(ready)] = ready
+        while (RankUiSession.snapshots.size > 24) RankUiSession.snapshots.remove(RankUiSession.snapshots.keys.first())
+        showDiscoverSnapshot(ready)
+    }
 }

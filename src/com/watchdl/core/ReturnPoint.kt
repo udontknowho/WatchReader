@@ -10,7 +10,7 @@ data class ReturnPoint(
 
 /** 同屏重复记忆更新位置，不增加返回层级。最多保留八层。 */
 fun ArrayDeque<ReturnPoint>.remember(point: ReturnPoint) {
-    if (lastOrNull()?.screen == point.screen) removeLast()
+    if (lastOrNull()?.let { screenId(it.screen) == screenId(point.screen) } == true) removeLast()
     addLast(point)
     while (size > 8) removeFirst()
 }

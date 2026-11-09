@@ -12,6 +12,8 @@ import android.widget.TextView
 import com.watchdl.MainActivity
 import com.watchdl.core.*
 import com.watchdl.ui.attachTabs
+import com.watchdl.ui.book.showDetail
+import com.watchdl.ui.source.showDiscover
 import com.watchdl.ui.reader.preview
 import com.watchdl.ui.my.showCache
 import com.watchdl.ui.my.showLogs
@@ -42,7 +44,7 @@ internal object ShelfUi {
     // 都在这一个桶里，不再新造存储机制。legado 那边这些开关存在 BookshelfSettings。
 
     /** 封面墙 / 列表两档。legado `bookshelfLayoutModePortrait`（0 列表、1 网格）。 */
-    var grid = true
+    var grid = false
 
     /** 排序键，见 [ShelfSort]。 */
     var sort = ShelfSort.RECENT
@@ -64,7 +66,7 @@ internal object ShelfUi {
 
     fun load(ctx: Context) {
         val p = ctx.getSharedPreferences("reader", Context.MODE_PRIVATE)
-        grid = p.getBoolean("shelfGrid", true)
+        grid = p.getBoolean("shelfGrid", false)
         sort = p.getInt("shelfSort", ShelfSort.RECENT)
         sortDesc = p.getBoolean("shelfSortDesc", ShelfSort.defaultDesc(sort))
         titleLines = p.getInt("shelfTitleLines", 2).coerceIn(1, 2)
@@ -99,6 +101,7 @@ internal class ShelfRow(
     val sourceTag: String,
     val updatedAt: Long = 0L,
     val newCount: Int = 0,
+    val favorite: ShelfBook? = null,
 )
 
 /**
@@ -111,6 +114,24 @@ internal class ShelfRow(
  * 以及作业快照。分开读会把每个 job.json 读两遍。
  */
 internal fun MainActivity.shelfRows(): List<ShelfRow> {
+    ensureShelfMigration()
+    return shelfStore().books().map { book ->
+        val info = book.info
+        val job = Downloader.restoreLight(jobsStore(), info.bookId)
+            ?: BookJob(info.bookId, info.name, info.author, info.chapters)
+        ShelfRow(job, book.sourceName.ifBlank {
+            if (LocalImport.isLocal(info.bookId)) "本地" else "在线"
+        }, job.updatedAt.takeIf { it > 0 } ?: book.addedAt, shelfNewCount(info.bookId), book)
+    }.sortedWith { a, b ->
+        val c = shelfCompare(
+            ShelfSortKey(a.job.name, a.job.author, a.updatedAt, readTime(a.job.bookId)),
+            ShelfSortKey(b.job.name, b.job.author, b.updatedAt, readTime(b.job.bookId)), ShelfUi.sort)
+        if (ShelfUi.sortDesc) -c else c
+    }
+}
+
+/** 下载页与迁移使用真实作业，不以收藏列表代替。 */
+internal fun MainActivity.downloadRows(): List<ShelfRow> {
     val dirs = jobsDir().listFiles()
         ?.filter { it.isDirectory && File(it, "job.json").isFile }
         ?: return emptyList()
@@ -203,7 +224,10 @@ internal fun MainActivity.showShelf(keepScroll: Boolean = false) {
     val col = Widgets.contentColumn(body)
     if (rows.isEmpty()) {
         col.addView(Widgets.emptyState(this, "list",
-            "书架是空的\n搜索书名即可开始"))
+            "这里还没有书\n收藏后保留阅读进度"))
+        col.addView(Widgets.button(this, "去发现好书", "filled") {
+            showDiscover()
+        })
         root.addView(body)
         attachTabs(0)
         return
@@ -218,8 +242,8 @@ internal fun MainActivity.showShelf(keepScroll: Boolean = false) {
             // legado 列表项 `desc = durChapterTitle`：读到哪一章。
             val readIdx = readProgress(job.bookId)
             val readTitle = job.chapters.getOrNull(readIdx)?.title?.takeIf { it.isNotBlank() }
-            val tail = if (readTitle != null) "在读 · $readTitle"
-                       else progressTail(done, job.total, 0)
+            val tail = if (readTime(job.bookId) > 0L && readTitle != null) "在读 · $readTitle"
+                       else if (done > 0) "本地可读 · $done 章" else "已收藏 · 尚未开始"
             val sub = if (job.author.isBlank()) tail else "${job.author} · $tail"
             // legado 列表项 `extra = latestChapterTitle`：最新一章叫什么。
             // 与在读章同名时不重画，省一行 —— 手表上每一行都是稀缺资源。
@@ -227,7 +251,7 @@ internal fun MainActivity.showShelf(keepScroll: Boolean = false) {
                 it.isNotBlank() && it != readTitle
             }
             val item = Widgets.listItem(this, displayName, sub, twoLine = true,
-                trailing = "more", onTrailingClick = { showJobMenu(job) }) {
+                trailing = "more", onTrailingClick = { showShelfBookMenu(row) }) {
                 openShelfBook(job.bookId, displayName, job.author)
             }
             if (latest != null) {
@@ -244,7 +268,7 @@ internal fun MainActivity.showShelf(keepScroll: Boolean = false) {
                         ViewGroup.LayoutParams.WRAP_CONTENT))
             }
             item.setOnLongClickListener {
-                showJobMenu(job)
+                showShelfBookMenu(row)
                 true
             }
             col.addView(item)
@@ -338,7 +362,7 @@ private fun MainActivity.shelfCard(row: ShelfRow): LinearLayout {
     // 长按开这本的作业菜单（重命名 / 导出 TXT / 删除）。
     // 以前长按是进多选，多选撤掉后删除只能走这里 —— 网格卡没有 trailing 位。
     card.setOnLongClickListener {
-        showJobMenu(job)
+        showShelfBookMenu(row)
         true
     }
 
@@ -446,6 +470,33 @@ internal fun MainActivity.shelfColor(job: BookJob): Int {
  *
  * 留下的是这一屏真能干的四件事：添加本地书、更新目录、布局设置、看缓存。
  */
+internal fun MainActivity.shelfStore(): ShelfStore = ShelfStore(File(filesDir, "shelf.json"))
+
+internal fun MainActivity.ensureShelfMigration() {
+    shelfStore().migrateOnce {
+        downloadRows().map { row ->
+            ShelfBook(BookInfo(row.job.bookId, row.job.name, row.job.author, row.job.chapters),
+                if (LocalImport.isLocal(row.job.bookId)) "本地"
+                else runCatching { com.watchdl.ui.book.srcName(sourceForBook(row.job.bookId)) }.getOrDefault("在线"), row.updatedAt)
+        }
+    }
+}
+
+private fun MainActivity.showShelfBookMenu(row: ShelfRow) {
+    val info = row.favorite?.info ?: BookInfo(row.job.bookId, row.job.name, row.job.author, row.job.chapters)
+    Widgets.longMenuDialog(this, info.name, listOf(
+        "书籍详情" to { rememberReturn(); showDetail(info, sourceForBook(info.bookId)) },
+        "移出书架" to {
+            Widgets.md3Dialog(this, "移出书架", body = "仅移除收藏，保留下载与阅读进度。", confirm = "移出",
+                onConfirm = {
+                    runCatching { shelfStore().remove(info.bookId) }
+                        .onSuccess { showShelf(keepScroll = true) }
+                        .onFailure { toast("收藏保存失败：${it.message}") }
+                }).show()
+        },
+    )).show()
+}
+
 internal fun MainActivity.showShelfMenu() {
     Widgets.longMenuDialog(this, "书架", listOf(
         // legado 的「添加本地」走 SAF 文件选择器。手表系统自带「文件」选择器，
@@ -520,10 +571,19 @@ private fun MainActivity.openShelfBook(bookId: String, name: String, author: Str
  */
 internal fun MainActivity.readShelfBook(bookId: String, name: String, author: String) {
     val job = Downloader.restoreLight(jobsStore(), bookId)
-    if (job == null || job.chapters.isEmpty()) { openBook(bookId, name, author); return }
-    val info = BookInfo(bookId, job.name.ifBlank { name }, job.author.ifBlank { author }, job.chapters)
-    val at = readProgress(bookId).coerceIn(0, job.chapters.size - 1)
+    val favorite = shelfStore().find(bookId)
+    val info = if (job != null && job.chapters.isNotEmpty())
+        BookInfo(bookId, job.name.ifBlank { name }, job.author.ifBlank { author }, job.chapters)
+        else favorite?.info ?: BookInfo(bookId, name, author, emptyList())
+    val src = sourceForBook(bookId)
+    if (info.chapters.isEmpty()) {
+        rememberReturn()
+        showDetail(info, src)
+        return
+    }
+    val at = readProgress(bookId).coerceIn(0, info.chapters.lastIndex)
     com.watchdl.ui.reader.ReaderUi.fromShelf = true
+    tocSrc = src
     rememberReturn()
     preview(info, at)
 }
@@ -673,6 +733,9 @@ internal fun MainActivity.refreshShelfTocs() {
             if (got == null || got.chapters.isEmpty()) {
                 failed++
             } else {
+                val favorite = shelfStore().find(row.job.bookId)
+                if (favorite != null) shelfStore().add(got.copy(
+                    name = got.name.ifBlank { row.job.name }, author = got.author.ifBlank { row.job.author }), favorite.sourceName)
                 val merged = mergeShelfCatalog(
                     jobsStore().readJob(row.job.bookId).orEmpty(), got.chapters)
                 if (merged == null) {
@@ -712,7 +775,7 @@ internal fun MainActivity.refreshShelfTocs() {
  * 走 [multi] 而不是重读书源目录，是因为 `multi` 里已经把 `DeviceRegister` 起好，
  * 番茄源的构造依赖它。
  */
-private fun MainActivity.sourceForBook(bookId: String): BookSource? {
+internal fun MainActivity.sourceForBook(bookId: String): BookSource? {
     // 本地书没有源。不拦住的话会按「非 http」落到番茄，拿 local:xxx 去发请求。
     if (LocalImport.isLocal(bookId)) return null
     val pool = runCatching { multi.allNamed() }.getOrNull().orEmpty()
@@ -724,5 +787,6 @@ private fun MainActivity.sourceForBook(bookId: String): BookSource? {
         if (host != null) return host.source
     }
     // 番茄的 bookId 是纯数字，不带主机；池子里第一个就是它（buildMulti 先加）。
+    if (bookId.startsWith("http", ignoreCase = true)) return null
     return pool.firstOrNull { it.name == "番茄" }?.source ?: pool.firstOrNull()?.source
 }

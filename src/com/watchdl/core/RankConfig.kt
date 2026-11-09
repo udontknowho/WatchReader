@@ -61,8 +61,7 @@ object RankConfig {
      *
      * **拉不到云端时用这个**，也是新装第一次进发现页的默认内容。
      *
-     * 番茄分类 ID 与起点榜代号均 2026-10-24 逐个实测：番茄 26 个分类 ×
-     * 阅读/新书两榜共 52 个组合全部能出数据；起点 5 个 board 均能翻到第 10 页。
+     * 番茄保留 26 个阅读分类。起点使用官网九榜，首批之外的分页尚未确认。
      */
     /**
      * 番茄男频分类。顺序按番茄官网的展示顺序，改顺序等于改发现页里的排列。
@@ -82,17 +81,62 @@ object RankConfig {
         267 to "现言脑洞", 246 to "宫斗宅斗", 1015 to "女频衍生",
     )
 
-    /**
-     * 起点榜。代号实测全部能翻到第 10 页（每页 20 条）。
-     * 其余试过的 `readlist`/`recommlist`/`finishlist` 等一律 404，不要再加。
-     */
+    /** 官网首页实际给出的九榜路径。尾段是筛选值，不是页码。 */
     val QIDIAN_BOARDS = listOf(
-        "yuepiaolist" to "月票榜",
-        "hotsaleslist" to "畅销榜",
-        "newbooklist" to "新书榜",
-        "collectlist" to "收藏榜",
-        "updatelist" to "更新榜",
+        "yuepiao" to "月票榜", "hotsales" to "畅销榜", "readindex" to "阅读榜",
+        "newfans" to "书友榜", "rec" to "推荐榜", "update" to "更新榜",
+        "sign" to "签约榜", "newbook" to "新书榜", "newauthor" to "新人榜",
     )
+
+    /** 兼容旧接口代号。收藏榜没有对应官网九榜，不做错误映射。 */
+    fun qidianBoard(board: String): String? {
+        val canonical = when (board) {
+            "yuepiaolist" -> "yuepiao"
+            "hotsaleslist" -> "hotsales"
+            "newbooklist" -> "newbook"
+            "updatelist" -> "update"
+            else -> board
+        }
+        return canonical.takeIf { key -> QIDIAN_BOARDS.any { it.first == key } }
+    }
+
+    data class QidianCategory(val id: Int, val name: String)
+    enum class QidianPeriod(val path: String, val label: String) {
+        WEEK("3", "周榜"), MONTH("2", "月榜")
+    }
+    /** 界面保存筛选和滚动位置，换榜时重新创建默认筛选。 */
+    data class QidianFilter(
+        val categoryId: Int = -1,
+        val period: QidianPeriod = QidianPeriod.WEEK,
+    )
+    /** 阅读、书友榜实际给出的男频分类。ID 不是显示顺序。 */
+    val QIDIAN_CATEGORIES = listOf(
+        QidianCategory(-1, "全站"), QidianCategory(21, "玄幻"), QidianCategory(1, "奇幻"),
+        QidianCategory(2, "武侠"), QidianCategory(22, "仙侠"), QidianCategory(4, "都市"),
+        QidianCategory(15, "现实"), QidianCategory(6, "军事"), QidianCategory(5, "历史"),
+        QidianCategory(7, "游戏"), QidianCategory(8, "体育"), QidianCategory(9, "科幻"),
+        QidianCategory(10, "悬疑灵异"), QidianCategory(20109, "诸天无限"), QidianCategory(12, "轻小说"),
+    )
+    fun qidianCategories(rank: Rank): List<QidianCategory> =
+        if (rank.kind == Kind.QIDIAN && rank.gender == Gender.MALE &&
+            qidianBoard(rank.board) in listOf("readindex", "newfans")) QIDIAN_CATEGORIES
+        else listOf(QIDIAN_CATEGORIES.first())
+
+    fun qidianPeriods(rank: Rank): List<QidianPeriod> =
+        if (rank.kind == Kind.QIDIAN && rank.gender == Gender.MALE &&
+            qidianBoard(rank.board) == "newfans") QidianPeriod.values().toList()
+        else emptyList()
+
+    fun select(ranks: List<Rank>, site: Site, gender: Gender): List<Rank> =
+        ranks.filter { it.site == site && (!it.gendered || it.gender == gender) }
+
+    fun validateQidianFilter(rank: Rank, filter: QidianFilter) {
+        require(rank.kind == Kind.QIDIAN && qidianBoard(rank.board) != null) { "未知起点榜单" }
+        require(qidianCategories(rank).any { it.id == filter.categoryId }) { "该榜尚未确认此分类筛选" }
+        require(filter.period == QidianPeriod.WEEK || filter.period in qidianPeriods(rank)) {
+            "该榜尚未确认月榜筛选"
+        }
+    }
 
     val BUILTIN = buildList {
         fun fq(cat: Int, name: String, gender: Gender, type: Int) {
@@ -106,20 +150,18 @@ object RankConfig {
         // 点进去多数取不到正文 —— 用户要求去掉。要恢复就把它加回这两个数组。
         for ((cat, name) in MALE_CATS) fq(cat, name, Gender.MALE, 2)
         for ((cat, name) in FEMALE_CATS) fq(cat, name, Gender.FEMALE, 2)
-        // 起点接口本身接受 gender=male|female，2026-11-03 实测五个 board 的女频
-        // 都能返回 20 条、且与男频书目不同。男频沿用老键 `qd:<board>`
-        // （存档与云端 ranks.json 里已有），女频另立 `qd:female:<board>`。
+        // 官网男女入口分别使用 m.qidian.com、m.qdmm.com。女频不沿用男频分类。
         for ((board, name) in QIDIAN_BOARDS) {
-            add(Rank("qd:$board", "起点$name", Kind.QIDIAN, board = board, pages = 10,
+            add(Rank("qd:$board", "起点$name", Kind.QIDIAN, board = board, pages = 0,
                 gendered = true, site = Site.QIDIAN))
-            add(Rank("qd:female:$board", "起点女频$name", Kind.QIDIAN, board = board, pages = 10,
+            add(Rank("qd:female:$board", "起点女频$name", Kind.QIDIAN, board = board, pages = 0,
                 gendered = true, gender = Gender.FEMALE, site = Site.QIDIAN))
         }
     }
 
     /** 各 kind 的缺省页数，与内置清单一致。 */
     fun defaultPages(kind: Kind): Int = when (kind) {
-        Kind.QIDIAN -> 10       // 每页 20 本，10 页 = 内置的 200 本
+        Kind.QIDIAN -> 0        // 尚未确认后续分页协议，只取真实首批
         Kind.FANQIE_UPDATE -> 5
         else -> 0               // 番茄推荐/分类榜不可翻页
     }
@@ -134,11 +176,10 @@ object RankConfig {
      * 「分类榜没了」。云端 v2 又因为 jsdelivr 节点滞后一直没拉下来。
      * 加内置 19+7 个分类榜、改过一次内容就要把这个数往上加。
      *
-     * v3（2026-11-03）：起点补女频条目。**设备上留着 v2 缓存的话，它没有
-     * 这 5 个女频榜，还会顶掉内置表** —— 所以必须同步升版本号。
-     * 代价是云端 v2 的 ranks.json 也不再被采用，要同步发一版 v3。
+     * v4：起点改为官网九榜与真实页面筛选。v3 的旧五榜缓存不可覆盖新清单。
+     * 云端配置也应同步升到 v4，旧 board 别名可归一，收藏榜旧项会被跳过。
      */
-    const val BUILTIN_VERSION = 3
+    const val BUILTIN_VERSION = 4
 
     /**
      * 取配置的候选地址。与 [CloudSource.MIRRORS] 同一套 —— 镜像顺序只维护一处。
@@ -273,8 +314,8 @@ object RankConfig {
                 "qidian" -> Kind.QIDIAN
                 else -> continue          // 未知 kind 一律拒绝，不给远程加新逻辑的口子
             }
-            val board = TinyJson.path(obj, "board").orEmpty()
-            if (kind == Kind.QIDIAN && board.isBlank()) continue
+            val rawBoard = TinyJson.path(obj, "board").orEmpty()
+            val board = if (kind == Kind.QIDIAN) qidianBoard(rawBoard) ?: continue else rawBoard
             val category = TinyJson.path(obj, "category")?.toDoubleOrNull()?.toInt() ?: 0
             if (kind == Kind.FANQIE_RANK && category == 0) continue
             // 番茄「新书」榜（rankType=1）已从产品中移除，云端配置下发也要挡掉，
@@ -291,8 +332,8 @@ object RankConfig {
                     // 页数封顶：云端写个 10000 会让人一直翻下去，也等于放大抓取。
                     // S18：以前缺省 0，而调用方对非起点榜强制 pages=1，
                     // 于是照文档示例写「番茄更新 pages:5」的配置也只出 20 条。
-                    // 缺省按 kind 给内置值：起点 10 页、番茄更新 5 页、其余 0。
-                    pages = (TinyJson.path(obj, "pages")?.toDoubleOrNull()?.toInt()
+                    // 起点强制单批，云端 pages 不能绕过尚未证实的分页边界。
+                    pages = if (kind == Kind.QIDIAN) 0 else (TinyJson.path(obj, "pages")?.toDoubleOrNull()?.toInt()
                         ?: defaultPages(kind)).coerceIn(0, 10),
                     gendered = TinyJson.path(obj, "gendered") == "true",
                     category = category,

@@ -6,7 +6,9 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.ScrollView
 import com.watchdl.MainActivity
-import com.watchdl.ui.my.showMy
+import com.watchdl.core.Screen
+import com.watchdl.ui.download.showDownloads
+import com.watchdl.ui.download.showSettingsRoot
 import com.watchdl.ui.shelf.showShelf
 import com.watchdl.ui.source.showDiscover
 import com.watchdl.ui.theme.Widgets
@@ -20,21 +22,39 @@ import com.watchdl.ui.theme.Widgets
  * 参数是当前栏下标：0 书架、1 发现、2 我的。
  */
 internal fun MainActivity.attachTabs(active: Int) {
+    val selected = if (curScreen == Screen.My) 3 else active
     val rootTab = isRootTabScreen()
     // 顶栏自动收起只挂三根屏：子页（书源市场、榜单内容）的顶栏带返回箭头，
     // 收起来会把唯一出口一起收走。
     if (rootTab) Widgets.autoHideHeader(this, root)
 
-    root.addView(Widgets.navDots(this, listOf("书架", "发现", "我的"), active) { i ->
-        when (i) {
-            // 重复点当前栏：书架回到顶部，发现 / 我的再点无动作（legado 同款）。
-            0 -> if (active == 0) scrollToTop(root) else showShelf()
-            1 -> if (active != 1) showDiscover()
-            else -> if (active != 2) showMy()
+    val nav = com.watchdl.ui.theme.Md3.row(this)
+    nav.setPadding(0, 0, 0, 0)
+    listOf("书架", "发现", "下载", "设置").forEachIndexed { i, label ->
+        val chosen = i == selected
+        val cell = com.watchdl.ui.theme.Md3.text(this, label,
+            com.watchdl.ui.theme.Md3.FS_LABEL,
+            if (chosen) com.watchdl.ui.theme.Md3.primary else com.watchdl.ui.theme.Md3.onSurfaceVariant,
+            bold = chosen).apply {
+            gravity = android.view.Gravity.CENTER
+            contentDescription = "$label${if (chosen) "，当前栏" else "，切换栏"}"
+            background = com.watchdl.ui.theme.Md3.ripple(this@attachTabs,
+                if (chosen) com.watchdl.ui.theme.Md3.surface3 else android.graphics.Color.TRANSPARENT, 6f)
+            isClickable = true
+            setOnClickListener {
+                if (i == selected) scrollToTop(root) else when (i) {
+                    0 -> showShelf()
+                    1 -> showDiscover()
+                    2 -> showDownloads()
+                    else -> showSettingsRoot()
+                }
+            }
         }
-    })
-    // 横滑只在三根屏上生效；子页返回 -1，手势直接放行给子控件。
-    tabActive = if (rootTab) active else -1
+        nav.addView(cell, android.widget.LinearLayout.LayoutParams(0,
+            com.watchdl.ui.theme.Md3.dp(this, 28), 1f))
+    }
+    root.addView(nav)
+    tabActive = if (rootTab) selected else -1
 }
 
 /** 把屏里第一个纵向滚动区拉回顶部。找不到就不动 —— 空屏也是合法状态。 */
@@ -71,7 +91,7 @@ private const val EARLY_CLAIM_DIVISOR = 8f
 
 internal fun MainActivity.handleTabSwipe(ev: MotionEvent): Boolean {
     val active = tabActive
-    if (active !in 0..2) return false
+    if (active !in 0..3) return false
     val slop = 12f
     when (ev.actionMasked) {
         MotionEvent.ACTION_DOWN -> {
@@ -110,7 +130,7 @@ internal fun MainActivity.handleTabSwipe(ev: MotionEvent): Boolean {
             }
             // 到头了给阻尼，拉不动太多 —— 否则第一栏往右滑会露出整片空白。
             var d = dx
-            if ((active == 0 && d > 0) || (active == 2 && d < 0)) d *= 0.3f
+            if ((active == 0 && d > 0) || (active == 3 && d < 0)) d *= 0.3f
             root.translationX = d
             return true
         }
@@ -151,7 +171,7 @@ private fun MainActivity.settle(active: Int, cancelled: Boolean, vx: Float) {
         dx >= w * 0.25f -> active - 1
         else -> -1
     }
-    if (target !in 0..2) {
+    if (target !in 0..3) {
         root.animate().translationX(0f).setDuration(160).start()
         return
     }
@@ -160,7 +180,8 @@ private fun MainActivity.settle(active: Int, cancelled: Boolean, vx: Float) {
         when (target) {
             0 -> showShelf()
             1 -> showDiscover()
-            else -> showMy()
+            2 -> showDownloads()
+            else -> showSettingsRoot()
         }
         // 新屏从另一侧滑进来，两段动画接上才像一页推一页。
         root.translationX = -dir * w

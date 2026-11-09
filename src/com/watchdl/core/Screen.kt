@@ -55,19 +55,26 @@ sealed interface Screen {
     /**
      * 发现页（榜单）。
      *
-     * 一屏两形态：`rankKey` 空串是**榜单目录**（分组列出所有榜），非空是**某个榜的内容页**。
-     * 目录页是底栏根屏，内容页自己挂返回箭头回目录。
+     * 三层导航：站点入口、频道内选榜、榜单内容。只有站点入口属于底栏根屏。
      *
-     * 不再带站点与频道字段：榜单条目自己带着，按 key 查一次就有。
-     * `hits` 是已拉到的条目（空表示还在拉），不缓存 —— 榜单本来就要新数据。
+     * 快照带筛选、加载状态、真实结果与像素偏移。返回只重绘，不刷新榜单。
      */
     data class Discover(
         /** 选中的榜；空串表示目录页。 */
         val rankKey: String = "",
-        /** 这个榜拉到的条目。空表示正在拉或没选。 */
+        /** 当前筛选的真实结果；用 loaded 区分空榜与加载中。 */
         val hits: List<BookHit> = emptyList(),
         /** 取数失败原因；空串表示没失败。 */
         val error: String = "",
+        val site: RankConfig.Site = RankConfig.Site.QIDIAN,
+        val gender: RankConfig.Gender = RankConfig.Gender.MALE,
+        /** sites / boards / content。 */
+        val stage: String = if (rankKey.isEmpty()) "sites" else "content",
+        val filter: RankConfig.QidianFilter = RankConfig.QidianFilter(),
+        val loaded: Boolean = false,
+        val scrollY: Int = 0,
+        /** 起点只展示已确认首批，不从 total/isLast 推断分页。 */
+        val canLoadMore: Boolean = false,
     ) : Screen
     /** 书源市场（yiove）。`hits` 为拉到的列表，`page` 为已拉到的页码。 */
     data class Market(val hits: List<YioveSource.Item>, val total: Int, val page: Int) : Screen
@@ -169,7 +176,7 @@ fun screenId(s: Screen?): String = when (s) {
     Screen.Logs -> "logs"
     Screen.About -> "about"
     is Screen.Swap -> "swap:" + s.info.bookId.ifBlank { s.info.name + s.info.author }
-    is Screen.Discover -> "discover:${s.rankKey}"
+    is Screen.Discover -> "discover:${s.stage}:${s.site}:${s.gender}:${s.rankKey}:${s.filter.categoryId}:${s.filter.period}"
     is Screen.Market -> "market:${s.page}"
     // 搜索命中时 bookId 可能为空（个别源不返回），退回书名+作者做身份。
     is Screen.Detail -> "detail:" + s.info.bookId.ifBlank { s.info.name + s.info.author }

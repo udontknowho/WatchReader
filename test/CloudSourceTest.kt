@@ -137,6 +137,46 @@ fun main() {
                 staleSrv.stop(0)
             }
         }
+
+        println("[11] 新版本允许精简，手工导入保持原样")
+        val dest = File(dir, CloudSource.FILE_NAME)
+        val verFile = File(dir, "${CloudSource.FILE_NAME}.ver")
+        val largerJson = "[" + List(3) { validJson.removePrefix("[").removeSuffix("]") }.joinToString(",") + "]"
+        dest.writeText(largerJson)
+        verFile.writeText("9")
+        val manualBefore = manual.readText()
+        File(web, "manifest.json").writeText("""{"version":10,"file":"legado.json"}""")
+        val compact = CloudSource.update(dir, base)
+        check("v10 三条精简为一条", compact.ok && dest.readText() == validJson, compact.message)
+        check("精简版本记为 10", verFile.readText() == "10")
+        check("手工文件字节不变", manual.readText() == manualBefore)
+
+        println("[12] 未知或无效清单不能缩库")
+        for (manifestText in listOf(null, "{}", """{"version":0}""", """{"version":10.5}""", """{"version":-1}""")) {
+            dest.writeText(largerJson)
+            verFile.writeText("10")
+            if (manifestText == null) File(web, "manifest.json").delete()
+            else File(web, "manifest.json").writeText(manifestText)
+            val denied = CloudSource.update(dir, base)
+            check("未知清单拒绝缩库 $manifestText", !denied.ok && denied.message.contains("跳过降级"), denied.message)
+            check("旧库及版本不变 $manifestText", dest.readText() == largerJson && verFile.readText() == "10")
+        }
+
+        println("[13] 明确同版、旧版仍拒绝，未知本地可接入版本管理")
+        for (version in listOf(9, 10)) {
+            File(web, "manifest.json").writeText("""{"version":$version,"file":"legado.json"}""")
+            val denied = CloudSource.update(dir, base)
+            check("版本 $version 不覆盖", !denied.ok && dest.readText() == largerJson, denied.message)
+        }
+        verFile.delete()
+        val firstManaged = CloudSource.update(dir, base)
+        check("无本地版本允许受控精简", firstManaged.ok && dest.readText() == validJson, firstManaged.message)
+
+        println("[14] 新版本坏包仍拒绝，不写版本")
+        File(web, "manifest.json").writeText("""{"version":11,"file":"bad.json"}""")
+        val invalid = CloudSource.update(dir, base)
+        check("新版本不能绕过内容校验", !invalid.ok && dest.readText() == validJson, invalid.message)
+        check("坏包不能推进版本", verFile.readText() == "10")
     } finally {
         server.stop(0)
         web.deleteRecursively()

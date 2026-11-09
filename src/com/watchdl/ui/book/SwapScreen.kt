@@ -51,11 +51,11 @@ internal fun MainActivity.showSwap(info: BookInfo, cur: BookSource?) {
     val all = multi.allNamed()
     col.addView(Widgets.sectionLabel(this, "正在用"))
     col.addView(Widgets.listItem(this, curName.ifBlank { "未知源" },
-        "章节与正文都从这条源取", twoLine = true) { })
+        "章节与正文都从这条源取", twoLine = true, highlight = true))
 
     // 命中区与状态行要在动作行之前建好，点击时闭包能直接抓到它们。
     val hitsBox = Md3.column(this)
-    val status = Md3.text(this, "", Md3.FS_SM, Md3.onSurfaceVariant).apply {
+    val status = Md3.text(this, "先搜索，再点选验证可用的书源", Md3.FS_SM, Md3.onSurfaceVariant).apply {
         setPadding(Md3.dp(this@showSwap, Md3.PAD), 0,
             Md3.dp(this@showSwap, Md3.PAD), Md3.dp(this@showSwap, Md3.GAP / 2))
     }
@@ -71,6 +71,7 @@ internal fun MainActivity.showSwap(info: BookInfo, cur: BookSource?) {
      */
     fun startAll() {
         if (swapBusy) { toast("上一次换源还在找，等一下"); return }
+        if (all.isEmpty()) { status.text = "没有可用书源，请先在设置中导入或启用书源"; return }
         swapBusy = true
         shown.clear()
         hitsBox.removeAllViews()
@@ -162,7 +163,10 @@ internal fun MainActivity.swapToSource(info: BookInfo, ns: MultiSource.NamedSour
     val owner: Screen = Screen.Swap(info, null)
     bg(owner, { ns.source.search(info.name, 1) }) { res ->
         swapBusy = false
-        val hits = res.getOrNull().orEmpty()
+        val hits = res.getOrElse { e ->
+            toast("「${ns.name}」搜索失败：${e.message?.take(32) ?: "网络不可用"}")
+            return@bg
+        }
         val want = info.name.trim()
         val wantAuthor = info.author.trim()
         val pick = hits.firstOrNull {

@@ -93,14 +93,25 @@ fun main() {
     val lib = java.io.File("app/assets/sources/legado.json")
     if (lib.exists()) {
         val all = LegadoImport.importAll(lib.readText())
-        var usable = 0
+        println("[书源库] ${lib.length() / 1024} KB，${all.size} 条")
+        check("精选书源库非空", all.isNotEmpty())
         for (item in all) {
-            val r = item.rule ?: continue
-            if (r.search.name.selector.isNotBlank() && r.search.link.selector.isNotBlank() &&
-                r.toc.name.selector.isNotBlank() && r.toc.link.selector.isNotBlank()) usable++
+            val r = item.rule
+            check("${item.name} 导入无错误", r != null && item.issue == null,
+                item.issue ?: "规则为空")
+            if (r == null) continue
+            check("${item.name} 名称完整", item.name.isNotBlank() && r.name.isNotBlank())
+            val host = runCatching { java.net.URI(r.host) }.getOrNull()
+            check("${item.name} 站点 URL 完整",
+                host?.scheme in listOf("http", "https") && !host?.host.isNullOrBlank(), r.host)
+            check("${item.name} 搜索入口完整", r.search.url.isNotBlank() || !r.search.urlJs.isNullOrBlank())
+            val fields = listOf(r.search.name, r.search.link, r.toc.name, r.toc.link, r.content.content)
+            check("${item.name} 搜索目录正文规则完整",
+                fields.all { it.selector.isNotBlank() && it.selector != com.watchdl.core.FieldRule.UNSUPPORTED },
+                fields.map { it.selector }.toString())
         }
-        println("[书源库] ${lib.length() / 1024} KB，${all.size} 条，结构可用 $usable 条")
-        check("书源库至少 30 条结构可用", usable >= 30, "实际 $usable")
+        val urls = all.mapNotNull { it.rule?.host }
+        check("书源 URL 唯一", urls.distinct().size == urls.size, urls.toString())
     } else {
         println("[书源库] 未找到 ${lib.path}，跳过")
     }

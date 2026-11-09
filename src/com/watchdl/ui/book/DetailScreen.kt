@@ -7,6 +7,11 @@ import android.widget.TextView
 import com.watchdl.MainActivity
 import com.watchdl.core.*
 import com.watchdl.ui.reader.preview
+import com.watchdl.ui.reader.ReaderUi
+import com.watchdl.ui.reader.showRecords
+import com.watchdl.ui.shelf.shelfStore
+import com.watchdl.ui.shelf.ensureShelfMigration
+import com.watchdl.ui.shelf.sourceForBook
 import com.watchdl.ui.source.showSources
 import com.watchdl.ui.theme.Icons
 import com.watchdl.ui.theme.Md3
@@ -69,6 +74,10 @@ internal object DetailUi {
 internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
     setScreen(Screen.Detail(info, src))
     DetailUi.bind(info.bookId)
+    ensureShelfMigration()
+    if (info.chapters.isNotEmpty() && shelfStore().contains(info.bookId))
+        runCatching { shelfStore().add(info, srcName(src)) }
+            .onFailure { toast("收藏更新失败：${it.message}") }
     root.removeAllViews()
     // legado 的 `BookInfoTopBarActions` 是「编辑 / 分享 / ⋮」三枚。
     // 编辑书籍信息与分享我们没有对应能力（书籍信息就是源上那份，改动无处落盘），
@@ -163,15 +172,22 @@ internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
         return cell
     }
     // 书架卡的文案与图标随状态走（legado `BookInfoActions` 的 inBookshelf 分叉)。
-    val shelf = detailShelfAction(job != null)
+    val inShelf = shelfStore().contains(info.bookId)
+    val shelf = detailShelfAction(inShelf)
     val acts = listOf(
         ActCard(shelf.glyph, shelf.label, shelf.desc) {
-            if (job != null) confirmRemoveShelf(info, src) else startDownload(info)
+            if (inShelf) confirmRemoveShelf(info, src) else {
+                runCatching { shelfStore().add(info, srcName(src)) }
+                    .onSuccess { toast("已加入书架"); showDetail(info, src) }
+                    .onFailure { toast("收藏失败：${it.message}") }
+            }
         },
         // legado 的目录卡图标是 FormatListBulleted，我们对应 `list`。
         ActCard("list", "查看目录", "查看目录") { detailOpenToc(info, src) },
         ActCard("swap", "换源", "换源") { rememberReturn(); showSwap(info, src) },
-        ActCard("history", "阅读记录", "阅读记录") { showProgress(info) },
+        ActCard("download", "缓存章节", "下载免费章节") {
+            if (info.chapters.isEmpty()) detailOpenToc(info, src) else { rememberReturn(); startDownload(info) }
+        },
     )
     for (pair in acts.chunked(2)) {
         val row = Md3.row(this)
@@ -279,7 +295,12 @@ internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
     // 写「并阅读」是承诺了没做的事。
     val go = Widgets.button(this, if (info.chapters.isEmpty()) "取目录" else "阅读", "filled") {
         if (info.chapters.isEmpty()) detailOpenToc(info, src)
-        else preview(info, if (readAt < info.chapters.size) readAt else 0)
+        else {
+            ReaderUi.fromShelf = false
+            rememberReturn()
+            tocSrc = src ?: sourceForBook(info.bookId)
+            preview(info, if (readAt < info.chapters.size) readAt else 0)
+        }
     }
     go.layoutParams = Md3.lpDp(this, null, Md3.BTN).apply {
         leftMargin = Md3.dp(this@showDetail, Md3.PAD)
@@ -301,14 +322,14 @@ internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
  * 用整屏对话框而不是浮层：浮层在 189 dp 的屏上几乎占满，既没有留白感也没有整屏的秩序感。
  */
 internal fun MainActivity.showDetailMenu(info: BookInfo, src: BookSource?) {
-    val inShelf = Downloader.restoreLight(jobsStore(), info.bookId) != null
+    val inShelf = shelfStore().contains(info.bookId)
     val items = mutableListOf<Pair<CharSequence, () -> Unit>>(
         // 换源排在第一位：详情页最常见的动作是「这条源取不到正文，换一条」。
         "换源" to { rememberReturn(); showSwap(info, src) },
         "刷新目录" to { refreshToc(info, src) },
     )
     if (inShelf) items += "移出书架" to { confirmRemoveShelf(info, src) }
-    items += "阅读记录" to { showProgress(info) }
+    items += "阅读记录" to { rememberReturn(); showRecords() }
     Widgets.longMenuDialog(this, info.name, items).show()
 }
 
@@ -323,20 +344,17 @@ private data class ActCard(
 /**
  * 移出书架，走二次确认。
  *
- * 复用书架屏那套整本删除：[MainActivity.purgeBookCache]（取消服务 → 踢队列 →
- * 等收工 → 落墓碑），所以正在下的书也不会留下半截目录。删完重画本屏，
- * 动作卡自己回到「放入书架」。
+ * 只更新独立收藏文件，下载作业、正文与阅读进度继续保留。
  */
 private fun MainActivity.confirmRemoveShelf(info: BookInfo, src: BookSource?) {
     Widgets.md3Dialog(this,
         title = "移出书架",
-        body = detailRemoveMessage(info.name),
+        body = "移除“${info.name}”的收藏，保留下载正文与阅读进度。",
         confirm = "移出",
         onConfirm = {
-            purgeBookCache(listOf(info.bookId)) { gone ->
-                toast(if (gone > 0) "已移出书架" else "没删成：目录仍被占用")
-                showDetail(info, src)
-            }
+            runCatching { shelfStore().remove(info.bookId) }
+                .onSuccess { toast("已移出书架"); showDetail(info, src) }
+                .onFailure { toast("收藏保存失败：${it.message}") }
         },
     ).show()
 }
@@ -350,7 +368,8 @@ private fun MainActivity.confirmRemoveShelf(info: BookInfo, src: BookSource?) {
  */
 private fun MainActivity.refreshToc(info: BookInfo, src: BookSource?) {
     if (info.chapters.isEmpty()) { detailOpenToc(info, src); return }
-    val useSrc = src ?: tocSrc ?: source
+    val useSrc = src ?: sourceForBook(info.bookId)
+    if (useSrc == null) { toast("原书源不可用，请换源后重试"); return }
     toast("正在刷新目录…")
     val owner = Screen.Detail(info, src)
     bg(owner, { useSrc.toc(info.bookId, info.name, info.author) }) { res ->
@@ -383,7 +402,21 @@ private fun MainActivity.refreshToc(info: BookInfo, src: BookSource?) {
  * （逐源重试 + 先验一章正文），而不是直接开一张空目录。
  */
 private fun MainActivity.detailOpenToc(info: BookInfo, src: BookSource?) {
-    if (info.chapters.isNotEmpty()) { showToc(info, src); return }
+    if (info.chapters.isNotEmpty()) { rememberReturn(); showToc(info, src); return }
+    val resolved = src ?: sourceForBook(info.bookId)
+    if (resolved != null && info.bookId.isNotBlank()) {
+        toast("正在取目录…")
+        bg(Screen.Detail(info, src), { resolved.toc(info.bookId, info.name, info.author) }) { result ->
+            result.onSuccess { got ->
+                if (got.chapters.isEmpty()) { DetailUi.tocFailed = true; showDetail(info, src); return@onSuccess }
+                val full = got.copy(name = got.name.ifBlank { info.name }, author = got.author.ifBlank { info.author })
+                if (shelfStore().contains(info.bookId)) shelfStore().add(full, srcName(resolved))
+                rememberReturn()
+                showToc(full, resolved)
+            }.onFailure { DetailUi.tocFailed = true; toast("目录失败：${it.message}"); showDetail(info, src) }
+        }
+        return
+    }
     val candidates = detailCandidates
     if (candidates.isEmpty()) {
         // 兜底：重进这一屏（返回再进来）时候选源没跟着恢复，直接开出空目录

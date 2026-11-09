@@ -79,9 +79,8 @@ object CloudSource {
      * @param dir 书源目录（`filesDir/sources`）
      * @param base 仓库基地址，末尾不带 `/`
      * @param force 为真时忽略版本号强制覆盖。
-     *   **会同时绕过「不按条数降级」的保护**，云端只剩 42 条时也照换。
-     *   生产代码目前没有调用点（只有测试用）；真要接一个「强制刷新」按钮，
-     *   得先想清楚怎么避免把用户已有的源换少。
+     *   同时绕过未知清单的条数保护；合法性校验仍然执行。
+     *   正常更新中，明确递增的清单版本允许淘汰失效源并精简整包。
      * @param onProgress 给 UI 打状态用，可空
      */
     fun update(
@@ -211,14 +210,12 @@ object CloudSource {
             return Result(false, "书源库解析出 0 条可用源（多半拉到了 404 页面）")
         }
 
-        // ---- 3b. 不降级（按条数） ----
-        // 版本号只是云端自己写的数字，跟实际条数无关。2026-10-21 踩过两回：
-        // 设备上存着 175 条的库，云端 manifest 写着 version 4 / 42 条；
-        // 本地已升到 50 条时，jsDelivr 缓存还没刷新的那份仍是 42 条。
-        // 只看版本号就会把源换少，用户眼里的源凭空消失。
-        // 所以：只要云端比本地少，就不换 —— 少一条也算（书源是整包替换，
-        // 没有「少几条是正常的」这种场景）。要降级就显式 force。
-        if (!force) {
+        // ---- 3b. 未知清单不缩库 ----
+        // 明确的清单版本表示一次受控发布，允许淘汰失效源。
+        // 同版和旧版已在下载前拦截；本地无版本时允许首次接入版本管理。
+        // 无清单或无效清单仍按条数保护，不能因镜像缺清单而静默缩库。
+        // 只比较云端管理的 legado.json，不读取或覆盖其他手工导入文件。
+        if (!force && manifest == null) {
             val localCount = runCatching {
                 LegadoImport.importAll(dest.readText()).size
             }.getOrDefault(0)
@@ -256,8 +253,8 @@ object CloudSource {
      */
     private fun fetchManifest(base: String, timeoutMs: Int): Manifest {
         val body = Http.fetch("$base/manifest.json", "GET", null, emptyMap(), null, timeoutMs).body
-        val v = TinyJson.path(body, "version")?.toDoubleOrNull()?.toInt()
-            ?: error("manifest 没有 version")
+        val v = TinyJson.path(body, "version")?.toIntOrNull()?.takeIf { it > 0 }
+            ?: error("manifest 没有有效的正整数 version")
         return Manifest(v, TinyJson.path(body, "file") ?: FILE_NAME)
     }
 

@@ -17,6 +17,8 @@ class ReplaceRule(
     /** `text` 只正文 / `title` 只标题 / `both` 两处都过。 */
     val scope: String,
     val enabled: Boolean,
+    /** 空串为全局，非空为精确书号。旧规则默认全局。 */
+    val bookId: String = "",
 )
 
 object ReplaceRuleStore {
@@ -216,7 +218,7 @@ object ReplaceRuleStore {
         val kept = list().toMutableList()
         var added = 0
         for (r in presets()) {
-            if (kept.any { it.name == r.name && it.pattern == r.pattern }) continue
+            if (kept.any { it.name == r.name && it.pattern == r.pattern && it.bookId == r.bookId }) continue
             kept += r
             added++
         }
@@ -229,7 +231,7 @@ object ReplaceRuleStore {
      */
     fun missingPresets(): Int {
         val kept = list()
-        return presets().count { p -> kept.none { it.name == p.name && it.pattern == p.pattern } }
+        return presets().count { p -> kept.none { it.name == p.name && it.pattern == p.pattern && it.bookId == p.bookId } }
     }
 
     /**
@@ -279,16 +281,18 @@ object ReplaceRuleStore {
             val pattern = str(obj, "pattern")
             if (pattern.isNullOrBlank()) continue
             val name = str(obj, "name")?.takeIf { it.isNotBlank() } ?: pattern
-            if (kept.any { it.name == name && it.pattern == pattern }) continue
+            val bookId = str(obj, "bookId").orEmpty()
+            if (kept.any { it.name == name && it.pattern == pattern && it.bookId == bookId }) continue
             kept += ReplaceRule(
                 name = name,
                 pattern = pattern,
                 replacement = str(obj, "replacement") ?: "",
                 // 缺字段按「字面替换」处理：把字面串当正则跑会多删东西，错的一侧选保守的。
                 isRegex = bool(obj, "isRegex", false),
-                // 认不出的 scope 也只给正文：动标题会让目录丢章，风险高的一侧不默认。
+                // 认不出的文本范围只作用于正文。
                 scope = str(obj, "scope")?.takeIf { it in SCOPES } ?: "text",
                 enabled = bool(obj, "enabled", true),
+                bookId = bookId,
             )
             added++
         }
@@ -302,11 +306,11 @@ object ReplaceRuleStore {
      * 每翻一页都要跑一遍全表，所以列表与编译结果都缓存；
      * 只有 [save] 会清缓存，别处不许直接改 replace.json。
      */
-    fun apply(text: String, isTitle: Boolean): String {
+    fun apply(text: String, isTitle: Boolean, bookId: String = ""): String {
         if (text.isEmpty()) return text
         var out = text
         for (r in list()) {
-            if (!r.enabled) continue
+            if (!r.enabled || (r.bookId.isNotEmpty() && r.bookId != bookId)) continue
             val scopeOk = when (r.scope) {
                 "title" -> isTitle
                 "both" -> true
@@ -351,6 +355,7 @@ object ReplaceRuleStore {
             append("\"replacement\":\"").append(esc(r.replacement)).append("\",")
             append("\"isRegex\":").append(r.isRegex).append(',')
             append("\"scope\":\"").append(esc(r.scope)).append("\",")
+            append("\"bookId\":\"").append(esc(r.bookId)).append("\",")
             append("\"enabled\":").append(r.enabled)
             append('}')
         }
@@ -368,6 +373,7 @@ object ReplaceRuleStore {
                 isRegex = bool(obj, "isRegex", false),
                 scope = str(obj, "scope")?.takeIf { it in SCOPES } ?: "text",
                 enabled = bool(obj, "enabled", true),
+                bookId = str(obj, "bookId").orEmpty(),
             )
         }
 

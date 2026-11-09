@@ -131,21 +131,27 @@ object Md3 {
     fun load(ctx: Context) {
         val w = ctx.resources.configuration.screenWidthDp
         if (w >= 320) {
+            PAD = if (w >= 600) 24 else 16
+            GAP = 8; TOP_BAR = 48; SEARCH = 44; BTN = 40
+            ITEM = 48; ITEM_TALL = 60; TAP = 40; HIT = 40
+            FS_XL = 22f; FS_LG = 20f; FS_MD = 14f; FS_SM = 12f; FS_LABEL = 12f
             NAV = 80
             TAB_H = 48
             HEADER_H = 34
             NAV_DOT_H = 12
             NAV_DOT = 4f
             NAV_IND_W = 64
-            PAD = if (w >= 600) 24 else 16
         } else {
-            NAV = 64
-            TAB_H = 40
-            HEADER_H = 25
+            GAP = 6; TOP_BAR = 36; SEARCH = 32; BTN = 32
+            ITEM = 36; ITEM_TALL = 44; TAP = 32; HIT = 32
+            FS_XL = 22f; FS_LG = 16f; FS_MD = 13f; FS_SM = 10f; FS_LABEL = 10f
+            NAV = 28
+            TAB_H = 32
+            HEADER_H = 30
             NAV_DOT_H = 8
             NAV_DOT = 3f
             NAV_IND_W = 48
-            PAD = 16
+            PAD = 10
         }
     }
 
@@ -164,13 +170,12 @@ object Md3 {
     //   bodyLarge 16 / bodyMedium 14 / bodySmall 12
     //   labelLarge 14 / labelMedium 12 / labelSmall 11
     //
-    // 不再整体压两档：压完落在 11–17sp，表盘塞得下，但整屏比 legado 细一号。
-    // 保留旧名做别名（FS_LG/FS_MD/FS_SM），调用点不必逐个改。
-    val FS_XL = 22f        // titleLarge：页面标题、进度大数
-    val FS_LG = 22f        // titleLarge
-    val FS_MD = 14f        // bodyMedium
-    val FS_SM = 12f        // labelMedium
-    val FS_LABEL = 12f     // labelMedium（导航标签）
+    // 手表使用紧凑字阶，宽屏使用常规字阶；正文阅读字号保持独立。
+    var FS_XL = 22f        // titleLarge：页面标题、进度大数
+    var FS_LG = 22f        // titleLarge
+    var FS_MD = 14f        // bodyMedium
+    var FS_SM = 12f        // labelMedium
+    var FS_LABEL = 12f     // labelMedium（导航标签）
     val FS_BODY_LARGE = 16f
 
     /** 正文阅读字号（阅读器专用，取 bodyLarge）。 */
@@ -351,7 +356,7 @@ object Md3 {
             // M3 按钮规范：左右 16dp（text 变体是 12dp，这里统一取大的），
             // 最小宽 64dp。原来左右零内边距，长标签「下载缺失章节（3735 章）」
             // 直接顶到圆角边缘 —— 用户判词「那个特别细」的一半来源就是它。
-            setPadding(dp(ctx, 16), 0, dp(ctx, 16), 0)
+            setPadding(dp(ctx, GAP + 2), 0, dp(ctx, GAP + 2), 0)
             minWidth = dp(ctx, 64)
             // 视觉高度仍是 BTN，热区补到 HIT（原来 34 dp 直接越界）。
             minimumHeight = HIT
