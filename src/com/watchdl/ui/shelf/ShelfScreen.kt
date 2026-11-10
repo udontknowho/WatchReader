@@ -117,7 +117,7 @@ internal fun MainActivity.shelfRows(): List<ShelfRow> {
     ensureShelfMigration()
     return shelfStore().books().map { book ->
         val info = book.info
-        val job = Downloader.restoreLight(jobsStore(), info.bookId)
+        val job = runCatching { Downloader.restoreLight(jobsStore(), info.bookId) }.getOrNull()
             ?: BookJob(info.bookId, info.name, info.author, info.chapters)
         ShelfRow(job, book.sourceName.ifBlank {
             if (LocalImport.isLocal(info.bookId)) "本地" else "在线"
@@ -155,7 +155,7 @@ internal fun MainActivity.downloadRows(): List<ShelfRow> {
     val lights = LinkedHashMap<String, BookJob>(entries.size * 2)
     val sortKeys = HashMap<String, ShelfSortKey>(entries.size * 2)
     for ((dir, id, _) in entries) {
-        val light = Downloader.restoreLight(jobsStore(), id) ?: continue
+        val light = runCatching { Downloader.restoreLight(jobsStore(), id) }.getOrNull() ?: continue
         lights[id] = light
         val stamp = runCatching { File(dir, "job.json").readText() }
             .getOrNull()?.let { TinyJson.path(it, "updatedAt")?.toLongOrNull() }
@@ -208,6 +208,7 @@ internal fun MainActivity.showShelf(keepScroll: Boolean = false) {
     // 首页就是纯书架：所有已下载的书，按最近使用排。
     val rows = shelfRows()
     val books = rows.map { it.job }
+    shelfStore().readError()?.let { toast(it) }
 
     root.addView(Widgets.headerRow(this, "书架",
         trailing = listOf(
@@ -473,11 +474,14 @@ internal fun MainActivity.shelfColor(job: BookJob): Int {
 internal fun MainActivity.shelfStore(): ShelfStore = ShelfStore(File(filesDir, "shelf.json"))
 
 internal fun MainActivity.ensureShelfMigration() {
-    shelfStore().migrateOnce {
+    val store = shelfStore()
+    if (store.readError() != null) return
+    store.migrateOnce {
         downloadRows().map { row ->
             ShelfBook(BookInfo(row.job.bookId, row.job.name, row.job.author, row.job.chapters),
                 if (LocalImport.isLocal(row.job.bookId)) "本地"
-                else runCatching { com.watchdl.ui.book.srcName(sourceForBook(row.job.bookId)) }.getOrDefault("在线"), row.updatedAt)
+                else if (row.job.bookId.isNotBlank() && row.job.bookId.all { it.isDigit() }) "番茄"
+                else row.sourceTag.takeUnless { it == "本地" }.orEmpty(), row.updatedAt)
         }
     }
 }
@@ -570,7 +574,7 @@ private fun MainActivity.openShelfBook(bookId: String, name: String, author: Str
  * 从目录进来的退回目录，不再一律跳目录。
  */
 internal fun MainActivity.readShelfBook(bookId: String, name: String, author: String) {
-    val job = Downloader.restoreLight(jobsStore(), bookId)
+    val job = runCatching { Downloader.restoreLight(jobsStore(), bookId) }.getOrNull()
     val favorite = shelfStore().find(bookId)
     val info = if (job != null && job.chapters.isNotEmpty())
         BookInfo(bookId, job.name.ifBlank { name }, job.author.ifBlank { author }, job.chapters)
@@ -779,14 +783,24 @@ internal fun MainActivity.sourceForBook(bookId: String): BookSource? {
     // 本地书没有源。不拦住的话会按「非 http」落到番茄，拿 local:xxx 去发请求。
     if (LocalImport.isLocal(bookId)) return null
     val pool = runCatching { multi.allNamed() }.getOrNull().orEmpty()
+    val saved = shelfStore().find(bookId)
+    val sourceName = if (saved?.info?.bookId == bookId) saved.sourceName
+        else saved?.candidates?.firstOrNull { it.bookId == bookId }?.sourceName.orEmpty()
+    pool.firstOrNull { it.name == sourceName && sourceName.isNotBlank() }?.let { return it.source }
     if (bookId.startsWith("http", ignoreCase = true)) {
         val host = pool.firstOrNull { ns ->
             val h = ns.host.trimEnd('/')
-            h.isNotBlank() && bookId.startsWith(h, ignoreCase = true)
+            h.isNotBlank() && runCatching {
+                val bookUri = java.net.URI(bookId)
+                val sourceUri = java.net.URI(h)
+                bookUri.host?.equals(sourceUri.host, ignoreCase = true) == true &&
+                    (sourceUri.port == -1 || sourceUri.port == bookUri.port)
+            }.getOrDefault(false)
         }
         if (host != null) return host.source
     }
     // 番茄的 bookId 是纯数字，不带主机；池子里第一个就是它（buildMulti 先加）。
     if (bookId.startsWith("http", ignoreCase = true)) return null
-    return pool.firstOrNull { it.name == "番茄" }?.source ?: pool.firstOrNull()?.source
+    return if (bookId.all { it.isDigit() } && bookId.isNotBlank())
+        pool.firstOrNull { it.name == "番茄" }?.source else null
 }

@@ -697,8 +697,32 @@ object Widgets {
         /** true 表示向后（向下），false 表示向前；位移为正数像素。 */
         var onBoundary: ((Boolean, Int) -> Unit)? = null
 
-        private var crownTarget = 0f
-        private var crownAnim: android.animation.ValueAnimator? = null
+        private val crownMotion = com.watchdl.core.CrownMotion(crownGlide)
+        private var crownFramePosted = false
+        private var nativeFlingPending = false
+
+        override fun fling(velocityY: Int) {
+            nativeFlingPending = velocityY != 0
+            super.fling(velocityY)
+        }
+
+        private fun stopNativeFling() {
+            if (!nativeFlingPending) return
+            nativeFlingPending = false
+            super.fling(0)
+        }
+
+        private val crownFrame = object : Runnable {
+            override fun run() {
+                crownFramePosted = false
+                scrollTo(0, crownMotion.frame(maxScrollOf(this@CrownScrollView),
+                    android.view.animation.AnimationUtils.currentAnimationTimeMillis()))
+                if (crownMotion.running) {
+                    crownFramePosted = true
+                    postOnAnimation(this)
+                }
+            }
+        }
         private val touchSlop = android.view.ViewConfiguration.get(ctx).scaledTouchSlop
         private var downX = 0f
         private var downY = 0f
@@ -709,21 +733,27 @@ object Widgets {
 
         /** 同时终止旧表冠动画和原生惯性，避免多个输入同时改写 scrollY。 */
         fun cancelCrownAnimation() {
-            crownAnim?.cancel()
-            crownAnim = null
-            fling(0)
-            crownTarget = scrollY.toFloat()
+            if (crownFramePosted) removeCallbacks(crownFrame)
+            crownFramePosted = false
+            crownMotion.cancel()
+            stopNativeFling()
         }
 
         override fun onGenericMotionEvent(event: android.view.MotionEvent): Boolean {
             if (event.action != android.view.MotionEvent.ACTION_SCROLL) {
                 return super.onGenericMotionEvent(event)
             }
-            val delta = -event.getAxisValue(android.view.MotionEvent.AXIS_VSCROLL) * crownStep
+            val rotary = event.isFromSource(android.view.InputDevice.SOURCE_ROTARY_ENCODER)
+            val delta = com.watchdl.core.CrownMotion.delta(
+                rotary,
+                event.getAxisValue(android.view.MotionEvent.AXIS_VSCROLL),
+                event.getAxisValue(android.view.MotionEvent.AXIS_SCROLL), crownStep,
+            )
             if (!delta.isFinite() || delta == 0f) return super.onGenericMotionEvent(event)
             onInputStart?.invoke()
-            // 原生惯性不参与跨章。保留尚未追平的表冠目标，快转不丢位移。
-            fling(0)
+            // 只在原生 fling 留有状态时终止一次，不对每个表冠事件重建原生惯性。
+            stopNativeFling()
+            // 保留尚未追平的表冠目标，快转不丢位移。
             val max = maxScrollOf(this)
             val forward = delta > 0f
             if ((forward && scrollY >= max) || (!forward && scrollY <= 0)) {
@@ -731,14 +761,11 @@ object Widgets {
                 onBoundary?.invoke(forward, kotlin.math.abs(delta).toInt().coerceAtLeast(1))
                 return true
             }
-            if (crownAnim?.isRunning != true) crownTarget = scrollY.toFloat()
-            crownTarget = (crownTarget + delta).coerceIn(0f, max.toFloat())
-            crownAnim?.cancel()
-            crownAnim = android.animation.ValueAnimator.ofFloat(scrollY.toFloat(), crownTarget).apply {
-                duration = crownGlide.coerceAtLeast(0).toLong()
-                interpolator = android.view.animation.DecelerateInterpolator()
-                addUpdateListener { a -> scrollTo(0, (a.animatedValue as Float).toInt()) }
-                start()
+            crownMotion.add(scrollY, max, delta,
+                android.view.animation.AnimationUtils.currentAnimationTimeMillis())
+            if (!crownFramePosted) {
+                crownFramePosted = true
+                postOnAnimation(crownFrame)
             }
             return true
         }

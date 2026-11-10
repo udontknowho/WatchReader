@@ -337,7 +337,7 @@ class MainActivity : Activity() {
             is Screen.Swap -> showSwap(s.info, s.src)
             Screen.Shelf -> showShelf()
             Screen.My -> showSettingsRoot()
-            is Screen.Detail -> showDetail(s.info, s.src)
+            is Screen.Detail -> { detailCandidates = s.candidates; showDetail(s.info, s.src) }
             else -> showShelf()
         }
     }
@@ -1235,10 +1235,12 @@ class MainActivity : Activity() {
      *
      * 这与手表外的 e2e 逻辑一致（e2e 会逐个试到能用为止）。
      */
-    internal fun loadToc(name: String, author: String, candidates: List<BookHit>, tried: Int = 0) {
-        val hit = candidates.getOrNull(tried)
+    internal fun loadToc(name: String, author: String, candidates: List<BookHit>, tried: Int = 0,
+                         swappingFrom: BookInfo? = null, failures: List<String> = emptyList()) {
+        val valid = sameBookCandidates(BookInfo("", name, author, emptyList()), candidates)
+        val hit = valid.getOrNull(tried)
         if (hit == null) {
-            showTocFailed(name, candidates)
+            showTocFailed(name, valid, failures, swappingFrom)
             return
         }
         root.removeAllViews()
@@ -1255,12 +1257,16 @@ class MainActivity : Activity() {
 
         val owner: Screen = Screen.Toc(BookInfo("", name, author, emptyList()))
         bg(owner, {
-            val src = sourceFor(hit)
+            val src = multi.pickFor(hit) ?: error("原书源不可用：${hit.sourceName}")
             val tocAt = System.currentTimeMillis()
             val got = src.toc(hit.bookId, hit.name, hit.author).let { t ->
                 // 简介：书源自己的 ruleBookInfo.intro 优先；它为空时用手上已有的摘要
                 // （搜索/榜单带回来的 abstractText），不再发一次请求。
                 if (t.intro.isNotBlank()) t else t.copy(intro = hit.abstractText.trim())
+            }
+            require(got.chapters.isNotEmpty()) { "目录为空" }
+            require(sameBook(name, author, got.name.ifBlank { hit.name }, got.author.ifBlank { hit.author })) {
+                "目录书名或作者不匹配"
             }
             DevLog.log("WatchDL", "目录「${hit.sourceName}」${got.chapters.size} 章 ${System.currentTimeMillis() - tocAt}ms")
             // 目录非空但正文规则已坏的书源很常见（实测 m.rulianshi.la 每章只回 21 字）。
@@ -1277,11 +1283,12 @@ class MainActivity : Activity() {
                         .onFailure { probeErr = it }
                         .getOrNull()
                         ?.let { Downloader.bodyChars(it) } ?: 0
-                } ?: Int.MAX_VALUE
+                } ?: 0
                 if (best < Downloader.MIN_BODY_CHARS) {
                     val why = probeErr?.let { "（探测异常：${it.javaClass.simpleName}: ${it.message}）" } ?: ""
                     DevLog.log("WatchDL", "源「${hit.sourceName}」正文只有 $best 字，换源$why")
-                    return@bg null
+                    error(if (probes.isEmpty()) "目录没有可验证的免费正文" else
+                        "正文验证失败：最多 $best 字$why")
                 }
             }
             src to got
@@ -1296,15 +1303,33 @@ class MainActivity : Activity() {
                 }
                 // SourceEngine.toc 固定返回空 name/author（书源规则里没有稳定书名），
                 // 不回填的话作业名、通知标题、导出文件名全变成「未命名」。
-                showToc(
-                    pair.second.copy(
-                        name = pair.second.name.ifBlank { hit.name },
-                        author = pair.second.author.ifBlank { hit.author },
-                    ),
-                    pair.first,
-                )
+                val full = pair.second.copy(name = pair.second.name.ifBlank { hit.name },
+                    author = pair.second.author.ifBlank { hit.author })
+                val old = swappingFrom ?: shelfStore().find(BookInfo(hit.bookId, name, author, emptyList()))?.info
+                if (old != null && old.bookId != full.bookId) {
+                    val (index, matched) = swappedChapterIndex(old, full, readProgress(old.bookId))
+                    val offset = if (matched) readOffset(old.bookId) else 0
+                    val saved = runCatching { shelfStore().replaceSource(old.bookId, full, hit.sourceName, valid) }
+                    if (saved.isFailure) {
+                        showTocFailed(name, valid, failures + "收藏保存失败：${saved.exceptionOrNull()?.message}", swappingFrom)
+                        return@bg
+                    }
+                    saveProgress(full.bookId, index)
+                    saveOffset(full.bookId, index, offset, sync = true)
+                    if (!matched) {
+                        ReaderUi.swapReturnTitle = ""
+                        ReaderUi.swapReturnAt = 0
+                        toast("未匹配原章节，已保留到第 ${index + 1} 章，需确认位置")
+                    }
+                }
+                runCatching {
+                    if (shelfStore().find(full) != null) shelfStore().add(full, hit.sourceName, valid)
+                }.onFailure { toast("收藏更新失败：${it.message}") }
+                detailCandidates = valid
+                showToc(full, pair.first)
             } else {
-                loadToc(name, author, candidates, tried + 1)
+                val reason = "${hit.sourceName}：${res.exceptionOrNull()?.message ?: "目录为空"}"
+                loadToc(name, author, valid, tried + 1, swappingFrom, failures + reason)
             }
         }
     }
@@ -1316,7 +1341,8 @@ class MainActivity : Activity() {
      * （一闪就没了，不知道发生了什么）。停在这一页把情况说清楚，
      * 返回键自己会回到搜索结果。
      */
-    private fun showTocFailed(name: String, candidates: List<BookHit>) {
+    private fun showTocFailed(name: String, candidates: List<BookHit>, failures: List<String> = emptyList(),
+                              swappingFrom: BookInfo? = null) {
         // 换源全失败：把「回原章」的残值清掉，否则下一次正常进目录会被它劫持。
         ReaderUi.swapReturnTitle = ""
         ReaderUi.swapReturnAt = 0
@@ -1330,8 +1356,11 @@ class MainActivity : Activity() {
         else
             "「$name」取不到目录\n试了 $count 个源都不行，可能是站点都改了"
         col.addView(Widgets.emptyState(this, "warning", msg))
+        if (failures.isNotEmpty()) col.addView(Md3.text(this, failures.takeLast(5).joinToString("\n"),
+            Md3.FS_SM, Md3.error))
         col.addView(Widgets.button(this, "换源重试", "filled") {
-            if (candidates.isNotEmpty()) loadToc(name, "", candidates) else toast("没有可重试的源")
+            if (candidates.isNotEmpty()) loadToc(name, candidates.first().author, candidates,
+                swappingFrom = swappingFrom) else toast("没有可重试的源")
         }, Md3.lpDp(this, null, Md3.BTN).apply { topMargin = Md3.dp(this@MainActivity, Md3.GAP) })
         col.addView(Widgets.button(this, "返回搜索", "text", topMarginPx = Md3.dp(this, Md3.GAP)) {
             goBackToPrevious()
@@ -2062,7 +2091,7 @@ class MainActivity : Activity() {
             Screen.About -> showAbout()
             is Screen.Swap -> showSwap(s.info, s.src)
             Screen.My -> showSettingsRoot()
-            is Screen.Detail -> showDetail(s.info, s.src)
+            is Screen.Detail -> { detailCandidates = s.candidates; showDetail(s.info, s.src) }
         }
     }
 

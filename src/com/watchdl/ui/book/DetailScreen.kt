@@ -72,11 +72,13 @@ internal object DetailUi {
 }
 
 internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
-    setScreen(Screen.Detail(info, src))
+    val candidates = sameBookCandidates(info, detailCandidates + shelfStore().find(info)?.candidates.orEmpty())
+    detailCandidates = candidates
+    setScreen(Screen.Detail(info, src, candidates))
     DetailUi.bind(info.bookId)
     ensureShelfMigration()
     if (info.chapters.isNotEmpty() && shelfStore().contains(info.bookId))
-        runCatching { shelfStore().add(info, srcName(src)) }
+        runCatching { shelfStore().add(info, srcName(src), candidates) }
             .onFailure { toast("收藏更新失败：${it.message}") }
     root.removeAllViews()
     // legado 的 `BookInfoTopBarActions` 是「编辑 / 分享 / ⋮」三枚。
@@ -172,12 +174,12 @@ internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
         return cell
     }
     // 书架卡的文案与图标随状态走（legado `BookInfoActions` 的 inBookshelf 分叉)。
-    val inShelf = shelfStore().contains(info.bookId)
+    val inShelf = shelfStore().find(info) != null
     val shelf = detailShelfAction(inShelf)
     val acts = listOf(
         ActCard(shelf.glyph, shelf.label, shelf.desc) {
             if (inShelf) confirmRemoveShelf(info, src) else {
-                runCatching { shelfStore().add(info, srcName(src)) }
+                runCatching { shelfStore().add(info, srcName(src), candidates) }
                     .onSuccess { toast("已加入书架"); showDetail(info, src) }
                     .onFailure { toast("收藏失败：${it.message}") }
             }
@@ -322,7 +324,7 @@ internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
  * 用整屏对话框而不是浮层：浮层在 189 dp 的屏上几乎占满，既没有留白感也没有整屏的秩序感。
  */
 internal fun MainActivity.showDetailMenu(info: BookInfo, src: BookSource?) {
-    val inShelf = shelfStore().contains(info.bookId)
+    val inShelf = shelfStore().find(info) != null
     val items = mutableListOf<Pair<CharSequence, () -> Unit>>(
         // 换源排在第一位：详情页最常见的动作是「这条源取不到正文，换一条」。
         "换源" to { rememberReturn(); showSwap(info, src) },
@@ -352,7 +354,7 @@ private fun MainActivity.confirmRemoveShelf(info: BookInfo, src: BookSource?) {
         body = "移除“${info.name}”的收藏，保留下载正文与阅读进度。",
         confirm = "移出",
         onConfirm = {
-            runCatching { shelfStore().remove(info.bookId) }
+            runCatching { shelfStore().remove(shelfStore().find(info)?.shelfId ?: info.bookId) }
                 .onSuccess { toast("已移出书架"); showDetail(info, src) }
                 .onFailure { toast("收藏保存失败：${it.message}") }
         },
@@ -406,11 +408,18 @@ private fun MainActivity.detailOpenToc(info: BookInfo, src: BookSource?) {
     val resolved = src ?: sourceForBook(info.bookId)
     if (resolved != null && info.bookId.isNotBlank()) {
         toast("正在取目录…")
-        bg(Screen.Detail(info, src), { resolved.toc(info.bookId, info.name, info.author) }) { result ->
+        bg(Screen.Detail(info, src, detailCandidates), { resolved.toc(info.bookId, info.name, info.author) }) { result ->
             result.onSuccess { got ->
-                if (got.chapters.isEmpty()) { DetailUi.tocFailed = true; showDetail(info, src); return@onSuccess }
+                if (got.chapters.isEmpty()) {
+                    DetailUi.tocFailed = true
+                    toast("目录为空，原书源可能已失效，可在换源页验证其他来源")
+                    showDetail(info, src)
+                    return@onSuccess
+                }
                 val full = got.copy(name = got.name.ifBlank { info.name }, author = got.author.ifBlank { info.author })
-                if (shelfStore().contains(info.bookId)) shelfStore().add(full, srcName(resolved))
+                if (shelfStore().find(info) != null) runCatching {
+                    shelfStore().add(full, srcName(resolved), detailCandidates)
+                }.onFailure { toast("收藏更新失败：${it.message}") }
                 rememberReturn()
                 showToc(full, resolved)
             }.onFailure { DetailUi.tocFailed = true; toast("目录失败：${it.message}"); showDetail(info, src) }

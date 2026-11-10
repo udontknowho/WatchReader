@@ -2,6 +2,87 @@ import com.watchdl.core.*
 import java.net.InetSocketAddress
 import java.util.concurrent.Executors
 
+private fun tocPaginationOfflineChecks() {
+    val base = budgetRule()
+    fun page(n: Int, next: String = "[]") =
+        """{"names":["第${n}章"],"links":["chapter$n"],"next":$next}"""
+    val seen = mutableListOf<String>()
+    val nestedPages = mapOf(
+        "https://budget.example/books/start" to page(1, "[\"part/toc2\"]"),
+        "https://budget.example/books/part/toc2" to page(2, "[\"../end/toc3\"]"),
+        "https://budget.example/books/end/toc3" to page(3),
+    )
+    val nested = SourceEngine(base) { url, _, _, _ -> seen += url; nestedPages.getValue(url) }
+        .toc("https://budget.example/books/start")
+    check(!nested.truncated && nested.chapters.size == 3)
+    check(nested.chapters.map { it.itemId } == listOf(
+        "https://budget.example/books/chapter1", "https://budget.example/books/part/chapter2",
+        "https://budget.example/books/end/chapter3"))
+    check(seen == nestedPages.keys.toList())
+
+    val objectRule = base.copy(jsLib = "function unpack(s){return JSON.parse(s).items;} function value(s,k){return JSON.parse(s)[k];}",
+        toc = base.toc.copy(sourceList = FieldRule("@js:JSON.stringify(unpack(result))"),
+            name = FieldRule("@js:value(result,'n')"), link = FieldRule("@js:value(result,'u')"),
+            isVolume = FieldRule("$.volume")))
+    val objectInfo = SourceEngine(objectRule) { url, _, _, _ ->
+        if (url.endsWith("start")) """{"items":[{"n":"卷一","u":"","volume":true},{"n":"第一章","u":"one"}],"next":["part/second"]}"""
+        else """{"items":[{"n":"第二章","u":"two"}],"next":[]}"""
+    }.toc("https://budget.example/books/start")
+    check(objectInfo.chapters.size == 3 && !objectInfo.truncated)
+    check(objectInfo.chapters.any { it.itemId == "https://budget.example/books/part/two" })
+    check(objectInfo.chapters.any { it.title == "卷一" && it.itemId.contains("#volume-") })
+
+    val many = (1..31).joinToString(",", "[", "]") { "\"/p$it\"" }
+    var calls = 0
+    val cap = SourceEngine(base) { _, _, _, _ -> calls++; if (calls == 1) page(0, many) else page(calls) }.toc("/start")
+    check(calls == 31 && cap.truncated) { "多值页数上限漏报：$calls ${cap.truncated}" }
+    calls = 0
+    val chain = SourceEngine(base) { _, _, _, _ -> calls++; page(calls, "[\"/p${calls + 1}\"]") }.toc("/start")
+    check(calls == 31 && chain.truncated) { "单链页数上限漏报" }
+    calls = 0
+    val exact = SourceEngine(base) { _, _, _, _ ->
+        calls++; page(calls, if (calls == 31) "[]" else "[\"/p${calls + 1}\"]")
+    }.toc("/start")
+    check(calls == 31 && !exact.truncated) { "恰好到末页不应误报截断" }
+    val emptyPage = SourceEngine(base) { url, _, _, _ -> if (url.endsWith("start")) page(1, "[\"/bad\"]") else "<html>error</html>" }.toc("/start")
+    check(emptyPage.truncated && emptyPage.chapters.size == 1)
+    val jsFailure = SourceEngine(objectRule) { url, _, _, _ ->
+        if (url.endsWith("start")) """{"items":[{"n":"第一章","u":"one"}],"next":["/bad"]}""" else "invalid JSON"
+    }.toc("/start")
+    check(jsFailure.truncated && jsFailure.chapters.size == 1)
+    val querySeen = mutableListOf<String>()
+    val queries = SourceEngine(base) { url, _, _, _ ->
+        querySeen += url
+        if (querySeen.size == 1) page(1, "[\"?p=2\",\"?p=2\"]") else page(2)
+    }.toc("https://budget.example/books/toc?p=1")
+    check(!queries.truncated && querySeen == listOf("https://budget.example/books/toc?p=1", "https://budget.example/books/toc?p=2"))
+    val contentSeen = mutableListOf<String>()
+    val contentPages = mapOf(
+        "https://budget.example/books/first" to """{"body":"第一页","next":"part/second"}""",
+        "https://budget.example/books/part/second" to """{"body":"第二页","next":"third"}""",
+        "https://budget.example/books/part/third" to """{"body":"第三页","next":""}""",
+    )
+    val contentRule = base.copy(jsLib = "function body(s){return JSON.parse(s).body;}",
+        content = ContentRule("", content = FieldRule("@js:body(result)"), nextContentUrl = FieldRule("$.next")))
+    val content = SourceEngine(contentRule) { url, _, _, _ -> contentSeen += url; contentPages.getValue(url) }
+        .content("https://budget.example/books/first")
+    check(contentSeen == contentPages.keys.toList())
+    check(listOf("第一页", "第二页", "第三页").all { content.contains(it) })
+    println("TOC offline: object scopes/jsLib, page bases, cap reporting, parse failure, query links")
+}
+
+private fun acceptanceOfflineChecks() {
+    val chapters = listOf("公告", "第一章", "请假条", "第二章 公告", "第三章", "完本感言")
+        .mapIndexed { i, title -> ChapterRef("https://fixture/$i", title) }
+    check(acceptancePositions(chapters) == listOf(1, 3, 4))
+    check(chapters.size == 6) { "抽样不能修改目录" }
+    check(!acceptanceAnnouncement("第十二章 公告"))
+    check(!acceptanceAnnouncement("公告中的秘密"))
+    check(acceptancePositions(listOf(ChapterRef("/1", "公告"))).isEmpty())
+    check(acceptanceTimeout(java.io.IOException("wrapped", java.net.SocketTimeoutException("read"))))
+    check(!acceptanceTimeout(java.io.IOException("404")))
+}
+
 private fun budgetRule() = BookSourceRule(
     name = "budget", host = "https://budget.example",
     search = SearchRule("/search", name = FieldRule("$.name"), link = FieldRule("$.url")),
@@ -11,6 +92,8 @@ private fun budgetRule() = BookSourceRule(
 )
 
 fun main() {
+    tocPaginationOfflineChecks()
+    acceptanceOfflineChecks()
     val rule = budgetRule()
     val first = """{"names":["第一章"],"links":["/1"],"next":["/page2"]}"""
     val budgets = mutableListOf<Int>()
@@ -36,6 +119,7 @@ fun main() {
     check(budgets[0] in 1..800)
     check(budgets[1] <= budgets[0] - 40 && budgets[2] <= budgets[1] - 40)
     check(info.chapters.map { it.title } == listOf("第一章"))
+    check(info.truncated) { "请求失败必须报告目录截断" }
 
     var calls = 0
     val exhausted = SourceEngine(rule, fetchToc = { _, _, _, _, _ ->
@@ -43,7 +127,8 @@ fun main() {
         Thread.sleep(80)
         first
     }) { _, _, _, _ -> error("unbudgeted TOC request") }
-    check(exhausted.toc("https://budget.example/book", 40).chapters.size == 1)
+    val exhaustedInfo = exhausted.toc("https://budget.example/book", 40)
+    check(exhaustedInfo.chapters.size == 1 && exhaustedInfo.truncated)
     check(calls == 1)
     check(runCatching { exhausted.toc("https://budget.example/book", 0) }.isFailure)
     check(calls == 1)

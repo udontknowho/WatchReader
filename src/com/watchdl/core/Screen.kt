@@ -73,8 +73,10 @@ sealed interface Screen {
         val filter: RankConfig.QidianFilter = RankConfig.QidianFilter(),
         val loaded: Boolean = false,
         val scrollY: Int = 0,
-        /** 起点只展示已确认首批，不从 total/isLast 推断分页。 */
+        /** 只由已确认接口的页面元数据开启，不受云端 pages 控制。 */
         val canLoadMore: Boolean = false,
+        val qidianPage: RankSource.QidianPage? = null,
+        val loadingMore: Boolean = false,
     ) : Screen
     /** 书源市场（yiove）。`hits` 为拉到的列表，`page` 为已拉到的页码。 */
     data class Market(val hits: List<YioveSource.Item>, val total: Int, val page: Int) : Screen
@@ -144,7 +146,8 @@ sealed interface Screen {
      * 从搜索结果进来时 [info] 的章节表是空的（还没取目录），其余字段都有；
      * 从目录/进度屏进来时字段全。是否为空决定「查看目录」是直接跳还是先取。
      */
-    data class Detail(val info: BookInfo, val src: BookSource? = null) : Screen
+    data class Detail(val info: BookInfo, val src: BookSource? = null,
+                      val candidates: List<BookHit> = emptyList()) : Screen
 }
 
 /**

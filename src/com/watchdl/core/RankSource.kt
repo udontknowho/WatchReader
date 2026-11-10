@@ -195,14 +195,33 @@ object RankSource {
     private const val QIDIAN_UA =
         "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36"
 
-    /** total/isLast 仅用于展示原站元数据。canLoadMore 不从它们推断。 */
+    /** 只有已确认接口且带匿名会话的页面才允许继续加载。 */
     data class QidianPage(
         val books: List<BookHit>,
         val total: Int?,
         val isLast: Boolean?,
         val url: String,
         val canLoadMore: Boolean = false,
+        val pageNum: Int = 1,
+        val session: QidianSession? = null,
     )
+
+    /** 匿名 Cookie 仅活在本次榜单快照中，不落盘，也不参与 toString。 */
+    class QidianSession internal constructor(
+        private val cookie: String,
+        private val csrf: String,
+        private val params: Map<String, String>,
+    ) {
+        internal fun headers(referer: String) = mapOf("Cookie" to cookie,
+            "Accept" to "application/json", "Referer" to referer)
+        internal fun requestUrl(page: Int): String {
+            fun enc(value: String) = java.net.URLEncoder.encode(value, "UTF-8")
+            return "https://m.qidian.com/webcommon/rank/yuepiaolist?" +
+                (mapOf("gender" to "male", "pageNum" to page.toString()) + params +
+                    ("_csrfToken" to csrf)).entries.joinToString("&") { "${enc(it.key)}=${enc(it.value)}" }
+        }
+        override fun toString() = "QidianSession(anonymous)"
+    }
     class RankAccessException(message: String) : IllegalStateException(message)
 
     /** 只构造已确认的筛选路径。女频是独立站点，不是假造 gender 参数。 */
@@ -219,19 +238,57 @@ object RankSource {
         return "https://$host/rank/$board/$suffix"
     }
 
-    /** 首批页面 SSR，不请求未证实的 majax 分页接口，不自动重试 WAF。 */
+    /** 首批页面建立独立匿名会话，不自动重试 WAF。 */
     fun qidian(
         rank: RankConfig.Rank,
         filter: RankConfig.QidianFilter = RankConfig.QidianFilter(),
         deadline: Long = System.currentTimeMillis() + PAGE_BUDGET_MS,
     ): QidianPage {
         val url = qidianUrl(rank, filter)
+        val raw = qidianRequest(url,
+            mapOf("Accept" to "text/html", "Referer" to url), deadline)
+        return parseQidianPage(String(raw.bytes, Charsets.UTF_8), url,
+            raw.headers["set-cookie"].orEmpty())
+    }
+
+    private fun qidianRequest(url: String, headers: Map<String, String>, deadline: Long): Http.Raw {
         val remaining = (deadline - System.currentTimeMillis()).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         require(remaining > 0) { "起点榜请求预算已用完" }
-        val raw = Http.fetchRaw(url, "GET", null, null,
-            mapOf("Accept" to "text/html", "Referer" to "https://m.qidian.com/rank"),
-            QIDIAN_UA, timeoutMs = remaining)
-        return parseQidianPage(String(raw.bytes, Charsets.UTF_8), url)
+        val raw = try {
+            Http.fetchRaw(url, headers = headers, userAgent = QIDIAN_UA,
+                timeoutMs = remaining, totalTimeoutMs = remaining, probe = false)
+        } catch (e: Exception) {
+            // URL 含匿名 CSRF 参数，异常原因不得回显到界面或崩溃日志。
+            throw RankAccessException("起点请求失败，请稍后重试或刷新榜单")
+        }
+        if (raw.code !in 200..299) throw RankAccessException("起点访问受限（HTTP ${raw.code}），请稍后重试")
+        return raw
+    }
+
+    /** 上一页成功之后才产生下一页；失败不消耗页码，重试沿用原会话。 */
+    fun qidianNext(previous: QidianPage,
+        deadline: Long = System.currentTimeMillis() + PAGE_BUDGET_MS): QidianPage {
+        require(previous.canLoadMore) { "该起点榜没有已确认的后续分页" }
+        val session = previous.session ?: error("起点分页会话已失效，请刷新榜单")
+        val page = previous.pageNum + 1
+        val raw = qidianRequest(session.requestUrl(page), session.headers(previous.url), deadline)
+        return parseQidianResponse(String(raw.bytes, Charsets.UTF_8), previous)
+    }
+
+    fun parseQidianResponse(body: String, previous: QidianPage): QidianPage {
+        require(previous.canLoadMore && previous.session != null) { "起点分页缺有效会话" }
+        if (TinyJson.path(body, "code") != "0")
+            throw RankAccessException("起点分页未返回成功结果，请重试或刷新榜单")
+        val data = TinyJson.field(body, "data") ?: error("起点分页缺 data")
+        val page = previous.pageNum + 1
+        require(TinyJson.path(data, "pageNum")?.toIntOrNull() == page) { "起点分页页码不符" }
+        require(TinyJson.path(data, "gender") == "male") { "起点分页频道不符" }
+        require(qidianIsLast(data) != null) { "起点分页缺 isLast" }
+        val result = parseQidianData(data, previous.url, page, previous.session)
+        require(result.books.isEmpty() || result.books.any { book -> previous.books.none { it.bookId == book.bookId } }) {
+            "起点分页重复返回上一页，请刷新榜单"
+        }
+        return result
     }
 
     /** 保留旧调用接口，但不继续伪造第 2 页及以后。 */
@@ -246,7 +303,7 @@ object RankSource {
     }
 
     /** 按每条记录作用域取字段，缺作者不会导致后续书目字段错位。 */
-    fun parseQidianPage(html: String, url: String = ""): QidianPage {
+    fun parseQidianPage(html: String, url: String = "", setCookie: String = ""): QidianPage {
         // 正常页面也含 x-waf-captcha-referer 通用脚本，不能仅凭 captcha 字样拦截。
         val json = Regex("<script\\b[^>]*\\bid=[\"']vite-plugin-ssr_pageContext[\"'][^>]*>([\\s\\S]*?)</script>")
             .find(html)?.groupValues?.get(1)
@@ -257,6 +314,42 @@ object RankSource {
         val context = TinyJson.field(json, "pageContext") ?: error("起点页面缺 pageContext")
         val props = TinyJson.field(context, "pageProps") ?: error("起点页面缺 pageProps")
         val data = TinyJson.field(props, "pageData") ?: error("起点页面缺 pageData")
+        val page = TinyJson.path(data, "pageNum")?.toIntOrNull() ?: 1
+        val session = qidianSession(context, data, url, setCookie)
+        return parseQidianData(data, url, page, session)
+    }
+
+    private fun qidianSession(context: String, data: String, url: String, setCookie: String): QidianSession? {
+        // 证据只覆盖男频月票榜。接口名不从任意榜名推导，女频不泛化。
+        if (url != "https://m.qidian.com/rank/yuepiao/" ||
+            TinyJson.path(context, "routeParams.pageType") != "yuepiao" ||
+            TinyJson.path(context, "routeParams.gender") != "male" ||
+            TinyJson.path(data, "gender") != "male" ||
+            TinyJson.path(data, "pageNum") != "1") return null
+        val cookies = Regex("(?:^|,\\s*)([A-Za-z0-9_!#$%&'*+.^`|~-]+)=([^;,\\r\\n]*)")
+            .findAll(setCookie).associate { it.groupValues[1] to it.groupValues[2] }
+        val csrf = cookies["_csrfToken"]?.takeIf { it.isNotBlank() } ?: return null
+        val filters = TinyJson.field(data, "filters") ?: return null
+        val selected = linkedMapOf<String, String>()
+        for (filter in TinyJson.objectItems(filters)) {
+            val key = TinyJson.path(filter, "key") ?: return null
+            if (key !in setOf("catId", "yearmonth") || key in selected) return null
+            val index = TinyJson.path(filter, "selectedIndex")?.toIntOrNull() ?: return null
+            val items = TinyJson.field(filter, "items") ?: return null
+            val item = TinyJson.objectItems(items).getOrNull(index) ?: return null
+            selected[key] = TinyJson.path(item, "value") ?: return null
+        }
+        // UI 暂未开放月票分类与月份，只接受官网当前全站默认选择。
+        if (selected.keys != setOf("catId", "yearmonth") || selected["catId"] != "-1" ||
+            !Regex("\\d{6}").matches(selected["yearmonth"].orEmpty())) return null
+        return QidianSession(cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }, csrf, selected)
+    }
+
+    private fun qidianIsLast(data: String): Boolean? = when (TinyJson.path(data, "isLast")) {
+        "1", "true" -> true; "0", "false" -> false; else -> null
+    }
+
+    private fun parseQidianData(data: String, url: String, page: Int, session: QidianSession?): QidianPage {
         val records = TinyJson.field(data, "records") ?: error("起点页面缺 records，不作为空榜处理")
         require(records.trimStart().startsWith("[") && records.trimEnd().endsWith("]")) { "起点 records 格式错误" }
         val items = TinyJson.objectItems(records)
@@ -271,8 +364,10 @@ object RankSource {
                 extra = listOfNotNull(TinyJson.path(record, "cat"), TinyJson.path(record, "cnt"),
                     TinyJson.path(record, "rankCnt")).filter { it.isNotBlank() }.joinToString(" · "))
         }
-        return QidianPage(books, TinyJson.path(data, "total")?.toIntOrNull(),
-            when (TinyJson.path(data, "isLast")) { "1", "true" -> true; "0", "false" -> false; else -> null }, url)
+        val isLast = qidianIsLast(data)
+        return QidianPage(books, TinyJson.path(data, "total")?.toIntOrNull(), isLast, url,
+            canLoadMore = session != null && isLast == false && books.isNotEmpty(),
+            pageNum = page, session = session)
     }
 
     // ── 小工具 ────────────────────────────────────────────

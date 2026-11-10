@@ -4,6 +4,7 @@ import android.view.ViewGroup
 import android.widget.LinearLayout
 import com.watchdl.MainActivity
 import com.watchdl.core.*
+import com.watchdl.ui.shelf.shelfStore
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
 
@@ -17,8 +18,7 @@ import com.watchdl.ui.theme.Widgets
  *    界面照实报「失败 f 条」，不假装全都问到了；
  * 2. 全部源 —— 点了只搜这一条源，心里已经有目标源时走这条，一两秒就有结果。
  *
- * 以前这里列的是搜索结果里现成的同名书（`detailCandidates`）。那是旧结果，
- * 换源恰恰发生在「搜索结果里没有别的源」的时候，所以整段废掉了。
+ * 已有同书候选优先复用。目录与正文仍需重新验证，失败不覆盖当前收藏。
  *
  * 换成功的判据与 [loadToc] 一致：目录非空、首章正文过长度线。不合格的源
  * 会被 loadToc 自己挡掉并报失败，不会悄悄换到一条坏源上。
@@ -55,7 +55,7 @@ internal fun MainActivity.showSwap(info: BookInfo, cur: BookSource?) {
 
     // 命中区与状态行要在动作行之前建好，点击时闭包能直接抓到它们。
     val hitsBox = Md3.column(this)
-    val status = Md3.text(this, "先搜索，再点选验证可用的书源", Md3.FS_SM, Md3.onSurfaceVariant).apply {
+    val status = Md3.text(this, "可先用已有同书来源，也可搜索其他来源", Md3.FS_SM, Md3.onSurfaceVariant).apply {
         setPadding(Md3.dp(this@showSwap, Md3.PAD), 0,
             Md3.dp(this@showSwap, Md3.PAD), Md3.dp(this@showSwap, Md3.GAP / 2))
     }
@@ -88,12 +88,13 @@ internal fun MainActivity.showSwap(info: BookInfo, cur: BookSource?) {
                         for (hit in hits) {
                             val sn = hit.sourceName.ifBlank { "未命名源" }
                             // 当前源不必再试：正在用的就是它。
-                            if (sn == curName || !shown.add(sn)) continue
+                            if (!sameBook(info.name, info.author, hit.name, hit.author) ||
+                                sn == curName || !shown.add(sn)) continue
                             hitsBox.addView(Widgets.listItem(this, sn,
-                                "${hit.author} · 点了直接试这条源的目录", twoLine = true) {
+                                "${hit.author} · 验证目录与正文后切换", twoLine = true) {
                                 rememberReturn()
                                 loadToc(info.name, info.author,
-                                    listOf(hit.copy(sourceName = hit.sourceName.ifBlank { sn })))
+                                    listOf(hit.copy(sourceName = hit.sourceName.ifBlank { sn })), swappingFrom = info)
                             })
                         }
                     }
@@ -104,12 +105,27 @@ internal fun MainActivity.showSwap(info: BookInfo, cur: BookSource?) {
                 status.text = when {
                     r.hits.isEmpty() -> "全部源都没有这本书"
                     // 命中全落在当前源上：屏上没有可换的行，也得说清。
-                    shown.isEmpty() -> "命中 ${r.hits.size} 条，都在当前源"
+                    shown.isEmpty() -> "没有其他书名与作者一致的来源"
                     else -> "命中 ${shown.size} 条源 · 失败 ${r.failed.size} 条 / 共 ${r.total} 条源"
                 }
             }, onFailure = { e ->
                 // 搜索本身不该抛（源异常都在内部吞掉了），真抛了就说清是哪一类。
                 status.text = "搜索中断：${e.javaClass.simpleName}"
+            })
+        }
+    }
+
+    // 已有候选直接验证目录和正文，不再发搜索请求。
+    val known = sameBookCandidates(info, detailCandidates + shelfStore().find(info)?.candidates.orEmpty())
+        .filter { it.bookId != info.bookId && it.sourceName != curName }
+    if (known.isNotEmpty()) {
+        status.text = "已有 ${known.size} 条同书候选，点选后验证目录与正文"
+        known.forEach { hit ->
+            shown += hit.sourceName
+            hitsBox.addView(Widgets.listItem(this, hit.sourceName.ifBlank { "未命名源" },
+                "${hit.author} · 验证后切换", twoLine = true) {
+                rememberReturn()
+                loadToc(info.name, info.author, listOf(hit), swappingFrom = info)
             })
         }
     }
@@ -135,7 +151,13 @@ internal fun MainActivity.showSwap(info: BookInfo, cur: BookSource?) {
         val isCur = srcName(ns.source) == curName
         col.addView(Widgets.listItem(this, ns.name,
             if (isCur) "正在用" else null, twoLine = isCur) {
-            if (!isCur) swapToSource(info, ns)
+            if (!isCur) {
+                val cached = known.firstOrNull { it.sourceName == ns.name }
+                if (cached != null) {
+                    rememberReturn()
+                    loadToc(info.name, info.author, listOf(cached), swappingFrom = info)
+                } else swapToSource(info, ns)
+            }
         })
     }
     if (ordered.size > SWAP_ROWS) {
@@ -150,8 +172,7 @@ internal fun MainActivity.showSwap(info: BookInfo, cur: BookSource?) {
  * 在指定源里找这本书，找到就换过去。
  *
  * 只搜这一条源（约 1~3 秒），不跑全量：全量要十几秒，而用户心里已经有目标源。
- * 匹配顺序：书名与作者都一致 > 书名一致 > 书名包含。都不中就明说没有，
- * 不硬换 —— 换成另一本书比换失败更糟。
+ * 只接受书名与作者一致的候选，不通过书名包含关系自动换书。
  *
  * 「换源后回原章」的标题由阅读页发起换源时记好（`ReaderUi.swapReturnTitle`），
  * 这里只管挑源与 `loadToc`，不碰它。
@@ -167,18 +188,13 @@ internal fun MainActivity.swapToSource(info: BookInfo, ns: MultiSource.NamedSour
             toast("「${ns.name}」搜索失败：${e.message?.take(32) ?: "网络不可用"}")
             return@bg
         }
-        val want = info.name.trim()
-        val wantAuthor = info.author.trim()
-        val pick = hits.firstOrNull {
-            it.name.trim() == want && (wantAuthor.isEmpty() || it.author.trim() == wantAuthor)
-        } ?: hits.firstOrNull { it.name.trim() == want }
-          ?: hits.firstOrNull { it.name.contains(want) }
+        val pick = sameBookCandidates(info, hits).firstOrNull()
         if (pick == null) {
-            toast("「${ns.name}」没有这本书")
+            toast("「${ns.name}」没有书名与作者一致的候选")
         } else {
             rememberReturn()
             loadToc(info.name, info.author,
-                listOf(pick.copy(sourceName = pick.sourceName.ifBlank { ns.name })))
+                listOf(pick.copy(sourceName = pick.sourceName.ifBlank { ns.name })), swappingFrom = info)
         }
     }
 }

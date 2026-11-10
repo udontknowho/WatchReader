@@ -9,6 +9,7 @@ import com.watchdl.core.*
 import com.watchdl.ui.attachTabs
 import com.watchdl.ui.book.showDetail
 import com.watchdl.ui.shelf.showShelf
+import com.watchdl.ui.shelf.shelfStore
 import com.watchdl.ui.theme.Icons
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
@@ -304,7 +305,9 @@ private fun MainActivity.searchHitItem(h: BookHit, sourceCount: Int, onClick: ()
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
     // 第二行「作者 · 最新: 章名」，没有最新章就退回源名（见 searchHitLine）。
     col.addView(Md3.ellipsize(Md3.text(this,
-        searchHitLine(h.author, h.extra, h.sourceName), Md3.FS_SM, Md3.onSurfaceVariant))
+        searchHitLine(h.author, h.extra, h.sourceName) +
+            if (shelfStore().find(BookInfo(h.bookId, h.name, h.author, emptyList())) != null) " · 已收藏" else "",
+        Md3.FS_SM, Md3.onSurfaceVariant))
         .apply { alpha = 0.7f }, LinearLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
     // 简介压 1 行。legado 给 2 行，189dp 高的一屏只放得下两张卡就翻不动了，
@@ -420,9 +423,16 @@ private fun MainActivity.confirmClearHistory() {
 private fun MainActivity.showHitMenu(h: BookHit) {
     val items = mutableListOf<Pair<CharSequence, () -> Unit>>()
     items += "查看详情" to { openDetailOnly(h) }
+    val info = BookInfo(h.bookId, h.name, h.author, emptyList(), intro = h.abstractText)
+    val favorite = shelfStore().find(info)
+    items += (if (favorite != null) "已收藏 · 移出书架" else "加入书架") to {
+        runCatching {
+            if (favorite != null) shelfStore().remove(favorite.shelfId)
+            else shelfStore().add(info, h.sourceName, siblingsOf(h))
+        }.onSuccess { toast(if (favorite != null) "已移出书架，下载与进度保留" else "已加入书架") }
+            .onFailure { toast("收藏保存失败：${it.message}") }
+    }
     items += "重新搜索《${h.name}》" to { doSearch(h.name) }
-    // 「加入书架」暂缺：本项目的书架由下载任务驱动（Downloader / JobStore），
-    // 没有「只上架不下载」的入口，造一个会和现有书架过滤打架。见提交说明。
     Widgets.longMenuDialog(this, h.name, items).show()
 }
 
@@ -650,7 +660,7 @@ internal fun MainActivity.openHit(hit: BookHit) {
     val src = sourceFor(hit)
     // 记下搜索结果这一屏，详情页返回时原样退回去。
     rememberReturn()
-    val job = Downloader.restore(jobsStore(), hit.bookId)
+    val job = Downloader.restoreLight(jobsStore(), hit.bookId)
     if (job != null) {
         // 已经下到本地的书，用户点它就是要接着读，不必再绕一层详情。
         showToc(BookInfo(hit.bookId, job.name.ifBlank { hit.name }, job.author.ifBlank { hit.author }, job.chapters), src)
@@ -669,10 +679,9 @@ internal fun MainActivity.openHit(hit: BookHit) {
  */
 internal fun MainActivity.siblingsOf(hit: BookHit): List<BookHit> {
     val all = (curScreen as? Screen.Hits)?.all.orEmpty()
-    val same = all.filter {
-        it.name.trim() == hit.name.trim() && it.author.trim() == hit.author.trim()
-    }
-    return (listOf(hit) + same).distinctBy { it.sourceName }
+    val info = BookInfo(hit.bookId, hit.name, hit.author, emptyList())
+    val saved = shelfStore().find(info)?.candidates.orEmpty()
+    return sameBookCandidates(info, listOf(hit) + all + saved)
 }
 
 /** 发现页仅保留本次会话快照；主动刷新和更改筛选才重新取数。 */
@@ -707,7 +716,9 @@ internal fun MainActivity.backFromDiscover(s: Screen.Discover) {
 }
 
 /** 每个快照自带 filter、hits、error、loaded 与 scrollY；重放绝不发请求。 */
-internal fun MainActivity.showDiscoverSnapshot(state: Screen.Discover) {
+internal fun MainActivity.showDiscoverSnapshot(snapshot: Screen.Discover) {
+    // 切屏会取消后台任务，返回途中保存的加载态应能继续点下一页。
+    val state = if (screenId(curScreen) != screenId(snapshot)) snapshot.copy(loadingMore = false) else snapshot
     setScreen(state)
     RankUiSession.site = state.site
     RankUiSession.gender = state.gender
@@ -768,7 +779,11 @@ internal fun MainActivity.showDiscoverSnapshot(state: Screen.Discover) {
             }
             if (state.error.isNotBlank()) {
                 col.addView(Widgets.emptyState(this, "warning", state.error))
-                col.addView(Widgets.button(this, "重试当前筛选", "tonal") { requestRank(state.copy(scrollY = 0)) })
+                col.addView(Widgets.button(this,
+                    if (state.canLoadMore) "重试加载更多" else "重试当前筛选", "tonal") {
+                    requestRank(state.copy(scrollY = if (state.canLoadMore) state.scrollY else 0),
+                        more = state.canLoadMore)
+                })
             }
             if (!state.loaded && state.error.isEmpty()) {
                 col.addView(Widgets.emptyState(this, "refresh", "正在加载榜单…"))
@@ -781,9 +796,18 @@ internal fun MainActivity.showDiscoverSnapshot(state: Screen.Discover) {
                     twoLine = true, highlight = false) { openDiscoverHit(hit) })
             }
             if (state.loaded && state.error.isEmpty()) {
+                if (state.canLoadMore) {
+                    col.addView(Widgets.button(this,
+                        if (state.loadingMore) "正在加载更多…" else "加载更多", "tonal") {
+                        val current = curScreen as? Screen.Discover
+                        if (current != null && !current.loadingMore) requestRank(current, more = true)
+                    }.apply { isEnabled = !state.loadingMore })
+                }
                 col.addView(Md3.text(this, when {
                     state.hits.isEmpty() -> "该筛选下暂无书目"
-                    state.site == RankConfig.Site.QIDIAN -> "已展示本站首批 · 后续分页尚未确认"
+                    state.canLoadMore -> "已加载 ${state.hits.size} 本 · 第 ${state.qidianPage?.pageNum} 页"
+                    state.qidianPage?.session != null -> "已展示全部榜单书目"
+                    state.site == RankConfig.Site.QIDIAN -> "已展示本站首批 · 此榜后续分页尚未确认"
                     else -> "已展示全部榜单书目"
                 }, Md3.FS_SM, Md3.onSurfaceVariant))
             }
@@ -850,28 +874,47 @@ private fun MainActivity.chooseRankFilter(state: Screen.Discover, rank: RankConf
     Widgets.longMenuDialog(this, "榜单筛选", items).show()
 }
 
-private fun MainActivity.requestRank(state: Screen.Discover) {
+private fun MainActivity.requestRank(state: Screen.Discover, more: Boolean = false) {
+    if (more && (!state.canLoadMore || state.qidianPage == null || state.loadingMore)) return
     val rank = availableRanks().firstOrNull { it.key == state.rankKey }
     if (rank == null) {
         showDiscoverSnapshot(state.copy(loaded = true, error = "这个榜已不在榜单清单里"))
         return
     }
     val requestSerial = ++RankUiSession.requestSerial
-    val loading = state.copy(hits = emptyList(), error = "", loaded = false, canLoadMore = false)
+    val loading = if (more) state.copy(error = "", loadingMore = true)
+        else state.copy(hits = emptyList(), error = "", loaded = false, canLoadMore = false,
+            qidianPage = null, loadingMore = false)
     showDiscoverSnapshot(loading)
     bg(loading, {
-        val decoder = runCatching { CharsetFontDecoder.fromFile(java.io.File(filesDir, "charset.json").absolutePath) }
-            .getOrNull()?.takeIf { it.isReady }
+        if (rank.kind == RankConfig.Kind.QIDIAN) {
+            val page = if (more) RankSource.qidianNext(state.qidianPage!!)
+                else RankSource.qidian(rank, state.filter)
+            return@bg page.books to page
+        }
+        val decoder = runCatching {
+            // 首次进发现页未必执行过 extractAssets；直接读包内 UTF-16 表，不写私有目录。
+            val text = assets.open("charset.json").bufferedReader(Charsets.UTF_16).use { it.readText() }
+            val rows = Regex("\\[([^\\[\\]]*)]", RegexOption.DOT_MATCHES_ALL).findAll(text)
+                .map { row -> Regex("\\\"([^\\\"]*)\\\"").findAll(row.groupValues[1]).map { it.groupValues[1] }.toList() }
+                .filter { it.isNotEmpty() }.toList()
+            CharsetFontDecoder(rows).also { check(it.isReady) { "字符表为空" } }
+        }.getOrElse { throw IllegalStateException("番茄字符表读取失败：${it.message}", it) }
         RankSource.fetch(rank, if (rank.gender == RankConfig.Gender.FEMALE) "female" else "male",
-            1, decoder = decoder, filter = state.filter)
+            1, decoder = decoder, filter = state.filter) to null
     }) { result ->
         if (requestSerial != RankUiSession.requestSerial) return@bg
         val current = (curScreen as? Screen.Discover) ?: return@bg
         val ready = result.fold(
-            onSuccess = { current.copy(hits = it, loaded = true, error = "", canLoadMore = false) },
-            onFailure = { current.copy(loaded = true, error =
+            onSuccess = { (hits, page) ->
+                val merged = if (more) (current.hits + hits).distinctBy { it.bookId } else hits
+                current.copy(hits = merged, loaded = true, error = "", loadingMore = false,
+                    canLoadMore = page?.canLoadMore == true, qidianPage = page)
+            },
+            onFailure = { current.copy(loaded = true, loadingMore = false, error =
                 if (it is RankSource.RankAccessException) it.message ?: "起点访问受限"
-                else "榜单暂时无法获取：${it.message ?: "网络不可用"}", canLoadMore = false) })
+                else "榜单暂时无法获取：${it.message ?: "网络不可用"}",
+                canLoadMore = more && state.canLoadMore) })
         RankUiSession.snapshots.remove(screenId(ready))
         RankUiSession.snapshots[screenId(ready)] = ready
         while (RankUiSession.snapshots.size > 24) RankUiSession.snapshots.remove(RankUiSession.snapshots.keys.first())

@@ -166,11 +166,11 @@ class SourceEngine(
      * 实测酷我小说就是这么写的，返回整个数组时必须展开成多项，
      * 否则后续字段选择器会把整个数组当成一项去找，永远找不到。
      */
-    private fun evalList(raw: String, sel: FieldRule, baseUrl: String = "", jsLib: String? = null): List<String> =
-        evalList(raw, sel.selector, baseUrl, jsLib)
+    private fun evalList(raw: String, sel: FieldRule, baseUrl: String = "", jsLib: String? = null, strict: Boolean = false): List<String> =
+        evalList(raw, sel.selector, baseUrl, jsLib, strict)
 
     /** [sel] 的正文版：目录复用同一套「列表选择器」语义。 */
-    private fun evalList(raw: String, sel: String, baseUrl: String = "", jsLib: String? = null): List<String> {
+    private fun evalList(raw: String, sel: String, baseUrl: String = "", jsLib: String? = null, strict: Boolean = false): List<String> {
         // 列表选择器也要展开 `||` 备选链。
         //
         // 以前直接 `Selector.parse(整串)`，`class.excerpt||class.post||...`
@@ -185,7 +185,7 @@ class SourceEngine(
                 return runCatching {
                     listOf(JsEngine.eval(full, JsEngine.Env(
                         result = raw, baseUrl = baseUrl, sourceKey = rule.host)))
-                }.getOrElse { emptyList() }
+                }.getOrElse { if (strict) throw it else emptyList() }
             }
             val parsed = Selector.parse(seg)
             return when (parsed) {
@@ -285,32 +285,40 @@ class SourceEngine(
         // 取 `$.n` / `$.u` —— 这是 legado 的语义。
         // 以前名字和链接都拿整段响应求值，`$.n` 取不到，目录为空。
         // chapterList 是字符串列表（CSS / 带 @text 的脚本）时走旧路径，一个字符不改。
-        val items = tocItemScope(raw, url)
-        val names: MutableList<String>
-        val links: MutableList<String>
-        val vols: MutableList<String>
-        if (items != null) {
-            // 对象里那一格名由字段规则自己指定（`$.n` → 取 n）。取不到就是空串。
-            fun column(fr: FieldRule) = items.map { obj ->
-                val rule0 = fr.selector.trim()
-                objKey(rule0)?.let { k ->
-                    TinyJson.path(obj, k) ?: if (rule0.startsWith("$")) "" else fr.eval(obj, jsLib = rule.jsLib).firstOrNull() ?: ""
-                } ?: (fr.eval(obj, jsLib = rule.jsLib).firstOrNull() ?: "")
+        val chapters = mutableListOf<ChapterRef>()
+        // 每一页独立执行 chapterList 和字段规则，不复用首页的项作用域。
+        // 链接在本页立即绝对化，避免汇总后丢失后页的路径基准。
+        fun appendPage(pageRaw: String, pageUrl: String): Boolean {
+            val items = tocItemScope(pageRaw, pageUrl)
+            fun column(fr: FieldRule): List<String> = if (items == null) {
+                fr.eval(pageRaw, list = true, jsLib = rule.jsLib)
+            } else items.map { obj ->
+                val selector = fr.selector.trim()
+                // 只有裸键走快捷路径，JSONPath 备选链仍由 FieldRule 完整求值。
+                if (selector.matches(Regex("[A-Za-z_][A-Za-z0-9_]*")))
+                    TinyJson.path(obj, selector) ?: fr.eval(obj, jsLib = rule.jsLib).firstOrNull().orEmpty()
+                else fr.eval(obj, jsLib = rule.jsLib).firstOrNull().orEmpty()
             }
-            names = column(rule.toc.name).toMutableList()
-            links = column(rule.toc.link).toMutableList()
-            vols = (rule.toc.isVolume?.let { runCatching { it.eval(raw, list = true) }.getOrNull() }
-                ?: emptyList()).toMutableList()
-        } else {
-            names = rule.toc.name.eval(raw, list = true).toMutableList()
-            links = rule.toc.link.eval(raw, list = true).toMutableList()
-            // isVolume 是本轮新增的：卷名节点没有章节链接，不能当章节丢弃。
-            vols = (rule.toc.isVolume?.let { runCatching { it.eval(raw, list = true) }.getOrNull() }
-                ?: emptyList()).toMutableList()
+            val names = column(rule.toc.name)
+            val links = column(rule.toc.link)
+            val vols = rule.toc.isVolume?.let { column(it) }.orEmpty()
+            if (names.isEmpty()) return false
+            if (links.size > names.size) tocCut = true
+            names.indices.forEach { i ->
+                val rawLink = links.getOrNull(i)?.trim().orEmpty()
+                val isVol = isTrue(vols.getOrNull(i))
+                val link = when {
+                    rawLink.isNotEmpty() -> absolute(rawLink, pageUrl)
+                    isVol -> "$pageUrl#volume-$i"
+                    else -> { tocCut = true; pageUrl }
+                }
+                if (link.isNotEmpty()) chapters += ChapterRef(link, plainText(names[i]))
+                else tocCut = true
+            }
+            return true
         }
-        // 章节链接一律以**目录页自身**为基准拼绝对地址。
-        // 用 rule.host（站点根）会把 /book/123/1.html 拼成 /1.html，整本书全 404。
-        val baseOf = { u: String -> absolute(u, url) }
+        if (!runCatching { appendPage(raw, url) }.getOrDefault(false)) tocCut = true
+        if (remainingMs() <= 0) tocCut = true
 
         // 目录分页（legado 的 nextTocUrl）。
         //
@@ -321,14 +329,25 @@ class SourceEngine(
         val nextRule = rule.toc.nextTocUrl
         if (nextRule != null) {
             val visited = HashSet<String>().apply { add(url) }
+            fun nextUrls(pageRaw: String, pageUrl: String): List<String> = runCatching {
+                nextRule.eval(pageRaw, list = true, jsLib = rule.jsLib)
+                    .map { it.trim() }.filter { it.isNotEmpty() }
+                    .map { path ->
+                        // expand 对 ?/# 采用拼接语义，先去掉被替换的旧查询和片段。
+                        val base = when {
+                            path.startsWith("?") -> pageUrl.substringBefore('#').substringBefore('?')
+                            path.startsWith("#") -> pageUrl.substringBefore('#')
+                            else -> pageUrl
+                        }
+                        absolute(rule.expand(path, ctx, pageRaw, base = base), pageUrl)
+                    }
+                    .filter { it.isNotEmpty() && it !in visited }.distinct()
+            }.getOrElse { tocCut = true; emptyList() }
             // 第一轮：拿当前页给出的后续页列表。
             // 必须 `list = true`：eval 默认只取第 1 个，`≥2 个并发一次全取`
             // 这条分支根本到不了，`select#page@option@value` 这种整页列表只翻到第 2 页。
-            val firstNext = runCatching { nextRule.eval(raw, list = true, jsLib = rule.jsLib) }
-                .getOrDefault(emptyList())
-            val pending = firstNext.map { it.trim() }.filter { it.isNotEmpty() }
-                .map { absolute(rule.expand(it, ctx), url) }
-                .filter { it !in visited }
+            val pending = nextUrls(raw, url)
+            if (pending.size > MAX_PAGES) tocCut = true
             val isMulti = pending.size >= 2
 
             // 总页数封顶。以前只封了内层循环，外层 `pending` 有多少就发多少次请求：
@@ -337,7 +356,7 @@ class SourceEngine(
             // 现在内外层共用一份预算，并且多取几页也够用 —— 正常站点的目录就几页。
             var budget = MAX_PAGES
             pending.take(MAX_PAGES).forEach { start ->
-                if (budget <= 0) return@forEach
+                if (budget <= 0) { tocCut = true; return@forEach }
                 var nextUrl = start
                 var chain = 0
                 // 单值分支：继续链式翻页；多值分支：每页只取其自身列表，不再递归。
@@ -354,39 +373,26 @@ class SourceEngine(
                     // 详见 TOC_PAGE_STALL_MS 的注释（pingshuku 每页 2.4 秒的实测）。
                     // 必须在这里判而不是只靠总预算：一页一页慢慢磨到 25 秒，
                     // 用户看到的是「点了没反应 25 秒」，而前几页的数据明明已经到手了。
-                    if (System.currentTimeMillis() - pageAt > TOC_PAGE_STALL_MS) tocCut = true
-                    val n2 = rule.toc.name.eval(pageRaw, list = true)
-                    if (n2.isEmpty()) break
-                    names += n2
-                    links += rule.toc.link.eval(pageRaw, list = true)
-                    rule.toc.isVolume?.let { v ->
-                        runCatching { vols += v.eval(pageRaw, list = true) }
-                    }
+                    val stalled = System.currentTimeMillis() - pageAt > TOC_PAGE_STALL_MS
+                    val parsed = runCatching { appendPage(pageRaw, nextUrl) }.getOrDefault(false)
+                    if (!parsed) { tocCut = true; break }
+                    if (stalled || remainingMs() <= 0) { tocCut = true; break }
                     chain++
-                    if (isMulti || chain >= MAX_PAGES) break
-                    // 单值：从刚打开的页里继续找下一页。
-                    nextUrl = runCatching { nextRule.eval(pageRaw, jsLib = rule.jsLib) }
-                        .getOrDefault(emptyList()).firstOrNull()?.trim()?.let { absolute(rule.expand(it, ctx), nextUrl) }
-                        .orEmpty()
+                    if (isMulti) break
+                    val following = nextUrls(pageRaw, nextUrl)
+                    if (chain >= MAX_PAGES || budget <= 0) {
+                        if (following.isNotEmpty()) tocCut = true
+                        break
+                    }
+                    // 单链意外分叉时显式报告截断，不能只取 firstOrNull 静默漏章。
+                    if (following.size > 1) {
+                        tocCut = true
+                    }
+                    nextUrl = following.firstOrNull().orEmpty()
                 }
             }
         }
 
-        val chapters = names.indices.mapNotNull { i ->
-            val rawLink = links.getOrNull(i)?.trim().orEmpty()
-            val title = plainText(names[i])
-            // 空链接的两种兑底，与 legado 一致：
-            //   isVolume 为真 → 造一个唯一假 URL 当卷名节点；
-            //   isVolume 为假 → 指向目录页（数据脏，但不能丢，丢了章节就少一章）。
-            val isVol = vols.getOrNull(i)?.let { isTrue(it) } ?: false
-            val link = when {
-                rawLink.isNotEmpty() -> baseOf(rawLink)
-                isVol -> "$url#$i"
-                else -> url
-            }
-            if (link.isEmpty()) return@mapNotNull null
-            ChapterRef(itemId = link, title = title)
-        }
         // 按章节号排序 + 去重，见 ChapterOrder 的注释。
         return BookInfo(
             bookId = book, name = "", author = "",
@@ -409,7 +415,7 @@ class SourceEngine(
         // 字符串数组（普通脚本目录）不是对象，照样返回 null 走旧路径。
         // N4：baseUrl 以前传空串。用 `baseUrl` 的纯 <js> 目录规则（源库里有 12 条）
         // 会得到空 href，回退成目录页地址当章节链接，正文取到目录页。
-        val ev = evalList(raw, lst, pageUrl, rule.jsLib)
+        val ev = evalList(raw, lst, pageUrl, rule.jsLib, strict = true)
         if (ev.isEmpty() || ev.any { !it.trim().startsWith("{") }) return null
         return ev
     }
@@ -471,7 +477,7 @@ class SourceEngine(
      */
     private fun contentBody(raw: String): String {
         val rule = rule.content.content
-        val all = runCatching { rule.eval(raw, list = true) }.getOrNull().orEmpty()
+        val all = runCatching { rule.eval(raw, list = true, jsLib = this.rule.jsLib) }.getOrNull().orEmpty()
         // 规则给了选择器却一条没命中，返回空串，让上层记 FAILED。
         // 以前返回 raw，于是站点改版/选择器失效时每章都把整页 HTML
         //（导航、广告、版权）存下，并且因为 html.isBlank() 不成立而记 DONE。
@@ -491,6 +497,7 @@ class SourceEngine(
         val sb = StringBuilder(firstBody)
         val visited = HashSet<String>().apply { add(firstUrl) }
         var curRaw = firstRaw
+        var curUrl = firstUrl
         var pages = 1
         // 7.3 小项：以前只有页数上限（30 页 × 每页约 32 秒 ≈ 16 分钟），
         // 慢站会把单章正文拖到十几分钟，用户只会以为卡死。
@@ -504,10 +511,15 @@ class SourceEngine(
             // N4：以前 expand 只用站点根做基准、absolute 又没传 base，
             // 章节页 /book/123/456.html 的下一页若是相对链接 `456_2.html`，
             // 就会拼成 /456_2.html 而 404（或更糟：站点根返回 200，首页文字被拼进正文）。
-            // 现在 expand 和 absolute 都用当前页 firstUrl 做基准。
+            // 当前页会随翻页移动，不能始终停在 firstUrl。
+            val base = when {
+                next.startsWith("?") -> curUrl.substringBefore('#').substringBefore('?')
+                next.startsWith("#") -> curUrl.substringBefore('#')
+                else -> curUrl
+            }
             val nextUrl = absolute(
-                rule.expand(next, mapOf("url" to firstUrl, "chapterUrl" to firstUrl), base = firstUrl),
-                base = firstUrl,
+                rule.expand(next, mapOf("url" to curUrl, "chapterUrl" to curUrl), result = curRaw, base = base),
+                base = curUrl,
             )
             if (nextUrl in visited) break          // 绕回自身，停
             visited += nextUrl
@@ -518,6 +530,7 @@ class SourceEngine(
                            else contentBody(rawPage)
             sb.append('\n').append(bodyPage)
             curRaw = rawPage
+            curUrl = nextUrl
             pages++
         }
         return sb.toString()

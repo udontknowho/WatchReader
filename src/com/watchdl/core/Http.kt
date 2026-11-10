@@ -141,6 +141,7 @@ object Http {
             // 上层 invokeAll 超时 → cancel(true) → 这里的 task.get() 被中断。
             // 记成「取消」，否则每次都先去排一堆假失败线索。
             err is InterruptedException -> "取消（上层超时中断）"
+            err != null && url.contains("_csrfToken=") -> "ERR ${err.javaClass.simpleName}"
             err != null -> "ERR ${err.javaClass.simpleName}: ${err.message}"
             else -> "$code ${ms}ms ${sizeText(bytes ?: 0)}"
         }
@@ -214,7 +215,7 @@ object Http {
             r
         } catch (e: java.util.concurrent.TimeoutException) {
             task.cancel(true)
-            DevLog.log("HTTP", "${method.uppercase()} ${target.take(120)} 超时(原始) ${budget}ms")
+            DevLog.log("HTTP", "${method.uppercase()} ${whereOf(target)} 超时(原始) ${budget}ms")
             throw java.io.IOException("请求超时（${budget}ms，含 DNS）")
         } catch (e: java.util.concurrent.ExecutionException) {
             val c = (e.cause as? Exception) ?: e

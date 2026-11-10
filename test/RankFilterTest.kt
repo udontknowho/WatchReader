@@ -45,7 +45,7 @@ fun main(args: Array<String>) {
     rejects("records不能是对象") { S.parseQidianPage(html("{}")) }
     verify("旧配置归一且禁分页", C.parse("""{"ranks":[{"key":"old","kind":"qidian","board":"yuepiaolist","pages":10}]}""").single().let { it.board == "yuepiao" && it.pages == 0 })
     verify("无效旧收藏榜剔除", C.parse("""{"ranks":[{"key":"old","kind":"qidian","board":"collectlist"}]}""").isEmpty())
-    args.firstOrNull { it != "--live" }?.let { dir ->
+    args.firstOrNull { !it.startsWith("--") }?.let { dir ->
         for ((file, total) in listOf("read.html" to 510, "fans.html" to 500)) {
             val page = S.parseQidianPage(File(dir, file).readText())
             verify("实抓${file}首批20条", page.books.size == 20 && page.total == total && !page.canLoadMore)
@@ -59,6 +59,40 @@ fun main(args: Array<String>) {
             verify("Http真实${r.board}/${filter.categoryId}/${filter.period.path}", page.books.size == 20)
             println("首条 ${page.books.first().name}，total=${page.total}，isLast=${page.isLast}")
         }
+    }
+    // 假 Cookie 专用于离线契约，不包含抓取会话。
+    val qdUrl = "https://m.qidian.com/rank/yuepiao/"
+    fun monthly(month: String = "203101", gender: String = "male", extra: String = "") = """<script id="vite-plugin-ssr_pageContext">{"pageContext":{"routeParams":{"pageType":"yuepiao","gender":"$gender"},"pageProps":{"pageData":{"gender":"$gender","pageNum":1,"isLast":0,"total":1000,"records":[{"bid":"1","bName":"甲"}],"filters":[{"key":"catId","selectedIndex":0,"items":[{"value":-1}]},{"key":"yearmonth","selectedIndex":1,"items":[{"value":"199901"},{"value":"$month"}]}]$extra}}}}</script>"""
+    val fakeCookie = "other=one; Path=/; Expires=Wed, 01 Jan 2031 00:00:00 GMT, _csrfToken=offline-token; Path=/; HttpOnly"
+    val first = S.parseQidianPage(monthly(), qdUrl, fakeCookie)
+    verify("月票有效匿名会话可翻页", first.canLoadMore && first.pageNum == 1 && first.session != null)
+    verify("无Cookie不开放分页", !S.parseQidianPage(monthly(), qdUrl).canLoadMore)
+    verify("女频不泛化分页", !S.parseQidianPage(monthly(gender = "female"), "https://m.qdmm.com/rank/yuepiao/", fakeCookie).canLoadMore)
+    verify("其他榜不泛化分页", !S.parseQidianPage(monthly(), "https://m.qidian.com/rank/readindex/", fakeCookie).canLoadMore)
+    verify("月份读取官网选中项", first.session!!.requestUrl(2).contains("yearmonth=203101"))
+    verify("换月份不硬编码", S.parseQidianPage(monthly("203102"), qdUrl, fakeCookie).session!!.requestUrl(2).contains("yearmonth=203102"))
+    verify("Cookie不参与快照字符串", !first.toString().contains("offline-token"))
+    verify("完整匿名Cookie传递", first.session!!.headers(qdUrl)["Cookie"] == "other=one; _csrfToken=offline-token")
+    fun api(page: Int = 2, last: Int = 0, records: String = """[{"bid":"2","bName":"乙"}]""") =
+        """{"code":0,"data":{"gender":"male","pageNum":$page,"isLast":$last,"total":1000,"records":$records}}"""
+    val second = S.parseQidianResponse(api(), first)
+    verify("第二页推进并继承上下文", second.pageNum == 2 && second.canLoadMore && second.session === first.session && second.books.single().bookId == "2")
+    verify("末页结束", !S.parseQidianResponse(api(last = 1), first).canLoadMore)
+    verify("空页结束", !S.parseQidianResponse(api(records = "[]"), first).canLoadMore)
+    rejects("API非成功码不算空榜") { S.parseQidianResponse("""{"code":1,"data":{}}""", first) }
+    rejects("API WAF不算空榜") { S.parseQidianResponse("<title>WAF拦截</title>", first) }
+    rejects("页码不符拒绝") { S.parseQidianResponse(api(page = 1), first) }
+    rejects("重复页拒绝") { S.parseQidianResponse(api(records = """[{"bid":"1","bName":"甲"}]"""), first) }
+    rejects("缺结束标记拒绝") { S.parseQidianResponse(api().replace("\"isLast\":0,", ""), first) }
+    rejects("缺记录数组拒绝") { S.parseQidianResponse(api().replace("\"records\"", "\"changed\""), first) }
+    verify("失败不消耗原页码", first.pageNum == 1 && first.canLoadMore)
+    if ("--live-pagination" in args) {
+        // 两次请求，父代理统一运行；只打印条数与交集，不打印会话或请求 URL。
+        val liveFirst = S.qidian(rank("yuepiao"))
+        verify("Http月票首批建立会话", liveFirst.books.size == 20 && liveFirst.canLoadMore)
+        val liveSecond = S.qidianNext(liveFirst)
+        verify("Http第二页20条且无交集", liveSecond.pageNum == 2 && liveSecond.books.size == 20 &&
+            liveSecond.books.none { b -> liveFirst.books.any { it.bookId == b.bookId } })
     }
     println("榜单筛选测试通过 $count 项")
 }
