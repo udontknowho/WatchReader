@@ -117,15 +117,15 @@ internal fun MainActivity.shelfRows(): List<ShelfRow> {
     ensureShelfMigration()
     return shelfStore().books().map { book ->
         val info = book.info
-        val job = runCatching { Downloader.restoreLight(jobsStore(), info.bookId) }.getOrNull()
+        val job = matchingBookJob(info)
             ?: BookJob(info.bookId, info.name, info.author, info.chapters)
         ShelfRow(job, book.sourceName.ifBlank {
             if (LocalImport.isLocal(info.bookId)) "本地" else "在线"
         }, job.updatedAt.takeIf { it > 0 } ?: book.addedAt, shelfNewCount(info.bookId), book)
     }.sortedWith { a, b ->
         val c = shelfCompare(
-            ShelfSortKey(a.job.name, a.job.author, a.updatedAt, readTime(a.job.bookId)),
-            ShelfSortKey(b.job.name, b.job.author, b.updatedAt, readTime(b.job.bookId)), ShelfUi.sort)
+            ShelfSortKey(a.job.name, a.job.author, a.updatedAt, readTime(BookInfo(a.job.bookId, a.job.name, a.job.author, a.job.chapters))),
+            ShelfSortKey(b.job.name, b.job.author, b.updatedAt, readTime(BookInfo(b.job.bookId, b.job.name, b.job.author, b.job.chapters))), ShelfUi.sort)
         if (ShelfUi.sortDesc) -c else c
     }
 }
@@ -164,7 +164,7 @@ internal fun MainActivity.downloadRows(): List<ShelfRow> {
             name = light.name,
             author = light.author,
             updatedAt = stamp,
-            lastRead = readTime(id),
+            lastRead = readTime(BookInfo(light.bookId, light.name, light.author, light.chapters)),
         )
     }
     fun keyOf(id: String) = sortKeys[id] ?: ShelfSortKey("", "", 0L, 0L)
@@ -219,7 +219,7 @@ internal fun MainActivity.showShelf(keepScroll: Boolean = false) {
     // 副标题单独占一行（FS_SM）。189 dp 上「N 本 · 在读 M」约 90 dp，一行放得下。
     // 「更新目录」跑着时这一行改成进度：网络活没有别的着落处。
     root.addView(shelfSubtitle(ShelfUi.updating ?: shelfSubtitle(
-        books.size, books.count { readProgress(it.bookId) > 0 })))
+        books.size, books.count { readProgress(BookInfo(it.bookId, it.name, it.author, it.chapters)) > 0 })))
 
     val body = Widgets.scrollBody(this, crownStep, crownGlide)
     val col = Widgets.contentColumn(body)
@@ -241,9 +241,9 @@ internal fun MainActivity.showShelf(keepScroll: Boolean = false) {
             val displayName = job.name.ifBlank { "未命名 · ${job.total} 章" }
             val done = job.count(ChapterStatus.DONE)
             // legado 列表项 `desc = durChapterTitle`：读到哪一章。
-            val readIdx = readProgress(job.bookId)
+            val readIdx = readProgress(BookInfo(job.bookId, job.name, job.author, job.chapters))
             val readTitle = job.chapters.getOrNull(readIdx)?.title?.takeIf { it.isNotBlank() }
-            val tail = if (readTime(job.bookId) > 0L && readTitle != null) "在读 · $readTitle"
+            val tail = if (readTime(BookInfo(job.bookId, job.name, job.author, job.chapters)) > 0L && readTitle != null) "在读 · $readTitle"
                        else if (done > 0) "本地可读 · $done 章" else "已收藏 · 尚未开始"
             val sub = if (job.author.isBlank()) tail else "${job.author} · $tail"
             // legado 列表项 `extra = latestChapterTitle`：最新一章叫什么。
@@ -253,7 +253,7 @@ internal fun MainActivity.showShelf(keepScroll: Boolean = false) {
             }
             val item = Widgets.listItem(this, displayName, sub, twoLine = true,
                 trailing = "more", onTrailingClick = { showShelfBookMenu(row) }) {
-                openShelfBook(job.bookId, displayName, job.author)
+                openShelfBook(row)
             }
             if (latest != null) {
                 // listItem 只画两行。第三行（最新章节）直接挂在它返回的竖排容器上，
@@ -353,12 +353,12 @@ private fun MainActivity.shelfCard(row: ShelfRow): LinearLayout {
     card.contentDescription = buildString {
         append(displayName)
         append("，").append(job.author.ifBlank { "未知作者" })
-        val unread = shelfUnreadCount(job.total, readProgress(job.bookId))
+        val unread = shelfUnreadCount(job.total, readProgress(BookInfo(job.bookId, job.name, job.author, job.chapters)))
         if (unread > 0) append("，未读 $unread 章")
         if (row.sourceTag.isNotBlank()) append("，").append(row.sourceTag)
     }
     card.setOnClickListener {
-        openShelfBook(job.bookId, displayName, job.author)
+        openShelfBook(row)
     }
     // 长按开这本的作业菜单（重命名 / 导出 TXT / 删除）。
     // 以前长按是进多选，多选撤掉后删除只能走这里 —— 网格卡没有 trailing 位。
@@ -489,11 +489,13 @@ internal fun MainActivity.ensureShelfMigration() {
 private fun MainActivity.showShelfBookMenu(row: ShelfRow) {
     val info = row.favorite?.info ?: BookInfo(row.job.bookId, row.job.name, row.job.author, row.job.chapters)
     Widgets.longMenuDialog(this, info.name, listOf(
-        "书籍详情" to { rememberReturn(); showDetail(info, sourceForBook(info.bookId)) },
+        "书籍详情" to { rememberReturn(); showDetail(info, sourceForBook(info)) },
         "移出书架" to {
             Widgets.md3Dialog(this, "移出书架", body = "仅移除收藏，保留下载与阅读进度。", confirm = "移出",
                 onConfirm = {
-                    runCatching { shelfStore().remove(info.bookId) }
+                    runCatching {
+                        row.favorite?.let { shelfStore().remove(it.shelfId) } ?: shelfStore().remove(info)
+                    }
                         .onSuccess { showShelf(keepScroll = true) }
                         .onFailure { toast("收藏保存失败：${it.message}") }
                 }).show()
@@ -558,10 +560,17 @@ internal fun MainActivity.setShelfNewCount(bookId: String, n: Int) {
 }
 
 /** 点卡片直接进正文。顺手清掉新章圆点 —— legado 翻开书也清 `lastCheckCount`。 */
-private fun MainActivity.openShelfBook(bookId: String, name: String, author: String) {
-    if (shelfNewCount(bookId) > 0) setShelfNewCount(bookId, 0)
-    readShelfBook(bookId, name, author)
+private fun MainActivity.openShelfBook(row: ShelfRow) {
+    val info = row.favorite?.info ?: BookInfo(row.job.bookId, row.job.name, row.job.author, row.job.chapters)
+    if (shelfNewCount(info.bookId) > 0) setShelfNewCount(info.bookId, 0)
+    readShelfBook(info)
 }
+
+/** 缓存以地址存储，使用前必须核对逻辑身份，不能把同地址的另一本书借过来。 */
+internal fun MainActivity.matchingBookJob(info: BookInfo): BookJob? =
+    runCatching { Downloader.restoreLight(jobsStore(), info.bookId) }.getOrNull()?.takeIf {
+        sameBook(info.name, info.author, it.name, it.author)
+    }
 
 /**
  * 点书架进正文，照 legado：`onOpenBookshelfBook` 直接 `MainRouteReadBook`，
@@ -574,18 +583,22 @@ private fun MainActivity.openShelfBook(bookId: String, name: String, author: Str
  * 从目录进来的退回目录，不再一律跳目录。
  */
 internal fun MainActivity.readShelfBook(bookId: String, name: String, author: String) {
-    val job = runCatching { Downloader.restoreLight(jobsStore(), bookId) }.getOrNull()
-    val favorite = shelfStore().find(bookId)
-    val info = if (job != null && job.chapters.isNotEmpty())
-        BookInfo(bookId, job.name.ifBlank { name }, job.author.ifBlank { author }, job.chapters)
-        else favorite?.info ?: BookInfo(bookId, name, author, emptyList())
-    val src = sourceForBook(bookId)
+    readShelfBook(BookInfo(bookId, name, author, emptyList()))
+}
+
+internal fun MainActivity.readShelfBook(request: BookInfo) {
+    val favorite = shelfStore().find(request)
+    val saved = favorite?.info ?: request
+    val job = matchingBookJob(saved)
+    val info = if (job != null && job.chapters.isNotEmpty()) saved.copy(chapters = job.chapters) else saved
+    val bookId = info.bookId
+    val src = sourceForBook(info)
     if (info.chapters.isEmpty()) {
         rememberReturn()
         showDetail(info, src)
         return
     }
-    val at = readProgress(bookId).coerceIn(0, info.chapters.lastIndex)
+    val at = readProgress(info).coerceIn(0, info.chapters.lastIndex)
     com.watchdl.ui.reader.ReaderUi.fromShelf = true
     tocSrc = src
     rememberReturn()
@@ -730,18 +743,19 @@ internal fun MainActivity.refreshShelfTocs() {
         var failed = 0
         var added = 0
         rows.forEachIndexed { i, row ->
-            val src = sourceForBook(row.job.bookId)
+            val info = row.favorite?.info ?: BookInfo(row.job.bookId, row.job.name, row.job.author, row.job.chapters)
+            val src = sourceForBook(info)
             val got = if (src == null) null else runCatching {
                 src.toc(row.job.bookId, row.job.name, row.job.author)
             }.getOrNull()
             if (got == null || got.chapters.isEmpty()) {
                 failed++
             } else {
-                val favorite = shelfStore().find(row.job.bookId)
+                val favorite = shelfStore().find(info)
                 if (favorite != null) shelfStore().add(got.copy(
                     name = got.name.ifBlank { row.job.name }, author = got.author.ifBlank { row.job.author }), favorite.sourceName)
                 val merged = mergeShelfCatalog(
-                    jobsStore().readJob(row.job.bookId).orEmpty(), got.chapters)
+                    if (matchingBookJob(info) != null) jobsStore().readJob(row.job.bookId).orEmpty() else "", got.chapters)
                 if (merged == null) {
                     // 没有新章：上一轮的计数作废，圆点要跟着灭。
                     if (shelfNewCount(row.job.bookId) > 0) setShelfNewCount(row.job.bookId, 0)
@@ -780,10 +794,24 @@ internal fun MainActivity.refreshShelfTocs() {
  * 番茄源的构造依赖它。
  */
 internal fun MainActivity.sourceForBook(bookId: String): BookSource? {
-    // 本地书没有源。不拦住的话会按「非 http」落到番茄，拿 local:xxx 去发请求。
+    val saved = shelfStore().books().filter { book ->
+        book.info.bookId == bookId || book.candidates.any { it.bookId == bookId }
+    }.singleOrNull() ?: ReadingBookStore(File(filesDir, "reading-books.json")).find(bookId)
+    return resolveBookSource(bookId, saved)
+}
+
+/** 页面已有元数据时优先按逻辑身份找来源，避免同地址不同书相互借源。 */
+internal fun MainActivity.sourceForBook(info: BookInfo): BookSource? {
+    val favorite = shelfStore().find(info)
+    val saved = favorite?.takeIf { it.info.bookId == info.bookId }
+        ?: ReadingBookStore(File(filesDir, "reading-books.json")).find(info)
+        ?: favorite
+    return resolveBookSource(info.bookId, saved)
+}
+
+private fun MainActivity.resolveBookSource(bookId: String, saved: ShelfBook?): BookSource? {
     if (LocalImport.isLocal(bookId)) return null
     val pool = runCatching { multi.allNamed() }.getOrNull().orEmpty()
-    val saved = shelfStore().find(bookId)
     val sourceName = if (saved?.info?.bookId == bookId) saved.sourceName
         else saved?.candidates?.firstOrNull { it.bookId == bookId }?.sourceName.orEmpty()
     pool.firstOrNull { it.name == sourceName && sourceName.isNotBlank() }?.let { return it.source }

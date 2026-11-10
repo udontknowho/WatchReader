@@ -15,6 +15,11 @@ import kotlin.concurrent.thread
 import com.watchdl.MainActivity
 import com.watchdl.core.*
 import com.watchdl.ui.book.showSwap
+import com.watchdl.ui.book.showDetail
+import com.watchdl.ui.book.srcName
+import com.watchdl.ui.shelf.shelfStore
+import com.watchdl.ui.shelf.sourceForBook
+import com.watchdl.ui.shelf.matchingBookJob
 import com.watchdl.ui.search.askText
 import com.watchdl.ui.theme.Icons
 import com.watchdl.ui.theme.Md3
@@ -304,7 +309,7 @@ private val DARK_BG = Color.rgb(20, 18, 24)
  * (书号, 章号, 滚动偏移)，新章底就会出「返回刚才那章」。只放进程内，不落盘。
  */
 private fun MainActivity.markAnchor(info: BookInfo, index: Int) {
-    ReaderUi.anchor = Triple(info.bookId, index, readerBody?.scrollY ?: 0)
+    ReaderUi.anchor = Triple(readingId(info), index, readerBody?.scrollY ?: 0)
 }
 
 /** 工具格能放的按钮 id（legado 的 `ReadBookButtonIds` 里手表认得的那些）。 */
@@ -446,7 +451,7 @@ internal fun MainActivity.showReader(
     // 这里不清干净，正文那一帧会与加载页各占 root 的一半（两个 weight=1）：
     // 上半屏卡着加载提示、下半屏才是正文，每次换章重画一次就是一闪一闪。
     root.removeAllViews()
-    saveProgress(info.bookId, index)
+    saveProgress(info, index)
     // 浅色底时整套前景色都要换：正文、顶栏、底栏按钮、进度。
     // 以前只换了正文，白底上顶栏还是黑块，上下章还是浅紫，几乎看不见。
     val light = Color.red(readerBackground) > 100
@@ -460,7 +465,7 @@ internal fun MainActivity.showReader(
     loadReaderExtras()
     applyBright()
     // 命中偏移只对当时那一章有意义，换章后旧列表全错位，直接清掉。
-    val findKey = "${info.bookId}#$index"
+    val findKey = "${readingId(info)}#$index"
     if (ReaderUi.findOwner != findKey) {
         ReaderUi.findOwner = findKey
         ReaderUi.findQuery = ""
@@ -683,7 +688,7 @@ internal fun MainActivity.showReader(
         ReaderUi.anchor = null
         val resume = if (next == index + 1) spliceAnchor(advance) else null
         if (resume != null) {
-            ReaderUi.restoreKey = "${info.bookId}#$next"
+            ReaderUi.restoreKey = "${readingId(info)}#$next"
             ReaderUi.restoreChars = resume.chars
             ReaderUi.restoreDelta = resume.delta
         }
@@ -1236,7 +1241,7 @@ internal fun MainActivity.showReader(
     // 读到哪了：滚动停下再记，滚动过程中每帧写盘没有意义。
     // onPause / onDestroy 会再存一次，覆盖突然退出、切后台的情况。
     readerBody = body
-    readerBookId = info.bookId
+    readerBookId = readingId(info)
     readerIndex = index
     body.setOnScrollChangeListener { _, _, y, _, _ ->
         readerOffset = y
@@ -1249,7 +1254,7 @@ internal fun MainActivity.showReader(
         scrollSave?.let { body.removeCallbacks(it) }
         val task = Runnable {
             // 偏移只记到「本章读完」为止：存进拼接块，下次进这一章会落在下一章的字里。
-            saveOffset(info.bookId, index, y.coerceIn(0, mainLimit()))
+            saveOffset(info, index, y.coerceIn(0, mainLimit()))
         }
         scrollSave = task
         body.postDelayed(task, 400)
@@ -1265,7 +1270,7 @@ internal fun MainActivity.showReader(
         ReaderUi.restoreChars = -1
         ReaderUi.restoreDelta = 0
     }
-    val restore = readOffset(info.bookId).takeIf { it > 0 }
+    val restore = readOffset(info).takeIf { it > 0 }
     if (atEnd) {
         // 从上屏退上来的：落在上一章末屏，接着往上读。
         // legado 的窗口一次带四页，退一屏跨章时看到的正是上一章的末页，不是章首。
@@ -1298,7 +1303,7 @@ internal fun MainActivity.showReader(
             if (raw.isEmpty() || spliceGen != ReaderUi.spliceGen) return@bg
             // 正文已从视图树摘下（已离开阅读页）也不再接。
             if (body.parent == null || chapterPending) return@bg
-            ReaderUi.opening = ReaderUi.Opening("${info.bookId}#${nextCh.itemId}", full)
+            ReaderUi.opening = ReaderUi.Opening(openingKey(info, nextCh), full)
             col.addView(View(this).apply { setBackgroundColor(hairline) },
                 Md3.lpDp(this, null, 1))
             val nxTitle = Md3.text(this, nextCh.title, readerSize + ReaderUi.titleAdd,
@@ -1390,10 +1395,10 @@ internal fun MainActivity.showReader(
 
     // ① 阅读锚点：从目录 / 进度滑条 / 章内查找跳到了别的章，底出一条「返回刚才那章」。
     val anchor = ReaderUi.anchor
-    if (anchor != null && anchor.first == info.bookId && anchor.second != index) {
+    if (anchor != null && anchor.first == readingId(info) && anchor.second != index) {
         pill("back", "返回刚才那章") {
             // 先钉住位置再跳：这一章的滚动位置会被新页覆盖，不先记下就回不到原屏。
-            ReaderUi.restoreKey = "${info.bookId}#${anchor.second}"
+            ReaderUi.restoreKey = "${readingId(info)}#${anchor.second}"
             ReaderUi.restoreAt = anchor.third
             preview(info, anchor.second)
         }
@@ -1569,6 +1574,18 @@ private fun MainActivity.showReaderMenu(
     // legado 顶栏的刷新：重跑一次取正文，复用 preview 的本地缓存 + 在线兜底。
     row("刷新本章", "refresh") { preview(info, index) }
     row("离线缓存", "download") { startDownload(info) }
+    row(if (shelfStore().contains(info)) "移出书架" else "放入书架", "bookmark") {
+        runCatching {
+            if (shelfStore().contains(info)) {
+                shelfStore().remove(info)
+                toast("已移出书架，历史与缓存保留")
+            } else {
+                shelfStore().add(info, srcName(src ?: sourceForBook(info)))
+                toast("已加入书架，不会自动下载")
+            }
+        }.onFailure { toast("收藏保存失败：${it.message}") }
+    }
+    row("书籍详情", "file") { rememberReturn(); showDetail(info, src ?: sourceForBook(info)) }
     row("目录", "menu") { markAnchor(info, index); showToc(info, src) }
     row("章内查找", "search") { showFind(info, index, text, src) }
     // 自动翻页：标题带当前开着还是关着。开的时候顺手收菜单，直接回正文看它滚。
@@ -1593,7 +1610,7 @@ private fun MainActivity.showReaderMenu(
     // 工具格里到底放哪几格，就是 legado 的 bottomBarButtons 配置。
     row("工具格按钮", "grid") { showToolsDialog(info, index, text, src) }
     row("全部书签", "file") { showMarks(info) }
-    row("阅读记录", "history") { showProgress(info) }
+    row("阅读记录", "history") { rememberReturn(); showRecords() }
     row("导出 TXT", "upload") { exportTxt(info) }
 
     val sv = ScrollView(this).apply {
@@ -1730,6 +1747,10 @@ private fun MainActivity.showFindResults(
 /** 覆盖动画时长：比滚动略快（一屏滚到底约 260 ms），覆盖感才利落。 */
 private const val COVER_MS = 220L
 
+/** 预取正文同时绑定逻辑身份，避免不同来源的相同地址复用另一书的正文。 */
+private fun openingKey(info: BookInfo, ch: ChapterRef): String =
+    "${info.bookId}\u0000${info.name}\u0000${info.author}\u0000${ch.itemId}"
+
 /** 拼接块的长度：约两屏多一点，足够滚到底再跳章时不重读。 */
 private const val SPLICE_CHARS = 800
 
@@ -1753,11 +1774,11 @@ private fun MainActivity.loadOpening(
     ch: ChapterRef,
     src: BookSource?,
 ): String = try {
-    val line = jobsStore().readChapter(info.bookId, ch.itemId)
+    val line = if (matchingBookJob(info) != null) jobsStore().readChapter(info.bookId, ch.itemId) else null
     val localHtml = line?.let { TinyJson.path(it, "content") }
     // 本地书缺章不联网：返回空串，拼接块自然跳过。
     val html = localHtml ?: if (LocalImport.isLocal(info.bookId)) ""
-                          else (src ?: source).content(ch.itemId, info.bookId)
+                          else (src ?: sourceForBook(info) ?: error("原书源不可用，且本章没有缓存，请换源")).content(ch.itemId, info.bookId)
     val raw = bodyText(html, LocalImport.isLocal(info.bookId))
     val full = ReplaceRuleStore.apply(raw, isTitle = false, bookId = info.bookId)
     // 工作线程只返回数据。缓存由通过世代校验的主线程回调发布。
@@ -1851,12 +1872,19 @@ private fun MainActivity.prevChapter(info: BookInfo, index: Int, atEnd: Boolean 
     } else preview(info, prev, atEnd)
 }
 /** 从记录的位置续读：章号 + 章内节号。[atEnd] 为真时直接落在章末。 */
-internal fun MainActivity.preview(info: BookInfo, index: Int, atEnd: Boolean = false) {
+internal fun MainActivity.preview(
+    info: BookInfo,
+    index: Int,
+    atEnd: Boolean = false,
+    // 默认来源只从同书页面或目标元数据解析；显式 null 保持无源，不借全局状态。
+    src: BookSource? = when (val screen = curScreen) {
+        is Screen.Toc -> screen.src.takeIf { screen.info == info }
+        is Screen.Reader -> screen.src.takeIf { screen.info == info }
+        is Screen.Detail -> screen.src.takeIf { screen.info == info }
+        else -> null
+    } ?: sourceForBook(info),
+) {
     val ch = info.chapters[index]
-    // 先读本地正文，只有缺章时才在线程中初始化源并联网。
-    val src = (curScreen as? Screen.Toc)?.src
-        ?: (curScreen as? Screen.Reader)?.src
-        ?: tocSrc
     // 正文要重取，屏上的菜单连着的旧视图树跟着作废。
     com.watchdl.ui.reader.ReaderMenu.reset()
     // 换章不清屏（legado 是旧页一直画着、新页就绪后当帧换窗口，
@@ -1865,7 +1893,7 @@ internal fun MainActivity.preview(info: BookInfo, index: Int, atEnd: Boolean = f
     // 先铺一页「正在取正文…」再整屏重建，就是每换一章闪两下的根源。
     if (curScreen !is Screen.Reader) {
         root.removeAllViews()
-        root.addView(Widgets.topBar(this, ch.title, onBack = { showToc(info) }))
+        root.addView(Widgets.topBar(this, ch.title, onBack = { showToc(info, src) }))
         val body = Widgets.scrollBody(this, crownStep, crownGlide)
         (Widgets.contentColumn(body)).addView(Widgets.emptyState(this, "refresh", "正在取正文…"))
         root.addView(body)
@@ -1879,7 +1907,7 @@ internal fun MainActivity.preview(info: BookInfo, index: Int, atEnd: Boolean = f
     // 拼接块预取时已经把这一章的**整文**取下来了：直接上屏，不起线程、不读盘。
     // 顺读时每章都命中，换页的等待就只剩排版。
     val opening = ReaderUi.opening
-    if (opening?.key == "${info.bookId}#${ch.itemId}" && opening.text.isNotEmpty()) {
+    if (opening?.key == openingKey(info, ch) && opening.text.isNotEmpty()) {
         ReaderUi.opening = null
         showReader(info, index, opening.text, src, atEnd)
         return
@@ -1887,7 +1915,7 @@ internal fun MainActivity.preview(info: BookInfo, index: Int, atEnd: Boolean = f
 
     thread {
         try {
-            val line = jobsStore().readChapter(info.bookId, ch.itemId)
+            val line = if (matchingBookJob(info) != null) jobsStore().readChapter(info.bookId, ch.itemId) else null
             val localHtml = line?.let { TinyJson.path(it, "content") }
             // 本地书没有网络源兜底：缺章就是缺章，说明白比拿 local:xxx 去发请求好。
             if (localHtml == null && LocalImport.isLocal(info.bookId)) {
@@ -1904,7 +1932,9 @@ internal fun MainActivity.preview(info: BookInfo, index: Int, atEnd: Boolean = f
                 }
                 return@thread
             }
-            val actualSrc = if (localHtml == null) (src ?: source) else src
+            val actualSrc = if (localHtml == null) {
+                src ?: error("原书源不可用，且本章没有缓存，请换源")
+            } else src
             val html = localHtml ?: actualSrc!!.content(ch.itemId, info.bookId)
             val raw = bodyText(html, LocalImport.isLocal(info.bookId))
             // 只过滤正文，章标题**不过滤**：目录里的标题一旦被规则吃掉，用户就找不到章，

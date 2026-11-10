@@ -66,6 +66,19 @@ private fun MainActivity.downloadActions(job: BookJob) {
     val running = DownloadService.runningBookId == job.bookId
     val queue = DownloadService.queueOf(filesDir)
     val items = mutableListOf<Pair<CharSequence, () -> Unit>>()
+    items += (if (shelfStore().contains(info)) "移出书架" else "放入书架") to {
+        runCatching {
+            if (shelfStore().contains(info)) {
+                shelfStore().remove(info)
+                toast("已移出书架，历史与缓存保留")
+            } else {
+                val src = sourceForBook(info)
+                shelfStore().add(info, com.watchdl.ui.book.srcName(src))
+                toast("已加入书架，不会自动下载")
+            }
+        }.onSuccess { showDownloads(true) }
+            .onFailure { toast("收藏保存失败：${it.message}") }
+    }
     if (running) {
         items += "暂停下载" to { DownloadService.cancel(this); toast("已请求暂停，稍后可续传"); showDownloads(true) }
         items += "查看进度" to { rememberReturn(); showProgress(info) }

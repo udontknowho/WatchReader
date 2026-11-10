@@ -12,6 +12,16 @@ fun main() {
         ReadingHistory.record(dir, "book\t中文", 3, 3000)
         check(ReadingHistory.list(dir).map { it.index } == listOf(2, 3))
         check(ReadingHistory.list(dir).first().bookId == "book\t中文")
+        check(ReadingHistory.list(dir).all { it.readingId == null }) // 旧四列仍可读。
+        val one = BookInfo("shared", "甲书", "作者", emptyList())
+        val two = one.copy(name = "乙书")
+        ReadingHistory.record(dir, one, 0, 2100)
+        ReadingHistory.record(dir, two, 0, 2200)
+        ReadingHistory.record(dir, two, 0, 2300)
+        val identities = ReadingHistory.list(dir).filter { it.bookId == "shared" }
+        check(identities.size == 2) // 同章同地址不同书不合并；同身份重复保存合并。
+        check(identities.map { it.readingId } == listOf(readingId(one), readingId(two)))
+        ReadingHistory.removeBooks(dir, setOf("shared"))
         ReadingHistory.remove(dir, setOf(1000L))
         check(ReadingHistory.list(dir).single().index == 3)
         repeat(510) { ReadingHistory.record(dir, "book", it, 4000L + it) }

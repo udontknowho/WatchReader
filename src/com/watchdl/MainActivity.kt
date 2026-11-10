@@ -167,6 +167,17 @@ class MainActivity : Activity() {
 
     /** 切屏统一入口。换屏就意味着上一屏的后台任务全部作废。 */
     internal fun setScreen(next: Screen) {
+        if (screen is Screen.Reader && next != screen) {
+            // 先保存旧视图，再解绑，防止删除记录后生命周期重新保存。
+            saveReaderPosNow()
+            readerBody?.let { body -> scrollSave?.let { body.removeCallbacks(it) } }
+            readerBody = null
+            scrollSave = null
+            readerBookId = ""
+            readerIndex = -1
+        }
+        if (next is Screen.Reader) saveReadingBook(next.info, next.src)
+        if (next == Screen.Records && screen != Screen.Records && !replayingReturn) rememberReturn()
         if (next === screen || next == screen) return
         // 同一屏换内容（搜索结果边跑边上屏、目录重载）时**不能撤任务**：
         // 撤了就把正在跑的那轮搜索自己干掉。屏身份由 screenId 定义，
@@ -270,7 +281,7 @@ class MainActivity : Activity() {
      * 从阅读页/下载页返回目录时不会再传 src，而原来的兜底是
      * `(screen as? Screen.Toc)?.src` —— 那时 screen 已经不是 Toc，
      * 于是源变 null，默默退回默认的番茄源，等于换个源进去、返回一次就串源。
-     * 现在用一个固定字段记住，只有不传 src 时才用它。
+     * 保留此字段供旧下载入口读取；页面恢复应从同书屏幕或目标元数据解析。
      */
     internal var tocSrc: BookSource? = null
 
@@ -466,8 +477,19 @@ class MainActivity : Activity() {
      * 上次读到第几章（下标）。跟着最后一次阅读走，回看会退回去。
      * 0 表示没记录过（和「读到第一章」等价，不影响使用）。
      */
+    internal fun readProgress(info: BookInfo): Int = readProgress(readingId(info))
+    internal fun readTime(info: BookInfo): Long = readTime(readingId(info))
+    internal fun readOffset(info: BookInfo): Int = readOffset(readingId(info))
+    internal fun saveProgress(info: BookInfo, index: Int) {
+        saveReadingBook(info, null)
+        saveProgress(readingId(info), index)
+    }
+    internal fun saveOffset(info: BookInfo, index: Int, offset: Int, sync: Boolean = false) =
+        saveOffset(readingId(info), index, offset, sync)
+
     internal fun readProgress(bookId: String): Int {
-        val tag = bookId.take(64)
+        if (resolveReadingBook(bookId) == null) return 0
+        val tag = readerProgressTag(bookId)
         val prefs = getSharedPreferences("reader", MODE_PRIVATE)
         // S20：换算逻辑抽到 core 的 resolveStoredIndex，测试调的是真实现。
         val (fixed, writeBack) = resolveStoredIndex(
@@ -482,16 +504,17 @@ class MainActivity : Activity() {
 
     /** 原始存档章号。-1 = 没记录过，用来区分「没读过」和「读到第 0 章」。 */
     private fun readIndex(bookId: String): Int =
-        getSharedPreferences("reader", MODE_PRIVATE).getInt("pos_" + bookId.take(64), -1)
+        getSharedPreferences("reader", MODE_PRIVATE).getInt("pos_" + readerProgressTag(bookId), -1)
 
     /** 最近一次把这本书翻开的时刻。0 = 没记录过。 */
     internal fun readTime(bookId: String): Long =
-        getSharedPreferences("reader", MODE_PRIVATE).getLong("last_" + bookId.take(64), 0L)
+        getSharedPreferences("reader", MODE_PRIVATE).getLong("last_" + readerProgressTag(bookId), 0L)
 
     internal fun saveProgress(bookId: String, index: Int) {
         if (bookId.isBlank() || index < 0) return
+        val info = resolveReadingBook(bookId) ?: return
         val prefs = getSharedPreferences("reader", MODE_PRIVATE)
-        val tag = bookId.take(64)
+        val tag = readerProgressTag(readingId(info))
         val prevIndex = prefs.getInt("oidx_$tag", -1)
         val e = prefs.edit().putInt("oidx_$tag", index)
             .putLong("last_$tag", System.currentTimeMillis())
@@ -502,8 +525,58 @@ class MainActivity : Activity() {
         if (prevIndex != index) e.putInt("off_$tag", 0)
         // commit 而非 apply：进程被杀时 apply 的异步写入可能还没落盘。
         e.commit()
-        runCatching { ReadingHistory.record(filesDir, bookId, index) }
+        runCatching { ReadingHistory.record(filesDir, info, index) }
             .onFailure { DevLog.log("History", "阅读记录保存失败：${it.message}") }
+    }
+
+    /** 新键只迁移一次；存在同前缀书籍时保留旧档且不猜归属。 */
+    private fun readerProgressTag(bookId: String): String {
+        val info = resolveReadingBook(bookId) ?: return progressKey("unresolved:$bookId")
+        val tag = progressKey(info)
+        val prefs = getSharedPreferences("reader", MODE_PRIVATE)
+        if (prefs.getBoolean("migrated_$tag", false)) return tag
+        val editor = prefs.edit().putBoolean("migrated_$tag", true)
+        val known = knownReadingBooks()
+        if (canMigrateReadingProgress(info, known)) {
+            // v2 完整地址优先；更早的截断键还必须排除前缀碰撞。
+            val oldTags = listOf(progressKey(info.bookId)) +
+                if (canMigrateLegacyProgress(info.bookId, knownReadingBookIds())) listOf(info.bookId.take(64)) else emptyList()
+            for (prefix in listOf("pos_", "oidx_", "off_", "last_")) {
+                val old = oldTags.firstOrNull { prefs.contains(prefix + it) } ?: continue
+                if (!prefs.contains(prefix + tag)) {
+                    if (prefix == "last_") editor.putLong(prefix + tag, prefs.getLong(prefix + old, 0L))
+                    else editor.putInt(prefix + tag, prefs.getInt(prefix + old, if (prefix == "off_") 0 else -1))
+                }
+            }
+            // 成功归属后消费旧键，防止后来出现的同地址另一书再次继承。
+            for (old in oldTags) for (prefix in listOf("pos_", "oidx_", "off_", "last_"))
+                editor.remove(prefix + old)
+        }
+        editor.commit()
+        return tag
+    }
+
+    internal fun knownReadingBookIds(): Set<String> = jobsStore().listBooks().toSet() +
+        shelfStore().books().map { it.info.bookId } + readingBookStore().books().map { it.info.bookId } +
+        ReadingHistory.list(filesDir).map { it.bookId }
+
+    /** 阅读身份来源不依赖进度读取，避免迁移递归。 */
+    internal fun knownReadingBooks(): List<BookInfo> {
+        val current = when (val s = screen) {
+            is Screen.Reader -> s.info
+            is Screen.Toc -> s.info
+            is Screen.Progress -> s.info
+            is Screen.Detail -> s.info
+            is Screen.ReaderSettings -> s.info
+            is Screen.Marks -> s.info
+            else -> null
+        }
+        return readingBookStore().books().map { it.info } + shelfStore().books().map { it.info } +
+            jobsStore().listBooks().mapNotNull { id ->
+                runCatching { Downloader.restoreLight(jobsStore(), id) }.getOrNull()?.let {
+                    BookInfo(it.bookId, it.name, it.author, it.chapters)
+                }
+            } + listOfNotNull(current)
     }
 
     /** 历史包袱：分节版本用过 `章号 * 1000 + 节号`，只用来识别并还原旧值。 */
@@ -511,16 +584,17 @@ class MainActivity : Activity() {
 
     /** 上次读到本章的第几个像素。换章时清零。 */
     internal fun readOffset(bookId: String): Int =
-        getSharedPreferences("reader", MODE_PRIVATE).getInt("off_" + bookId.take(64), 0)
+        getSharedPreferences("reader", MODE_PRIVATE).getInt("off_" + readerProgressTag(bookId), 0)
 
     internal fun saveOffset(bookId: String, index: Int, offset: Int, sync: Boolean = false) {
-        if (bookId.isBlank() || index < 0) return
+        if (bookId.isBlank() || index < 0 || resolveReadingBook(bookId) == null) return
         val prefs = getSharedPreferences("reader", MODE_PRIVATE)
-        val kIndex = "oidx_" + bookId.take(64)
+        val tag = readerProgressTag(bookId)
+        val kIndex = "oidx_$tag"
         // 偏移只对当时那一章有意义。章号对不上就丢弃，免得上一次读到第 3000 像素，
         // 换个更短的章一进去就顶到底。
         if (prefs.getInt(kIndex, -1) != index) return
-        val e = prefs.edit().putInt("off_" + bookId.take(64), offset.coerceAtLeast(0))
+        val e = prefs.edit().putInt("off_$tag", offset.coerceAtLeast(0))
         if (sync) e.commit() else e.apply()
     }
 
@@ -844,20 +918,24 @@ class MainActivity : Activity() {
 
 
     /** ③ 目录 + 下载。 */
-    internal fun showToc(info: BookInfo, src: BookSource? = null) {
+    internal fun showToc(info: BookInfo, src: BookSource? =
+        (screen as? Screen.Toc)?.takeIf { it.info == info }?.src
+            ?: (screen as? Screen.Reader)?.takeIf { it.info == info }?.src
+            ?: sourceForBook(info)) {
         // 到这一步说明是「目录 → 阅读」这条路，返回落点回到目录。
         com.watchdl.ui.reader.ReaderUi.fromShelf = false
         // 源跟着屏幕走：预览/下载要从同一个源取正文，否则多源下会串源。
-        val useSrc = src ?: tocSrc
+        val useSrc = src
         tocSrc = useSrc
+        saveReadingBook(info, useSrc)
         // M8：从别的屏进来时把窗口挪回上次读到的那章附近。
         // 翻页时调用方会自己设好 tocWinStart 再进来，这里只在换书或从别处进来时重置。
-        val entering = (screen as? Screen.Toc)?.info?.bookId != info.bookId
+        val entering = (screen as? Screen.Toc)?.info != info
         if (entering && !replayingReturn) {
             // 倒序时同一个章号在显示顺序里的位置是镜像的，不能直接拿章号当滑动位置。
-            tocWinStart = (tocPos(info, readProgress(info.bookId)) - TOC_WINDOW / 2).coerceAtLeast(0)
+            tocWinStart = (tocPos(info, readProgress(info)) - TOC_WINDOW / 2).coerceAtLeast(0)
         }
-        if (shelfStore().contains(info.bookId)) runCatching { shelfStore().add(info) }
+        if (shelfStore().contains(info)) runCatching { shelfStore().add(info) }
             .onFailure { DevLog.log("Shelf", "更新收藏目录失败：${it.message}") }
         setScreen(Screen.Toc(info, useSrc))
         // 换源成功后回到原来那一章：loadToc → showToc 两步都拿不到章号，只能靠标题找回。
@@ -868,9 +946,9 @@ class MainActivity : Activity() {
             if (at >= 0 && !info.chapters[at].locked) {
                 // 钉住换源前那一屏：showReader 里 pinned 分支会按 restoreKey/restoreAt 落位。
                 // 只写章号的话回来是章首，读到一半的人得自己再滑回去。
-                ReaderUi.restoreKey = "${info.bookId}#$at"
+                ReaderUi.restoreKey = "${readingId(info)}#$at"
                 ReaderUi.restoreAt = ReaderUi.swapReturnAt
-                preview(info, at); return
+                preview(info, at, src = useSrc); return
             }
             toast("没找到原章节，从目录挑一章")
         }
@@ -882,10 +960,14 @@ class MainActivity : Activity() {
             ),
             // legado 目录顶栏副标题就是「当前章 / 总章数」，一眼知道读到哪。
             subtitle = if (info.chapters.isEmpty()) "还没有章节"
-                       else "${readProgress(info.bookId) + 1} / ${info.chapters.size}"))
+                       else "${readProgress(info) + 1} / ${info.chapters.size}"))
 
         val body = Widgets.scrollBody(this, crownStep, crownGlide)
         val col = Widgets.contentColumn(body)
+        col.addView(Widgets.button(this,
+            if (shelfStore().contains(info)) "移出书架" else "放入书架", "tonal") {
+            toggleTocShelf(info, useSrc)
+        })
 
         // 空目录：legado 用 EmptyMessage 收在这一屏，但手表上别处进不来 ——
         // 只画一句「目录是空的」等于把人锁死，所以下面接一枚「更新目录」。
@@ -901,7 +983,7 @@ class MainActivity : Activity() {
         // restore 会把整本 chapters.jsonl 读进来逐行解析、还要剥 HTML 数字数 —— 本地那本
         // 6191 章的书是 50MB，主线程上就是几秒的冻结。legado 的目录屏同样只查元数据
         // （本地书直接标 DownloadState.LOCAL），从不在这里读正文。
-        val job = Downloader.restoreLight(jobsStore(), info.bookId)
+        val job = matchingBookJob(info)
         val done = job?.count(ChapterStatus.DONE) ?: 0
         val failed = job?.count(ChapterStatus.FAILED) ?: 0
 
@@ -940,10 +1022,10 @@ class MainActivity : Activity() {
         card.addView(Md3.text(this, "已下载 $done 章 · 失败 $failed 章", Md3.FS_SM, Md3.onSurfaceVariant))
         // 上次读到哪一章。不记的话，读完关掉 App 再进来只能从第一章重新找 ——
         // 五百章的书这是最痛的一件事。
-        val lastRead = readProgress(info.bookId)
+        val lastRead = readProgress(info)
         if (lastRead > 0 && lastRead < info.chapters.size && !info.chapters[lastRead].locked) {
             val jump = Widgets.button(this, "继续读：第 ${lastRead + 1} 章", "tonal") {
-                preview(info, lastRead)
+                preview(info, lastRead, src = useSrc)
             }
             card.addView(jump, Md3.lpDp(this, null, Md3.BTN).apply {
                 topMargin = Md3.dp(this@MainActivity, Md3.GAP / 2)
@@ -1031,7 +1113,7 @@ class MainActivity : Activity() {
         if (filterHits == null && base > 0) {
             col.addView(Widgets.button(this, "↑ 上面还有 $base 章", "text") {
                 tocWinStart = (base - TOC_WINDOW).coerceAtLeast(0)
-                showToc(info, src)
+                showToc(info, useSrc)
             })
         }
         for (i in shown) {
@@ -1045,7 +1127,7 @@ class MainActivity : Activity() {
             }
             val item = Widgets.chapterItem(this, i + 1, ch.title, mark, color,
                 highlight = i == lastRead) {
-                if (ch.locked) toast("这是付费章，取不到正文") else preview(info, i)
+                if (ch.locked) toast("这是付费章，取不到正文") else preview(info, i, src = useSrc)
             }
             // 长按 = 单章动作菜单（legado 是长按进多选，这里压成一页，理由见 showChapterMenu）。
             item.setOnLongClickListener {
@@ -1063,7 +1145,7 @@ class MainActivity : Activity() {
             if (rest > 0) {
                 col.addView(Widgets.button(this, "↓ 下面还有 $rest 章", "text") {
                     tocWinStart = base + shown.size
-                    showToc(info, src)
+                    showToc(info, useSrc)
                 })
             }
         }
@@ -1086,7 +1168,7 @@ class MainActivity : Activity() {
      * 现在只在换书或首次进入时重建，之后走 [refreshProgressLive] 只改文字。
      */
     internal fun showProgress(info: BookInfo) {
-        val same = (screen as? Screen.Progress)?.info?.bookId == info.bookId &&
+        val same = (screen as? Screen.Progress)?.info == info &&
             progressNum != null
         setScreen(Screen.Progress(info))
         if (same) { refreshProgressLive(); return }
@@ -1305,17 +1387,20 @@ class MainActivity : Activity() {
                 // 不回填的话作业名、通知标题、导出文件名全变成「未命名」。
                 val full = pair.second.copy(name = pair.second.name.ifBlank { hit.name },
                     author = pair.second.author.ifBlank { hit.author })
-                val old = swappingFrom ?: shelfStore().find(BookInfo(hit.bookId, name, author, emptyList()))?.info
+                val oldFavorite = shelfStore().find(swappingFrom ?: BookInfo(hit.bookId, name, author, emptyList()))
+                val old = swappingFrom ?: oldFavorite?.info
                 if (old != null && old.bookId != full.bookId) {
-                    val (index, matched) = swappedChapterIndex(old, full, readProgress(old.bookId))
-                    val offset = if (matched) readOffset(old.bookId) else 0
-                    val saved = runCatching { shelfStore().replaceSource(old.bookId, full, hit.sourceName, valid) }
+                    val (index, matched) = swappedChapterIndex(old, full, readProgress(old))
+                    val offset = if (matched) readOffset(old) else 0
+                    val saved = runCatching {
+                        oldFavorite?.let { shelfStore().replaceSource(it.shelfId, full, hit.sourceName, valid) }
+                    }
                     if (saved.isFailure) {
                         showTocFailed(name, valid, failures + "收藏保存失败：${saved.exceptionOrNull()?.message}", swappingFrom)
                         return@bg
                     }
-                    saveProgress(full.bookId, index)
-                    saveOffset(full.bookId, index, offset, sync = true)
+                    saveProgress(full, index)
+                    saveOffset(full, index, offset, sync = true)
                     if (!matched) {
                         ReaderUi.swapReturnTitle = ""
                         ReaderUi.swapReturnAt = 0
@@ -1368,14 +1453,64 @@ class MainActivity : Activity() {
         root.addView(body)
     }
 
+    internal fun readingBookStore(): ReadingBookStore = ReadingBookStore(File(filesDir, "reading-books.json"))
+
+    /** 所有历史入口共用，只接受目标地址的目录，不能套用换源后的其他地址。 */
+    internal fun resolveReadingBook(bookId: String, identity: String? = null): BookInfo? {
+        // 高频滚动保存直接命中当前页，不逐次扫描全部作业。
+        val current = when (val s = screen) {
+            is Screen.Reader -> s.info
+            is Screen.Toc -> s.info
+            is Screen.ReaderSettings -> s.info
+            else -> null
+        }
+        if (identity == null && current != null && readingId(current) == bookId) return current
+        if (identity == null) readingBookStore().find(bookId)?.info?.let {
+            if (readingId(it) == bookId) return it
+        }
+        val choices = knownReadingBooks()
+        val exact = choices.filter { readingId(it) == bookId }
+        if (identity == null && exact.isNotEmpty())
+            return exact.firstOrNull { it.chapters.isNotEmpty() } ?: exact.first()
+        return resolveReadingIdentity(bookId, identity, choices)
+    }
+
+    private fun readingSourceName(info: BookInfo, src: BookSource?): String {
+        if (LocalImport.isLocal(info.bookId)) return "本地"
+        val named = if (src == null) null else runCatching {
+            multi.allNamed().firstOrNull { it.source === src }?.name
+        }.getOrNull()
+        return named ?: readingBookStore().find(info)?.sourceName?.takeIf { it.isNotBlank() }
+            ?: shelfStore().find(info)?.takeIf { it.info.bookId == info.bookId }?.sourceName.orEmpty()
+    }
+
+    /** 目录仅在展示目录或正文时落盘，滚动仅保存位置。 */
+    private fun saveReadingBook(info: BookInfo, src: BookSource?) {
+        if (info.bookId.isBlank() || info.chapters.isEmpty()) return
+        runCatching { readingBookStore().save(info, readingSourceName(info, src)) }
+            .onFailure { DevLog.log("History", "阅读目录快照保存失败：${it.message}") }
+    }
+
+    private fun toggleTocShelf(info: BookInfo, src: BookSource?) {
+        runCatching {
+            val store = shelfStore()
+            if (store.contains(info)) { store.remove(info); "已移出书架" }
+            else { store.add(info, readingSourceName(info, src), detailCandidates); "已放入书架" }
+        }.onSuccess { toast(it); showToc(info, src) }
+            .onFailure { toast("书架操作失败：${it.message}") }
+    }
+
     /** 从作业反查书籍，恢复目录之后打开。 */
     internal fun openBook(bookId: String, name: String, author: String) {
         // 书架/最近下载进来的，返回时回到首页（对应 rememberReturn=null 的默认行为）。
         rememberReturn()
         // 同上：进目录只需要章节表与状态，restoreLight 只读 job.json。
-        val job = Downloader.restoreLight(jobsStore(), bookId)
+        val target = BookInfo(bookId, name, author, emptyList())
+        val job = matchingBookJob(target)
         if (job != null) {
-            showToc(BookInfo(bookId, job.name.ifBlank { name }, job.author.ifBlank { author }, job.chapters))
+            val info = target.copy(name = job.name.ifBlank { name }, author = job.author.ifBlank { author },
+                chapters = job.chapters)
+            showToc(info, sourceForBook(info))
             return
         }
 
@@ -1387,7 +1522,7 @@ class MainActivity : Activity() {
         root.addView(body)
 
         val owner: Screen = Screen.Toc(BookInfo(bookId, name, author, emptyList()))
-        val resolved = sourceForBook(bookId)
+        val resolved = sourceForBook(target)
         if (resolved == null) { toast("原书源不可用，请从详情换源"); goBackToPrevious(); return }
         bg(owner, { resolved.toc(bookId, name, author) }) { res ->
             res.onSuccess { showToc(it, resolved) }
@@ -1430,15 +1565,16 @@ class MainActivity : Activity() {
      */
     private fun showTocMenu(info: BookInfo, src: BookSource?) {
         val marks = BookmarkStore.forBook(info.bookId).size
-        val lastRead = readProgress(info.bookId)
+        val lastRead = readProgress(info)
         Widgets.longMenuDialog(this, "目录", listOf(
             (if (tocReversed) "取消倒序" else "目录倒序") to {
                 tocReversed = !tocReversed
                 // 换序后把窗口重新对准正在读的章：否则同一个位置换成镜像后是另一章。
-                tocWinStart = (tocPos(info, readProgress(info.bookId)) - TOC_WINDOW / 2)
+                tocWinStart = (tocPos(info, readProgress(info)) - TOC_WINDOW / 2)
                     .coerceAtLeast(0)
                 showToc(info, src)
             },
+            (if (shelfStore().contains(info)) "移出书架" else "放入书架") to { toggleTocShelf(info, src) },
             "更新目录" to { refreshTocHere(info, src) },
             "回到第 ${lastRead + 1} 章" to {
                 tocWinStart = (tocPos(info, lastRead) - TOC_WINDOW / 2).coerceAtLeast(0)
@@ -1493,7 +1629,8 @@ class MainActivity : Activity() {
     private fun refreshTocHere(info: BookInfo, src: BookSource?) {
         // 本地书的目录就是导入时那个文件的章节表，没有远程版本可拉。
         if (LocalImport.isLocal(info.bookId)) { toast("本地书的目录来自文件，不能更新"); return }
-        val useSrc = src ?: tocSrc ?: source
+        val useSrc = src ?: sourceForBook(info)
+        if (useSrc == null) { toast("原书源不可用，可阅读已缓存章节"); return }
         toast("正在更新目录…")
         bg(Screen.Toc(info, src), { useSrc.toc(info.bookId, info.name, info.author) }) { res ->
             res.onSuccess { got ->
@@ -1520,7 +1657,7 @@ class MainActivity : Activity() {
     private fun showJumpDialog(info: BookInfo, src: BookSource?) {
         val total = info.chapters.size
         if (total <= 0) { toast("这本书还没有章节"); return }
-        val start = (readProgress(info.bookId) + 1).coerceIn(1, total)
+        val start = (readProgress(info) + 1).coerceIn(1, total)
 
         // 不再外套一层 12dp padding：md3Dialog 已给 16dp，这里只要一块干净的列。
         val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -1593,7 +1730,7 @@ class MainActivity : Activity() {
             tocWinStart = (tocPos(info, idx) - TOC_WINDOW / 2).coerceAtLeast(0)
             val ch = info.chapters[idx]
             if (ch.locked) { toast("第 ${idx + 1} 章是付费章，取不到正文"); showToc(info, src) }
-            else preview(info, idx)
+            else preview(info, idx, src = src)
         }
         // md3Dialog 的确认键先关窗再回调，跳转不能自己再 dismiss 一次；
         // 键盘上的「完成」不经过按钮，那里手动关。
@@ -2009,15 +2146,18 @@ class MainActivity : Activity() {
             is Screen.Reader -> {
                 outState.putString("screen", "reader")
                 outState.putString("bookId", s.info.bookId)
+                outState.putString("readingId", readingId(s.info))
                 outState.putInt("index", s.index)
             }
             is Screen.Toc -> {
                 outState.putString("screen", "toc")
                 outState.putString("bookId", s.info.bookId)
+                outState.putString("readingId", readingId(s.info))
             }
             is Screen.Progress -> {
                 outState.putString("screen", "progress")
                 outState.putString("bookId", s.info.bookId)
+                outState.putString("readingId", readingId(s.info))
             }
             else -> {}
         }
@@ -2034,16 +2174,14 @@ class MainActivity : Activity() {
         // M8：恢复走轻量读法。这是 onCreate 主线程，完整读法要解析整个
         // chapters.jsonl（真实数据 1.5 MB / 167 章，实测 12 ms；3000 章会到百毫秒级），
         // 正好是这次要消掉的卡顿。章节表本身完整，恢复阅读够用。
-        val job = runCatching { Downloader.restoreLight(jobsStore(), bookId) }.getOrNull()
-            ?: return false
-        if (job.chapters.isEmpty()) return false
-        val info = BookInfo(job.bookId, job.name, job.author, job.chapters)
+        val info = resolveReadingBook(bookId, state.getString("readingId")) ?: return false
+        if (info.chapters.isEmpty()) return false
         when (kind) {
             "reader" -> {
-                val idx = state.getInt("index", readProgress(bookId)).coerceIn(0, info.chapters.lastIndex)
-                preview(info, idx)
+                val idx = state.getInt("index", readProgress(info)).coerceIn(0, info.chapters.lastIndex)
+                preview(info, idx, src = sourceForBook(info))
             }
-            "toc" -> showToc(info)
+            "toc" -> showToc(info, sourceForBook(info))
             "progress" -> {
                 // S19 × S14：只有服务真在跑这本书才回进度屏。
                 // 进程被回收时服务也一起没了，硬跳回去会停在「下载中」永远不动 ——
@@ -2065,7 +2203,7 @@ class MainActivity : Activity() {
         super.onConfigurationChanged(newConfig)
         Md3.load(this)
         when (val s = screen) {
-            is Screen.Toc -> showToc(s.info)
+            is Screen.Toc -> showToc(s.info, s.src)
             is Screen.Reader -> showReader(s.info, s.index, s.text, s.src)
             is Screen.ReaderSettings -> showReaderSettings(s.info, s.index, s.text, s.src)
             // 传 null 会丢掉批次信息，「换一批源」按钮就没了；
@@ -2115,7 +2253,7 @@ class MainActivity : Activity() {
             is Screen.Settings -> if (s.page == DOWNLOAD_PAGE) showShelf() else goBackToPrevious()
             is Screen.Marks -> showToc(s.info)
             Screen.MarksAll -> showSettingsRoot()
-            Screen.Records -> showSettingsRoot()
+            Screen.Records -> goBackToPrevious()
             Screen.Cache -> showSettingsRoot()
             Screen.Files -> showSettingsRoot()
             Screen.Replace -> showSettingsRoot()
@@ -2142,7 +2280,7 @@ class MainActivity : Activity() {
      * 修 3 之前 bookId 直接当目录名，留下了 `https:` 这种不合法名字和一批
      * 空目录。新代码不会再产生，但旧设备上还躺着，清掉免得用户看着目录一团乱。
      *
-     * **只删「空目录」和「名字不合法的目录」**，含 job.json 的一律不动。
+     * 普通作业只删空目录，保留摘要目录和 job.json.tmp 等恢复窗口。
      */
     private fun cleanDirtyJobs() {
         thread {
@@ -2158,12 +2296,9 @@ class MainActivity : Activity() {
                         if (f.deleteRecursively()) transient++
                         return@forEach
                     }
-                    if (File(f, "job.json").isFile) return@forEach
-                    val bad = f.name != com.watchdl.core.JobStore.safeDirName(f.name)
-                    val empty = f.listFiles()?.isEmpty() ?: true
-                    if (bad || empty) {
-                        if (f.deleteRecursively()) removed++
-                    }
+                    // 新目录名是身份摘要，不能把目录名再次当 bookId 做 safeDirName。
+                    // 列举失败不算空；delete 只删空目录，避免检查后新增文件被递归删除。
+                    if (f.listFiles()?.isEmpty() == true && f.delete()) removed++
                 }
                 if (removed > 0) DevLog.log("WatchDL", "清掉 $removed 个脏作业目录")
                 // 导入写到一半被杀就留一个暂存目录，不报一声用户根本不知道多了一份占用。

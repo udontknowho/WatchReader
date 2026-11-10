@@ -124,7 +124,7 @@ internal fun MainActivity.showMarks(info: BookInfo) {
 private fun MainActivity.jumpToMark(info: BookInfo, b: Bookmark) {
     // 位置要在 preview 之前写：preview 建完视图才读 readOffset，
     // 那时候再写就和「上次读到哪」混在一起了。
-    if (b.offset > 0) saveOffset(info.bookId, b.index, b.offset, sync = true)
+    if (b.offset > 0) saveOffset(info, b.index, b.offset, sync = true)
     preview(info, b.index)
 }
 
@@ -455,7 +455,7 @@ internal fun MainActivity.addMark(info: BookInfo, index: Int, text: String) {
             bookName = info.name,
             index = index,
             title = title,
-            offset = readOffset(info.bookId),
+            offset = readOffset(info),
             excerpt = excerpt,
             at = System.currentTimeMillis(),
         )

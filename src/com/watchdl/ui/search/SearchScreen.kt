@@ -10,6 +10,7 @@ import com.watchdl.ui.attachTabs
 import com.watchdl.ui.book.showDetail
 import com.watchdl.ui.shelf.showShelf
 import com.watchdl.ui.shelf.shelfStore
+import com.watchdl.ui.shelf.matchingBookJob
 import com.watchdl.ui.theme.Icons
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
@@ -425,12 +426,22 @@ private fun MainActivity.showHitMenu(h: BookHit) {
     items += "查看详情" to { openDetailOnly(h) }
     val info = BookInfo(h.bookId, h.name, h.author, emptyList(), intro = h.abstractText)
     val favorite = shelfStore().find(info)
+    val owner = curScreen as? Screen.Hits
+    val windowStart = hitsWinStart
+    val scrollY = Widgets.firstScroll(root)?.scrollY ?: 0
     items += (if (favorite != null) "已收藏 · 移出书架" else "加入书架") to {
         runCatching {
             if (favorite != null) shelfStore().remove(favorite.shelfId)
             else shelfStore().add(info, h.sourceName, siblingsOf(h))
-        }.onSuccess { toast(if (favorite != null) "已移出书架，下载与进度保留" else "已加入书架") }
-            .onFailure { toast("收藏保存失败：${it.message}") }
+        }.onSuccess {
+            toast(if (favorite != null) "已移出书架，历史与缓存保留" else "已加入书架，不会自动下载")
+            if (owner != null && curScreen === owner) {
+                hitsWinStart = windowStart
+                showHits(owner.keyword, owner.all, offset = owner.offset,
+                    batch = owner.searchedSources, replay = true)
+                Widgets.firstScroll(root)?.let { body -> body.post { body.scrollTo(0, scrollY) } }
+            }
+        }.onFailure { toast("收藏保存失败：${it.message}") }
     }
     items += "重新搜索《${h.name}》" to { doSearch(h.name) }
     Widgets.longMenuDialog(this, h.name, items).show()
@@ -660,7 +671,7 @@ internal fun MainActivity.openHit(hit: BookHit) {
     val src = sourceFor(hit)
     // 记下搜索结果这一屏，详情页返回时原样退回去。
     rememberReturn()
-    val job = Downloader.restoreLight(jobsStore(), hit.bookId)
+    val job = matchingBookJob(BookInfo(hit.bookId, hit.name, hit.author, emptyList()))
     if (job != null) {
         // 已经下到本地的书，用户点它就是要接着读，不必再绕一层详情。
         showToc(BookInfo(hit.bookId, job.name.ifBlank { hit.name }, job.author.ifBlank { hit.author }, job.chapters), src)

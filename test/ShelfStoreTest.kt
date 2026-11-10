@@ -55,6 +55,74 @@ fun main() {
         val progressNew = next.copy(chapters = listOf(ChapterRef("x", "重逢"), ChapterRef("y", "新章")))
         check(swappedChapterIndex(progressOld, progressNew, 1) == (0 to true))
         check(swappedChapterIndex(progressOld, progressNew.copy(chapters = listOf(ChapterRef("x", "新章"))), 1) == (0 to false))
+        // 同作者不同书共用地址，三本均须落盘，并且按逻辑身份而非地址查询。
+        val collisionFile = dir.resolve("collisions.json")
+        val collisionStore = ShelfStore(collisionFile)
+        val first = BookInfo("shared", "第一本", "同一作者", listOf(ChapterRef("a1", "甲章")))
+        val secondBook = first.copy(name = "第二本", chapters = listOf(ChapterRef("b1", "乙章")))
+        val third = first.copy(bookId = "candidate", name = "第三本", chapters = listOf(ChapterRef("c1", "丙章")))
+        val candidate = BookHit("candidate", first.name, first.author, "", "备用")
+        collisionStore.add(first, "甲源", listOf(candidate))
+        collisionStore.add(secondBook, "乙源")
+        collisionStore.add(third, "丙源") // 地址与第一本候选地址相同，不能合并。
+        val persisted = ShelfStore(collisionFile)
+        check(persisted.books().size == 3)
+        check(persisted.books().map { it.shelfId }.toSet().size == 3)
+        listOf(first, secondBook, third).forEach { book ->
+            check(persisted.find(book)?.info == book)
+            check(persisted.contains(book))
+        }
+        val firstId = persisted.find(first)!!.shelfId
+        val secondId = persisted.find(secondBook)!!.shelfId
+        val thirdId = persisted.find(third)!!.shelfId
+        check(persisted.find(third.copy(bookId = "shared"))?.shelfId == thirdId)
+        val absent = first.copy(name = "未收藏的第四本")
+        check(persisted.find(absent) == null && !persisted.contains(absent))
+        persisted.remove(absent) // 同地址的未知书不能删除已有书。
+        check(persisted.books().size == 3)
+        check(persisted.find("candidate") == null) // 歧义候选地址不是稳定标识。
+        persisted.remove("candidate")
+        check(persisted.books().size == 3)
+        check(persisted.find(firstId)?.info == first)
+        check(persisted.find(secondId)?.info == secondBook)
+        check(persisted.find(thirdId)?.info == third)
+        // 逻辑书名作者命中优先：传入其他书的稳定标识，也只补本书候选。
+        persisted.add(third.copy(bookId = firstId, chapters = emptyList()), "第四源")
+        check(persisted.books().size == 3 && persisted.find(first)?.info == first)
+        check(persisted.find(third)?.shelfId == thirdId && persisted.find(third)?.info == third)
+        // 换源到其他书的现用地址不能删掉对方，身份和加入时间不变。
+        val addedAt = persisted.find(third)!!.addedAt
+        persisted.replaceSource(thirdId, third.copy(bookId = "shared"), "第四源")
+        val afterSwap = ShelfStore(collisionFile)
+        check(afterSwap.books().size == 3)
+        check(afterSwap.find(third)?.shelfId == thirdId && afterSwap.find(third)?.addedAt == addedAt)
+        check(afterSwap.find(first)?.info == first && afterSwap.find(secondBook)?.info == secondBook)
+        // 使用旧 BookInfo 删除仍按逻辑身份，另外两本保持原样。
+        afterSwap.remove(third)
+        check(ShelfStore(collisionFile).books().map { it.info }.toSet() == setOf(first, secondBook))
+        afterSwap.remove(secondBook)
+        check(ShelfStore(collisionFile).books().single().shelfId == firstId)
+        // 裸稳定标识只移除一个目标，不会连带删除共用地址的记录。
+        afterSwap.add(secondBook, "乙源")
+        afterSwap.remove(firstId)
+        check(ShelfStore(collisionFile).books().single().info == secondBook)
+        // v1 缺失 shelfId 的重复地址不得在读取时 distinctBy 丢掉。
+        val legacyCollisionFile = dir.resolve("legacy-collisions.json")
+        legacyCollisionFile.writeText("""{"version":1,"migrated":true,"books":[{"bookId":"same","name":"甲书","author":"作者"},{"bookId":"same","name":"乙书","author":"作者"},{"bookId":"same","name":"丙书","author":"作者"}]}""")
+        val duplicateBytes = legacyCollisionFile.readText()
+        val recovered = ShelfStore(legacyCollisionFile)
+        val recoveredIds = recovered.books().map { it.shelfId }
+        check(recovered.books().size == 3 && recoveredIds.toSet().size == 3)
+        check(ShelfStore(legacyCollisionFile).books().map { it.shelfId } == recoveredIds)
+        check(legacyCollisionFile.readText() == duplicateBytes) // 只读修复不写盘。
+        recovered.remove(recovered.books()[1].info)
+        check(ShelfStore(legacyCollisionFile).books().map { it.info.name }.toSet() == setOf("甲书", "丙书"))
+        // 从旧作业迁移也不能按重复默认 shelfId 覆盖其他书。
+        val migrationFile = dir.resolve("migration-collisions.json")
+        val migratedStore = ShelfStore(migrationFile)
+        migratedStore.migrateOnce { listOf(first, secondBook, third).map { ShelfBook(it) } }
+        check(ShelfStore(migrationFile).books().map { it.info }.toSet() == setOf(first, secondBook, third))
+        check(migratedStore.books().map { it.shelfId }.toSet().size == 3)
         file.writeText("{invalid")
         check(runCatching { store.add(info) }.isFailure)
         check(file.readText() == "{invalid")

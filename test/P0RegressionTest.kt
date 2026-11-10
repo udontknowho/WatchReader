@@ -43,7 +43,7 @@ fun main() {
 
     // ══════ P0-3：bookId 未净化导致路径穿越 ══════
     println("[P0-3] bookId 目录名净化")
-    check("URL 被压成单层", JobStore.safeDirName("https://www.min-yuan.com/x") == "https___www.min-yuan.com_x",
+    check("URL 被压成单层并带摘要", JobStore.safeDirName("https://www.min-yuan.com/x").matches(Regex("[^/\\\\]+~[0-9a-f]{64}")),
         JobStore.safeDirName("https://www.min-yuan.com/x"))
     check("不再含斜杠", !JobStore.safeDirName("https://a.com/b").contains('/'))
     // 关键不是「不含 .. 这个子串」（`.._.._etc` 作为单层名字是安全的），

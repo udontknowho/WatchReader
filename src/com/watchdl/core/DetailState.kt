@@ -83,8 +83,7 @@ fun detailDownloadTag(done: Int, total: Int): String {
  * 未入架 `BookmarkAdd` + `add_to_bookshelf`「放入书架」，已入架 `Book` +
  * `already_in_bookshelf`「已在书架」（再点给 `click_to_remove`「点击删除」）。
  *
- * 我们的「入架」= 本机有这本书的下载作业。以前这张卡恒写「放入书架」，
- * 书已经下过也这么写，点下去还会重新排队 —— 这是这次改的直接动机。
+ * 入架只更新收藏元数据，不创建下载作业。已收藏时可移出，历史与缓存继续保留。
  *
  * [glyph] 是 [com.watchdl.ui.theme.Icons.DATA] 的键名；core 不认识视图层，
  * 只把键当字符串带出来，取不到字形时调用点自己退回文字。
@@ -92,20 +91,18 @@ fun detailDownloadTag(done: Int, total: Int): String {
 data class DetailShelfAction(val label: String, val glyph: String, val desc: String)
 
 fun detailShelfAction(inShelf: Boolean): DetailShelfAction = if (inShelf) {
-    DetailShelfAction("已在书架", "bookmark", "已在书架，点按可移出")
+    DetailShelfAction("已在书架", "bookmark", "已在书架，移出后保留历史与缓存")
 } else {
-    DetailShelfAction("放入书架", "plus", "放入书架并开始下载")
+    DetailShelfAction("放入书架", "plus", "仅收藏，不会自动下载")
 }
 
 /**
  * 移出书架的确认正文。
  *
- * legado 的删除确认只写「已选 N 本」，后果交给一组勾选；我们没有那个分叉，
- * 所以直接把「缓存与目录一起删、不可恢复」写进正文 —— 手表上一句话讲不清后果，
- * 用户就真会误删。
+ * 收藏与正文缓存独立，移出时不清理阅读历史、进度或已下载正文。
  */
 fun detailRemoveMessage(name: String): String =
-    "移出《${name.ifBlank { "未命名" }}》：删掉已下载的缓存与目录，不可恢复"
+    "移出《${name.ifBlank { "未命名" }}》：仅移除收藏，保留阅读历史、进度与缓存"
 
 /** 简介折叠按钮的文案，照 legado `expand`「展开」/ `collapse`「折叠」。 */
 fun detailIntroToggleLabel(expanded: Boolean): String = if (expanded) "折叠" else "展开"

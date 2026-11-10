@@ -42,8 +42,27 @@ data class CacheUsage(
 
 class JobStore(private val root: File) {
 
-    /** 目录路径。**不建目录**：读一个不存在的作业不该凭空造出空壳（见 [markDeleted]）。 */
-    private fun dirOf(bookId: String): File = File(root, safeDirName(bookId))
+    /** 根目录锁跨实例共享，不依赖迁移前后的路径。 */
+    private val rootKey = root.canonicalPath
+
+    /** 旧缓存只凭快照身份迁移，无快照时不猜测归属。 */
+    private fun dirOf(bookId: String): File = synchronized(lockFor(bookId)) {
+        val key = rootKey + "\u0000" + bookId
+        fallbackDirs[key]?.let { return@synchronized it }
+        val target = File(root, safeDirName(bookId))
+        val legacy = File(root, legacyDirName(bookId))
+        if (target != legacy && readJobId(target) != bookId && readJobId(legacy) == bookId) {
+            if (target.exists() || !legacy.renameTo(target)) {
+                // 固定回退路径，避免流式写入器打开后目录再次搬动。
+                fallbackDirs[key] = legacy
+                return@synchronized legacy
+            }
+        }
+        target
+    }
+
+    private fun ownsDirectory(dir: File, bookId: String): Boolean =
+        (!File(dir, "job.json").exists() && !File(dir, "job.json.tmp").exists()) || readJobId(dir) == bookId
 
     fun jobFile(bookId: String): File = File(dirOf(bookId), "job.json")
     fun chaptersFile(bookId: String): File = File(dirOf(bookId), "chapters.jsonl")
@@ -58,23 +77,25 @@ class JobStore(private val root: File) {
      */
     fun markDeleted(bookId: String): Boolean {
         deleted.add(bookId)
-        val dir = synchronized(lockFor(bookId)) { dirOf(bookId).also { it.deleteRecursively() } }
-        return !dir.exists()
+        return synchronized(lockFor(bookId)) {
+            val dir = dirOf(bookId)
+            if (!ownsDirectory(dir, bookId)) false else dir.deleteRecursively() || !dir.exists()
+        }
     }
 
     /** 重新下载同一本书时撤销墓碑。 */
     fun clearDeleted(bookId: String) { deleted.remove(bookId) }
 
-    private fun lockFor(bookId: String): Any =
-        locks.computeIfAbsent(jobFile(bookId).canonicalPath) { Any() }
+    @Suppress("UNUSED_PARAMETER")
+    private fun lockFor(bookId: String): Any = locks.computeIfAbsent(rootKey) { Any() }
 
     companion object {
         /**
          * 导入暂存目录的后缀，见 [openStaging]。
          *
-         * 带 `~` 是刻意的：[safeDirName] 的白名单里没有它，所以**任何** bookId 净化后都不可能
-         * 以 `~building` 结尾 —— 暂存目录与正式目录的命名空间不会重叠。
-         * 顺带让 `cleanDirtyJobs` 的「目录名不是净化结果」那条规则自动认领这些孤儿。
+         * 带 `~` 是刻意的：原样标识不含它，摘要键以十六进制结尾，
+         * 所以正式键不可能以 `~building` 结尾。清理方应按快照身份核对目录名，
+         * 不能对目录名再次调用 [safeDirName] 判断是否合法。
          */
         internal const val STAGING_SUFFIX = "~building"
 
@@ -86,6 +107,7 @@ class JobStore(private val root: File) {
             name.endsWith(STAGING_SUFFIX) || name.endsWith(OLD_SUFFIX)
 
         private val locks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+        private val fallbackDirs = java.util.concurrent.ConcurrentHashMap<String, File>()
 
         /** 从 chapters.jsonl 的一行里取 itemId。正文里可能有别的 JSON，只认这个键。 */
         private val ITEM_ID = Regex("\"itemId\"\\s*:\\s*\"([^\"]*)\"")
@@ -101,12 +123,21 @@ class JobStore(private val root: File) {
          * `files/` 外面。所以 `:` `/` `\` 等一律替掉，并拒绝全点号的名字。
          */
         fun safeDirName(bookId: String): String {
+            val cleaned = bookId.replace(Regex("[^\\p{L}\\p{N}._-]"), "_")
+            if (cleaned == bookId && cleaned.length <= 80 &&
+                cleaned.isNotEmpty() && !cleaned.all { it == '.' }) return cleaned
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(bookId.toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+            // ~ 不属于原样保留的字符集，普通标识不能冒充摘要键。
+            return cleaned.take(14).ifEmpty { "id" } + "~" + digest
+        }
+
+        /** 只用于旧目录身份核对，不能再用于创建目录。 */
+        private fun legacyDirName(bookId: String): String {
             val cleaned = bookId.replace(Regex("[^\\p{L}\\p{N}._-]"), "_").take(80)
-            // `.`、`..` 会被文件系统当成当前/上级目录
-            if (cleaned.isEmpty() || cleaned.all { it == '.' }) {
-                return "id_" + bookId.hashCode().toUInt().toString(16)
-            }
-            return cleaned
+            return if (cleaned.isEmpty() || cleaned.all { it == '.' })
+                "id_" + bookId.hashCode().toUInt().toString(16) else cleaned
         }
     }
 
@@ -119,13 +150,23 @@ class JobStore(private val root: File) {
     ) {
         // 整本书的写入串行化：persist 整份重写，writeState 读-改-写，
         // 两路并发时后写的会把前者的状态盖回去 —— 用户取消下载，
-        // 界面报的却是「系统中断」，还得从头重下。按 bookId 分锁，不同书互不阻塞。
+        // 界面报的却是「系统中断」，还得从头重下。根目录锁同时保护旧目录迁移。
         synchronized(lockFor(bookId)) {
             if (bookId in deleted) return
             // 进锁后再判一次：删除请求可能刚好抢在入锁之前。
-            val dir = dirOf(bookId).apply { mkdirs() }
+            val dir = dirOf(bookId)
+            check(ownsDirectory(dir, bookId)) { "作业目录身份不符：${dir.name}" }
+            val jsonId = TinyJson.path(json, "bookId")
+            require(jsonId == null || jsonId == bookId) { "快照 bookId 不符" }
+            val identified = if (jsonId == null) {
+                val open = json.indexOf('{')
+                require(open >= 0) { "快照不是 JSON 对象" }
+                val comma = if (json.substring(open + 1).trimStart().startsWith("}")) "" else ","
+                json.replaceRange(open, open + 1, "{\"bookId\":" + Downloader.quote(bookId) + comma)
+            } else json
+            dir.mkdirs()
             val snapshot = if (isCancelled() || (!resume() && TinyJson.path(readJob(bookId) ?: "", "state") == "CANCELLED"))
-                setState(json, JobState.CANCELLED) else json
+                setState(identified, JobState.CANCELLED) else identified
             val tmp = File(dir, "job.json.tmp")
             // 先 fsync 再改名：只 writeText 的话数据还在页缓存里，改名后再断电就是零字节文件。
             java.io.RandomAccessFile(tmp, "rw").use { raf ->
@@ -160,8 +201,11 @@ class JobStore(private val root: File) {
         // 主文件不在时回退读 tmp —— 进程正好死在 rename 前，数据还在 tmp 里。
         return synchronized(lockFor(bookId)) {
             runCatching {
-                jobFile(bookId).takeIf { it.isFile }?.readText()
-                    ?: File(dirOf(bookId), "job.json.tmp").takeIf { it.isFile }?.readText()
+                val dir = dirOf(bookId)
+                if (!ownsDirectory(dir, bookId)) return@runCatching null
+                (File(dir, "job.json").takeIf { it.isFile }?.readText()
+                    ?: File(dir, "job.json.tmp").takeIf { it.isFile }?.readText())
+                    ?.takeIf { TinyJson.path(it, "bookId") == bookId }
             }.getOrNull()
         }
     }
@@ -170,7 +214,9 @@ class JobStore(private val root: File) {
     fun appendChapter(bookId: String, chapterJson: String) {
         synchronized(lockFor(bookId)) {
             if (bookId in deleted) return
-            dirOf(bookId).mkdirs()
+            val dir = dirOf(bookId)
+            check(ownsDirectory(dir, bookId)) { "作业目录身份不符：${dir.name}" }
+            dir.mkdirs()
             RandomAccessFile(chaptersFile(bookId), "rw").use { raf ->
                 raf.seek(raf.length())
                 raf.write((chapterJson + "\n").toByteArray(Charsets.UTF_8))
@@ -188,7 +234,9 @@ class JobStore(private val root: File) {
     fun writeChapters(bookId: String, lines: List<String>) {
         synchronized(lockFor(bookId)) {
             if (bookId in deleted) return
-            dirOf(bookId).mkdirs()
+            val dir = dirOf(bookId)
+            check(ownsDirectory(dir, bookId)) { "作业目录身份不符：${dir.name}" }
+            dir.mkdirs()
             val f = chaptersFile(bookId)
             val tmp = File(f.parentFile, "chapters.jsonl.tmp")
             runCatching {
@@ -224,7 +272,8 @@ class JobStore(private val root: File) {
         var count = 0
             private set
 
-        internal fun open() {
+        internal fun open() = synchronized(lockFor(bookId)) {
+            check(ownsDirectory(dir, bookId)) { "作业目录身份不符：${dir.name}" }
             dir.mkdirs()
             tmp.parentFile?.mkdirs()
             raf = RandomAccessFile(tmp, "rw").also { it.setLength(0) }
@@ -244,6 +293,8 @@ class JobStore(private val root: File) {
             r.fd.sync()
             r.close()
             synchronized(lockFor(bookId)) {
+                check(ownsDirectory(dir, bookId)) { "作业目录身份不符：${dir.name}" }
+                if (bookId in deleted) { tmp.delete(); return }
                 val f = File(dir, "chapters.jsonl")
                 if (!tmp.renameTo(f)) {
                     tmp.copyTo(f, overwrite = true)
@@ -262,7 +313,9 @@ class JobStore(private val root: File) {
     }
 
     /** 开一个流式正文写入器。 */
-    fun openChapters(bookId: String): ChapterSink = ChapterSink(bookId, dirOf(bookId)).also { it.open() }
+    fun openChapters(bookId: String): ChapterSink = synchronized(lockFor(bookId)) {
+        ChapterSink(bookId, dirOf(bookId)).also { it.open() }
+    }
 
     /** 导入新书时用的暂存目录。带后缀的目录不会有 job.json，所以永远不会被书架当成一本书。 */
     private fun stagingDir(bookId: String): File = File(root, safeDirName(bookId) + STAGING_SUFFIX)
@@ -290,6 +343,8 @@ class JobStore(private val root: File) {
      */
     fun commitStaging(bookId: String, json: String) {
         synchronized(lockFor(bookId)) {
+            require(TinyJson.path(json, "bookId") == bookId) { "快照 bookId 不符" }
+            check(ownsDirectory(dirOf(bookId), bookId)) { "作业目录身份不符" }
             val st = stagingDir(bookId)
             if (!st.isDirectory) return
             // 先把 job.json.tmp 写实。**写不成就整单放弃**：这一刻旧书还在，什么都不该动。
@@ -357,6 +412,7 @@ class JobStore(private val root: File) {
      * 缓存页只为画 ✓/✗，不能把整本读进内存（[readChapters] 是整本进内存，别在这用）。
      */
     fun cachedItemIds(bookId: String): Set<String> = synchronized(lockFor(bookId)) {
+        if (!ownsDirectory(dirOf(bookId), bookId)) return@synchronized emptySet()
         val f = chaptersFile(bookId)
         if (!f.isFile) return@synchronized emptySet()
         val out = HashSet<String>()
@@ -383,7 +439,7 @@ class JobStore(private val root: File) {
      * 返回是否真的删了一行。
      */
     fun deleteChapter(bookId: String, itemId: String): Boolean = synchronized(lockFor(bookId)) {
-        if (bookId in deleted) return@synchronized false
+        if (bookId in deleted || !ownsDirectory(dirOf(bookId), bookId)) return@synchronized false
         val f = chaptersFile(bookId)
         var removed = false
         if (f.isFile) {
@@ -429,6 +485,7 @@ class JobStore(private val root: File) {
 
     /** 读回已下载的章节：itemId → 正文。坏行跳过，容忍崩溃留下的半截行。 */
     fun readChapters(bookId: String): Map<String, String> = synchronized(lockFor(bookId)) {
+        if (!ownsDirectory(dirOf(bookId), bookId)) return@synchronized emptyMap()
         val f = chaptersFile(bookId)
         if (!f.isFile) return@synchronized emptyMap()
         val out = LinkedHashMap<String, String>()
@@ -451,6 +508,7 @@ class JobStore(private val root: File) {
      * 先用 `contains` 粗筛再解 itemId：粗筛不命中就不跑正则。
      */
     fun readChapter(bookId: String, itemId: String): String? = synchronized(lockFor(bookId)) {
+        if (!ownsDirectory(dirOf(bookId), bookId)) return@synchronized null
         val f = chaptersFile(bookId)
         if (!f.isFile || itemId.isEmpty()) return@synchronized null
         // 不能抛：并发落盘时文件可能正被改名/清理。
@@ -480,6 +538,7 @@ class JobStore(private val root: File) {
      */
     fun clearChapters(bookId: String) {
         synchronized(lockFor(bookId)) {
+            if (!ownsDirectory(dirOf(bookId), bookId)) return
             chaptersFile(bookId).delete()
             val raw = readJob(bookId) ?: return
             val json = raw
@@ -498,12 +557,13 @@ class JobStore(private val root: File) {
      *
      * 只算 job.json 存在的目录：导出目录、空壳目录都不算一本书。
      */
-    fun cacheUsages(): List<CacheUsage> {
+    fun cacheUsages(): List<CacheUsage> = synchronized(lockFor("")) {
         val dirs = root.listFiles()
-            ?.filter { it.isDirectory && File(it, "job.json").isFile }
-            ?: return emptyList()
-        return dirs.mapNotNull { dir ->
+            ?.filter { it.isDirectory && !isTransientDirName(it.name) && File(it, "job.json").isFile }
+            ?: return@synchronized emptyList()
+        dirs.mapNotNull { dir ->
             val bookId = readJobId(dir) ?: return@mapNotNull null
+            if (dir.name != safeDirName(bookId) && dir.name != legacyDirName(bookId)) return@mapNotNull null
             // 走 readJob：它进同一把文件锁，且主文件不在时会回退读 tmp。
             val raw = readJob(bookId) ?: return@mapNotNull null
             val f = chaptersFile(bookId)
@@ -528,7 +588,7 @@ class JobStore(private val root: File) {
                 state = runCatching { JobState.valueOf(TinyJson.path(raw, "state") ?: "PENDING") }
                     .getOrDefault(JobState.PENDING),
             )
-        }.sortedByDescending { it.bytes }
+        }.distinctBy { it.bookId }.sortedByDescending { it.bytes }
     }
 
     /**
@@ -564,16 +624,24 @@ class JobStore(private val root: File) {
      * 两者不同。以前这里直接返回目录名，再拿去 [readJob] 就找不到作业。
      * 只看含 `job.json` 的目录，空目录和导出目录不算。
      */
-    fun listBooks(): List<String> =
+    fun listBooks(): List<String> = synchronized(lockFor("")) {
         root.listFiles()
-            ?.filter { it.isDirectory && File(it, "job.json").isFile }
+            ?.filter { it.isDirectory && !isTransientDirName(it.name) && File(it, "job.json").isFile }
             ?.sortedByDescending { it.lastModified() }
-            ?.mapNotNull { d -> readJobId(d) }
+            ?.mapNotNull { d ->
+                val id = readJobId(d) ?: return@mapNotNull null
+                id.takeIf { (d.name == safeDirName(id) || d.name == legacyDirName(id)) && readJob(id) != null }
+            }
+            ?.distinct()
             ?: emptyList()
+    }
 
     /** 从目录里的 job.json 读出原始 bookId；读不到就跳过。 */
     private fun readJobId(dir: File): String? {
-        val raw = runCatching { File(dir, "job.json").readText() }.getOrNull() ?: return null
+        val raw = runCatching {
+            val job = File(dir, "job.json")
+            if (job.isFile) job.readText() else File(dir, "job.json.tmp").readText()
+        }.getOrNull() ?: return null
         return TinyJson.path(raw, "bookId")
     }
 }

@@ -17,22 +17,23 @@ object AppUpdate {
 
     private fun version(raw: String): Version {
         val text = raw.trim().removePrefix("v").removePrefix("V")
-        val match = Regex("(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?")
-            .matchEntire(text) ?: throw IllegalArgumentException("版本号格式无效：$raw")
-        val pre = match.groupValues[4].takeIf { it.isNotEmpty() }?.split('.') ?: emptyList()
+        val normalized = Regex("^(\\d+\\.\\d+\\.\\d+)(?=[-+]|$)").replace(text) { it.groupValues[1] + ".0" }
+        val match = Regex("(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?")
+            .matchEntire(normalized) ?: throw IllegalArgumentException("版本号格式无效：$raw")
+        val pre = match.groupValues[5].takeIf { it.isNotEmpty() }?.split('.') ?: emptyList()
         require(pre.none { it.all(Char::isDigit) && it.length > 1 && it.startsWith('0') }) {
             "预发布版本号格式无效：$raw"
         }
-        return Version((1..3).map { match.groupValues[it] }, pre)
+        return Version((1..4).map { match.groupValues[it] }, pre)
     }
 
-    /** SemVer：比较 major/minor/patch，正式版高于同号预发布，构建元数据不参与比较。 */
+    /** 比较三段或四段数字，缺失第四段视为0，构建元数据不参与比较。 */
     fun compareVersions(left: String, right: String): Int {
         val a = version(left)
         val b = version(right)
         fun number(x: String, y: String): Int =
             x.length.compareTo(y.length).takeIf { it != 0 } ?: x.compareTo(y)
-        for (i in 0..2) number(a.parts[i], b.parts[i]).let { if (it != 0) return it }
+        for (i in 0..3) number(a.parts[i], b.parts[i]).let { if (it != 0) return it }
         if (a.pre.isEmpty() || b.pre.isEmpty()) return when {
             a.pre.isEmpty() && b.pre.isEmpty() -> 0
             a.pre.isEmpty() -> 1

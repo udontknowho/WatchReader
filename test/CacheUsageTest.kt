@@ -261,8 +261,11 @@ fun main() {
         detailShelfAction(false).let { it.label == "放入书架" && it.glyph == "plus" })
     check("已入架 → 已在书架 + bookmark",
         detailShelfAction(true).let { it.label == "已在书架" && it.glyph == "bookmark" })
-    check("移出确认写清不可恢复",
-        detailRemoveMessage("剑来") == "移出《剑来》：删掉已下载的缓存与目录，不可恢复")
+    check("收藏不会自动下载", detailShelfAction(false).desc == "仅收藏，不会自动下载")
+    check("移出动作说明历史与缓存保留",
+        detailShelfAction(true).desc == "已在书架，移出后保留历史与缓存")
+    check("移出只删收藏，保留历史、进度与缓存",
+        detailRemoveMessage("剑来") == "移出《剑来》：仅移除收藏，保留阅读历史、进度与缓存")
     check("没有书名时给「未命名」", detailRemoveMessage(" ").contains("未命名"))
     check("下载小牌：没下过", detailDownloadTag(0, 300) == "未下载")
     check("下载小牌：下了一部分", detailDownloadTag(40, 300) == "已下载 40/300")

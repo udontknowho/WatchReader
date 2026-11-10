@@ -116,8 +116,9 @@ fun main() {
             }.also { it.start() }
         }
         ts.forEach { it.join(10_000) }
-        check("同一实际文件的跨实例追加不丢章",
-            errors.isEmpty() && ts.none { it.isAlive } && store.readChapters(id).size == 80)
+        check("旧碰撞键跨实例追加各自不丢章",
+            errors.isEmpty() && ts.none { it.isAlive } &&
+                store.readChapters(id).size == 40 && store.readChapters(alias).size == 40)
     }
 
     root.deleteRecursively()

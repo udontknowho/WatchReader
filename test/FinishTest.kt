@@ -29,9 +29,8 @@ fun main() {
     check("返回的是原始 bookId", books.firstOrNull() == weirdId, books.firstOrNull() ?: "空")
     check("能拿它读回作业", books.firstOrNull()?.let { store.readJob(it) } != null)
 
-    // 反例说明：safeDirName 幂等，用目录名 readJob 也能读到同一文件。
-    // 所以真正的问题不是「读不到」，而是需要一条路把**原始 bookId** 取回来供 restore 用。
-    check("用目录名也能读到文件（净化幂等，不是 bug）", store.readJob(dirName) != null)
+    // 目录键不是书籍身份，不能拿它冒充原地址读取缓存。
+    check("目录名不能冒充原书标识", store.readJob(dirName) == null)
 
     // ══════ 脏目录不该被列进来 ══════
     println("[listBooks] 空目录与脏目录排除")

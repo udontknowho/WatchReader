@@ -5,8 +5,11 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
 import com.watchdl.MainActivity
-import com.watchdl.core.BookInfo
-import com.watchdl.core.Downloader
+import com.watchdl.core.progressKey
+import com.watchdl.core.readingId
+import com.watchdl.core.canMigrateReadingProgress
+import com.watchdl.core.canMigrateLegacyProgress
+import com.watchdl.ui.shelf.sourceForBook
 import com.watchdl.core.Screen
 import com.watchdl.core.ReadingHistory
 import com.watchdl.core.markSelectionPrune
@@ -16,7 +19,6 @@ import com.watchdl.core.recordClearMessage
 import com.watchdl.core.recordDeleteMessage
 import com.watchdl.core.recordMatch
 import com.watchdl.core.recordSubtitle
-import com.watchdl.ui.my.showMy
 import com.watchdl.ui.search.askText
 import com.watchdl.ui.theme.Icons
 import com.watchdl.ui.theme.Md3
@@ -33,8 +35,9 @@ private class RecordRow(
     val index: Int,
     val at: Long,
     val eventId: Long? = null,
+    val identity: String? = null,
 ) {
-    val key: String get() = eventId?.let { "event:$it" } ?: "legacy:$bookId"
+    val key: String get() = eventId?.let { "event:$it" } ?: "legacy:${identity ?: bookId}"
 }
 
 /**
@@ -78,7 +81,7 @@ internal fun MainActivity.showRecords() {
         root.addView(recordsSelectBar(shown.map { it.key }))
     } else {
         // 统计与排序口径都放顶栏副标题：248 dp 高的屏上，多一行统计就少一本书记录。
-        root.addView(Widgets.topBar(this, "阅读记录", onBack = { showMy() },
+        root.addView(Widgets.topBar(this, "阅读记录", onBack = { goBackToPrevious() },
             subtitle = "真实时间线 · ${shown.size} 条",
             trailing = listOf(
                 "search" to { askRecordsQuery() },
@@ -112,23 +115,21 @@ internal fun MainActivity.showRecords() {
  * readTime==0 表示没记录过（只有旧存档的 pos_），不算读过，不列。
  */
 private fun MainActivity.loadRecords(): List<RecordRow> {
-    val store = jobsStore()
     val events = ReadingHistory.list(filesDir)
-    val jobs = store.listBooks().mapNotNull { id ->
-        Downloader.restoreLight(store, id)?.let { id to it }
-    }.toMap()
-    val timeline = events.mapNotNull { e ->
-        val job = jobs[e.bookId] ?: return@mapNotNull null
-        RecordRow(e.bookId, job.name.ifBlank { e.bookId }, job.author, job.chapters.size,
-            e.index, e.at, e.id)
+    val books = knownReadingBooks().distinctBy(::readingId)
+    // 旧事件若同地址有多书，明确显示未知，不猜测打开目标。
+    val timeline = events.map { e ->
+        val info = resolveReadingBook(e.bookId, e.readingId)
+        RecordRow(e.bookId, info?.name?.ifBlank { e.bookId } ?: "未知书籍 · ${e.bookId}",
+            info?.author.orEmpty(), info?.chapters?.size ?: 0, e.index, e.at, e.id, e.readingId)
     }
-    val recorded = events.map { it.bookId }.toSet()
-    val legacy = store.listBooks().filter { it !in recorded }.mapNotNull { id ->
-        val at = readTime(id)
+    val recorded = events.mapNotNull { e -> resolveReadingBook(e.bookId, e.readingId)?.let(::readingId) }.toSet()
+    val legacy = books.filter { readingId(it) !in recorded }.mapNotNull { info ->
+        val at = readTime(info)
         if (at <= 0L) return@mapNotNull null
-        val job = Downloader.restoreLight(store, id) ?: return@mapNotNull null
-        RecordRow(id, job.name.ifBlank { id }, job.author, job.chapters.size,
-            readProgress(id), at)
+        val id = readingId(info)
+        RecordRow(info.bookId, info.name.ifBlank { info.bookId }, info.author,
+            info.chapters.size, readProgress(info), at, identity = id)
     }
     return (timeline + legacy).sortedByDescending { it.at }
 }
@@ -179,7 +180,7 @@ private fun MainActivity.recordsRow(r: RecordRow): LinearLayout {
 
     row.isClickable = true
     row.setOnClickListener {
-        if (RecordsUi.selecting) toggleRecordSelection(r.key) else openRecord(r.bookId, r.index)
+        if (RecordsUi.selecting) toggleRecordSelection(r.key) else openRecord(r.bookId, r.index, r.identity)
     }
     row.setOnLongClickListener {
         if (!RecordsUi.selecting) {
@@ -278,7 +279,7 @@ private fun MainActivity.showRecordsMenu(all: List<RecordRow>) {
  */
 private fun MainActivity.showRecordRowMenu(r: RecordRow) {
     val items = mutableListOf<Pair<CharSequence, () -> Unit>>()
-    items += "跳到这一章" to { openRecord(r.bookId, r.index) }
+    items += "跳到这一章" to { openRecord(r.bookId, r.index, r.identity) }
     items += "删除这条记录" to { confirmDeleteRecords(listOf(r.key)) }
     Widgets.longMenuDialog(this, r.name, items).show()
 }
@@ -328,45 +329,50 @@ private fun MainActivity.confirmClearRecords(bookIds: List<String>) {
  *
  * 四个键一起删：`last_` 是时刻、`pos_` 与 `oidx_` 是章号、`off_` 是章内位置。
  * 只删 `last_` 的话这本书还在 ShelfScreen 里带进度，与「记录已删」自相矛盾。
- * tag 截 64 位与 [readTime] / [readProgress] 同口径，否则键对不上。
+ * 新键按完整地址散列，旧键仅在身份不歧义时删除。
  */
 private fun MainActivity.deleteRecordKeys(keys: List<String>, clearAll: Boolean = false) {
     val events = ReadingHistory.list(filesDir)
     val ids = keys.mapNotNull { it.removePrefix("event:").toLongOrNull() }.toSet()
     val books = keys.filter { it.startsWith("legacy:") }.map { it.removePrefix("legacy:") }.toMutableSet()
     // 删除最后一条事件时一并清除对应旧位置，避免回退成旧记录重新出现。
-    for (book in events.filter { it.id in ids }.map { it.bookId }.distinct()) {
-        if (events.none { it.bookId == book && it.id !in ids }) books += book
+    fun eventKey(e: com.watchdl.core.ReadingEvent): String = e.readingId ?: e.bookId
+    for (book in events.filter { it.id in ids }.map(::eventKey).distinct()) {
+        if (events.none { eventKey(it) == book && it.id !in ids }) books += book
     }
     ReadingHistory.remove(filesDir, if (clearAll) events.map { it.id }.toSet() else ids)
-    if (clearAll) books += events.map { it.bookId }
+    if (clearAll) books += events.map(::eventKey)
     for (book in books) clearRecord(book)
 }
 
 private fun MainActivity.clearRecord(bookId: String) {
-    val tag = bookId.take(64)
-    getSharedPreferences("reader", android.content.Context.MODE_PRIVATE).edit()
-        .remove("last_$tag")
-        .remove("pos_$tag")
-        .remove("oidx_$tag")
-        .remove("off_$tag")
-        // commit 而非 apply：删完立刻重画列表，异步写入会读到旧值。
-        .commit()
+    val info = resolveReadingBook(bookId)
+    val tag = if (info == null) progressKey("unresolved:$bookId") else progressKey(info)
+    val editor = getSharedPreferences("reader", android.content.Context.MODE_PRIVATE).edit()
+        .putBoolean("migrated_$tag", true)
+    val tags = mutableListOf(tag)
+    if (info != null && canMigrateReadingProgress(info, knownReadingBooks())) {
+        tags += progressKey(info.bookId)
+        if (canMigrateLegacyProgress(info.bookId, knownReadingBookIds())) tags += info.bookId.take(64)
+    }
+    // 不清除歧义地址的旧进度，否则会影响另一书。
+    for (key in tags) for (prefix in listOf("last_", "pos_", "oidx_", "off_")) editor.remove(prefix + key)
+    // 同步删除，并标记已迁移，防止旧键再次导入。
+    editor.commit()
 }
 
 /** 点一条回到那本书那章。目录现读：换过源或删过，章号可能已经失效。 */
-private fun MainActivity.openRecord(bookId: String, index: Int) {
-    val job = Downloader.restore(jobsStore(), bookId)
-    if (job == null) {
-        toast("这本书已经不在本地了")
+private fun MainActivity.openRecord(bookId: String, index: Int, identity: String? = null) {
+    val info = resolveReadingBook(bookId, identity)
+    if (info == null || info.chapters.isEmpty()) {
+        toast("没有这本书的目录快照，请重新搜索")
         return
     }
-    val info = BookInfo(bookId, job.name.ifBlank { bookId }, job.author, job.chapters)
     // 换了源之后目录长度会变，旧章号可能越界；说一句比默默打开第一章好。
     if (index !in info.chapters.indices) {
         toast("这一章已经失效了")
         return
     }
     rememberReturn()
-    preview(info, index)
+    preview(info, index, src = sourceForBook(info))
 }

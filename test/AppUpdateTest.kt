@@ -21,9 +21,14 @@ fun main() {
     verify(AppUpdate.compareVersions("1.6.1-alpha", "1.6.1-alpha.1") < 0)
     verify(AppUpdate.compareVersions("1.6.1-1", "1.6.1-alpha") < 0)
     verify(AppUpdate.compareVersions("999999999999999999999.0.0", "2.0.0") > 0)
-    for (bad in listOf("1.6", "01.6.1", "1.6.1-01", "", "1.6.1.2")) {
+    for (bad in listOf("1.6", "01.6.1", "1.6.1-01", "", "1.6.1.2.3", "1.6.1.01")) {
         verify(runCatching { AppUpdate.compareVersions(bad, "1.6.1") }.isFailure)
     }
+    verify(AppUpdate.compareVersions("1.6.1.1", "1.6.1") > 0)
+    verify(AppUpdate.compareVersions("1.6.1.0", "1.6.1") == 0)
+    verify(AppUpdate.compareVersions("1.6.2", "1.6.1.99") > 0)
+    verify(AppUpdate.compareVersions("1.6.1.10", "1.6.1.2") > 0)
+    verify(AppUpdate.parseRelease(release("v1.6.1.1")).version == "v1.6.1.1")
     verify(AppUpdate.parseRelease(release()).downloadUrl == page)
     val assets = """[{"name":"notes.txt","browser_download_url":"https://example.com"},{"name":"WatchReader.apk","browser_download_url":"$apk"}]"""
     val parsed = AppUpdate.parseRelease(release(assets = assets))

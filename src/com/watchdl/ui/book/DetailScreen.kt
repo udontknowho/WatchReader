@@ -12,6 +12,7 @@ import com.watchdl.ui.reader.showRecords
 import com.watchdl.ui.shelf.shelfStore
 import com.watchdl.ui.shelf.ensureShelfMigration
 import com.watchdl.ui.shelf.sourceForBook
+import com.watchdl.ui.shelf.matchingBookJob
 import com.watchdl.ui.source.showSources
 import com.watchdl.ui.theme.Icons
 import com.watchdl.ui.theme.Md3
@@ -75,9 +76,9 @@ internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
     val candidates = sameBookCandidates(info, detailCandidates + shelfStore().find(info)?.candidates.orEmpty())
     detailCandidates = candidates
     setScreen(Screen.Detail(info, src, candidates))
-    DetailUi.bind(info.bookId)
+    DetailUi.bind("${info.bookId}\u0000${info.name}\u0000${info.author}")
     ensureShelfMigration()
-    if (info.chapters.isNotEmpty() && shelfStore().contains(info.bookId))
+    if (info.chapters.isNotEmpty() && shelfStore().contains(info))
         runCatching { shelfStore().add(info, srcName(src), candidates) }
             .onFailure { toast("收藏更新失败：${it.message}") }
     root.removeAllViews()
@@ -91,8 +92,8 @@ internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
     val col = Widgets.contentColumn(body)
 
     // 作业快照：一次读 job.json（不碰 chapters.jsonl），下面三处都用它。
-    // 有作业 = 「已在书架」；已下章数也在这里。
-    val job = Downloader.restoreLight(jobsStore(), info.bookId)
+    // 作业必须与详情身份一致；收藏状态独立于下载。
+    val job = matchingBookJob(info)
     val done = job?.count(ChapterStatus.DONE) ?: 0
     val totalChapters = if (info.chapters.isNotEmpty()) info.chapters.size else (job?.total ?: 0)
 
@@ -209,7 +210,7 @@ internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
     // 第三行 labelMedium 三格（primary 加粗 / secondary 竖线 / secondary 状态词）。
     // 16 sp 的 titleMedium 在 189 dp 上会把书名行吃掉，所以字号压到 FS_MD / FS_SM，
     // **层级靠字重与颜色保住，不靠字号差** —— 这是这一块唯一没照抄的地方。
-    val readAt = readProgress(info.bookId)
+    val readAt = readProgress(info)
     if (info.chapters.isNotEmpty()) {
         val box = Widgets.card(this)
         box.addView(Md3.ellipsize(Md3.text(this, detailCurrentLine(
@@ -300,7 +301,7 @@ internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
         else {
             ReaderUi.fromShelf = false
             rememberReturn()
-            tocSrc = src ?: sourceForBook(info.bookId)
+            tocSrc = src ?: sourceForBook(info)
             preview(info, if (readAt < info.chapters.size) readAt else 0)
         }
     }
@@ -351,10 +352,10 @@ private data class ActCard(
 private fun MainActivity.confirmRemoveShelf(info: BookInfo, src: BookSource?) {
     Widgets.md3Dialog(this,
         title = "移出书架",
-        body = "移除“${info.name}”的收藏，保留下载正文与阅读进度。",
+        body = detailRemoveMessage(info.name),
         confirm = "移出",
         onConfirm = {
-            runCatching { shelfStore().remove(shelfStore().find(info)?.shelfId ?: info.bookId) }
+            runCatching { shelfStore().remove(info) }
                 .onSuccess { toast("已移出书架"); showDetail(info, src) }
                 .onFailure { toast("收藏保存失败：${it.message}") }
         },
@@ -370,7 +371,7 @@ private fun MainActivity.confirmRemoveShelf(info: BookInfo, src: BookSource?) {
  */
 private fun MainActivity.refreshToc(info: BookInfo, src: BookSource?) {
     if (info.chapters.isEmpty()) { detailOpenToc(info, src); return }
-    val useSrc = src ?: sourceForBook(info.bookId)
+    val useSrc = src ?: sourceForBook(info)
     if (useSrc == null) { toast("原书源不可用，请换源后重试"); return }
     toast("正在刷新目录…")
     val owner = Screen.Detail(info, src)
@@ -405,7 +406,7 @@ private fun MainActivity.refreshToc(info: BookInfo, src: BookSource?) {
  */
 private fun MainActivity.detailOpenToc(info: BookInfo, src: BookSource?) {
     if (info.chapters.isNotEmpty()) { rememberReturn(); showToc(info, src); return }
-    val resolved = src ?: sourceForBook(info.bookId)
+    val resolved = src ?: sourceForBook(info)
     if (resolved != null && info.bookId.isNotBlank()) {
         toast("正在取目录…")
         bg(Screen.Detail(info, src, detailCandidates), { resolved.toc(info.bookId, info.name, info.author) }) { result ->
