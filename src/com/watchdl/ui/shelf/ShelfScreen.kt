@@ -194,7 +194,7 @@ private fun MainActivity.bodyScrollOf(): Int {
  * 没有 cover 字段。所以封面是**生成的占位卡片**：书名首字 + 按书名定的固定配色。
  * 同一本书每次进来颜色一致，靠颜色区分书籍，不靠图片。
  *
- * 结构照 legado `BookshelfScreen.kt`：大标题行（右侧搜索 + ⋮），下面一排副标题。
+ * 大标题行仅保留右侧搜索，下面一排副标题。
  * 189 dp 宽再放页签就只剩 100 dp，列表项书名全被截完。
  */
 internal fun MainActivity.showShelf(keepScroll: Boolean = false) {
@@ -213,7 +213,6 @@ internal fun MainActivity.showShelf(keepScroll: Boolean = false) {
     root.addView(Widgets.headerRow(this, "书架",
         trailing = listOf(
             "search" to { askKeyword() },
-            "more" to { showShelfMenu() },
         )))
     // legado 顶栏副标题 `uiState.subtitle`。我们的 headerRow 只有一行标题位，
     // 副标题单独占一行（FS_SM）。189 dp 上「N 本 · 在读 M」约 90 dp，一行放得下。
@@ -505,9 +504,7 @@ private fun MainActivity.showShelfBookMenu(row: ShelfRow) {
 
 internal fun MainActivity.showShelfMenu() {
     Widgets.longMenuDialog(this, "书架", listOf(
-        // legado 的「添加本地」走 SAF 文件选择器。手表系统自带「文件」选择器，
-        // 用 ACTION_OPEN_DOCUMENT 就能拉到，不需要任何存储权限，也不用 androidx。
-        "添加本地" to { pickLocalBook() },
+        // 本地导入入口暂停，文件选择与导入底层功能保留。
         "更新目录" to { refreshShelfTocs() },
         "布局设置" to { showShelfLayoutSheet() },
         // legado 的「书架管理」是书架自身的批量管理页；我们对应的是缓存管理。

@@ -24,10 +24,15 @@ fun main() {
     check("top boundary clamps", motion.target == 0f)
     check("zero duration completes immediately", CrownMotion(0).also { it.add(0, 10, 5f, 0) }.let { it.frame(10, 0) == 5 && !it.running })
 
-    check("rotary source selects SCROLL", CrownMotion.delta(true, 9f, 2f, 60f) == -120f)
-    check("rotary zero SCROLL falls back to VSCROLL", CrownMotion.delta(true, 2f, 0f, 60f) == -120f)
-    check("non-rotary uses VSCROLL", CrownMotion.delta(false, 2f, 9f, 60f) == -120f)
-    check("non-finite input is ignored", CrownMotion.delta(false, Float.NaN, 0f, 60f) == 0f)
+    check("rotary source selects SCROLL", CrownMotion.delta(true, 9f, 2f, 5f) == -10f)
+    check("rotary zero SCROLL falls back to VSCROLL", CrownMotion.delta(true, 2f, 0f, 5f) == -10f)
+    check("non-rotary uses VSCROLL", CrownMotion.delta(false, 2f, 9f, 5f) == -10f)
+    check("step at upper boundary is unchanged", CrownMotion.delta(true, 9f, 2f, 10f) == -20f)
+    check("legacy step 60 clamps to 10", CrownMotion.delta(true, 9f, 2f, 60f) == -20f)
+    check("zero step is ignored", CrownMotion.delta(true, 9f, 2f, 0f) == 0f)
+    check("negative step is ignored", CrownMotion.delta(true, 9f, 2f, -5f) == 0f)
+    check("NaN step is ignored", CrownMotion.delta(true, 9f, 2f, Float.NaN) == 0f)
+    check("non-finite input is ignored", CrownMotion.delta(false, Float.NaN, 0f, 5f) == 0f)
 
     if (failures == 0) println("All checks passed") else kotlin.system.exitProcess(1)
 }

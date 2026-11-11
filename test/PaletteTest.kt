@@ -1,10 +1,9 @@
 /**
  * 主题配色表自检。
  *
- * 六套值是从 legado-novel 的 Compose 色方案里抠出来的字面量，搬错了不会编译报错，
- * 只会在表盘上变成一片看不清的灰。这里用可算的指标兜住两件事：
- *   ① surface1..4 必须逐级抬升 —— 抄错一条，卡片与底色就分不开；
- *   ② 正文与次要文字必须够对比 —— 深色底上的浅字最容易踩这个坑。
+ * 原有主题保持兼容，新增六套深浅主题按预览基色回归。
+ * 深色层级逐级变亮，浅色层级逐级变暗。
+ * 正文、次要文字、按钮及容器分别校验对比度。
  */
 import com.watchdl.core.Palette
 
@@ -31,12 +30,30 @@ fun main() {
     }
 
     println("[Palette] 表结构")
-    check("至少 4 套", Palette.all.size >= 4, "只有 ${Palette.all.size} 套")
+    val legacyIds = setOf("inkgreen", "yuuka", "elink", "mujika", "gr", "phoebe", "sora")
+    val previewThemes = listOf(
+        Triple("duskblue", "暮蓝书签", 0xFF101B2B.toInt()),
+        Triple("warmpaper", "暖纸灰黑", 0xFFF2EFE7.toInt()),
+        Triple("amberblack", "曜黑琥珀", 0xFF0C0C0D.toInt()),
+        Triple("violetmist", "紫雾星页", 0xFF1C1629.toInt()),
+        Triple("seasalt", "海盐晨光", 0xFFE9F1F1.toInt()),
+        Triple("terracotta", "赤陶夜读", 0xFF241715.toInt()),
+    )
+    val newIds = previewThemes.map { it.first }.toSet()
+    val lightIds = setOf("warmpaper", "seasalt")
+    check("保留七套旧主题并新增六套", Palette.all.size == 13, "共 ${Palette.all.size} 套")
+    check("旧主题 ID 仍能解析", legacyIds.all { Palette.find(it).id == it })
+    check("默认暖纸灰黑", Palette.DEFAULT_ID == "warmpaper")
+    for ((id, name, surface) in previewThemes) {
+        val p = Palette.find(id)
+        check("$name 可按 ID 切换", p.id == id && p.name == name)
+        check("$name 保留预览底色", p.surface == surface)
+    }
     check("id 唯一", Palette.all.map { it.id }.toSet().size == Palette.all.size,
         Palette.all.joinToString { it.id })
     check("name 非空", Palette.all.all { it.name.isNotBlank() })
     check("默认色在表内", Palette.all.any { it.id == Palette.DEFAULT_ID }, Palette.DEFAULT_ID)
-    check("默认就是表头", Palette.all[0].id == Palette.DEFAULT_ID)
+    check("默认解析为暖纸", Palette.find(null).id == "warmpaper")
     check("认不出 id 回默认", Palette.find("no-such-id").id == Palette.DEFAULT_ID)
     check("null 回默认", Palette.find(null).id == Palette.DEFAULT_ID)
     check("认得出的原样返回", Palette.find("sora").id == "sora")
@@ -45,8 +62,9 @@ fun main() {
     for (p in Palette.all) {
         val surfaces = listOf(p.surface, p.surface1, p.surface2, p.surface3, p.surface4)
         val lums = surfaces.map { lum(it) }
-        val mono = lums.zipWithNext().all { (a, b) -> b >= a }
-        check("${p.name} surface1..4 逐级抬升", mono,
+        val light = p.id in lightIds
+        val mono = lums.zipWithNext().all { (a, b) -> if (light) b < a else b > a }
+        check("${p.name} surface1..4 ${if (light) "逐级变暗" else "逐级变亮"}", mono,
             lums.joinToString(" ") { "%.3f".format(it) })
 
         // MD3 正文对比度下限 4.5:1
@@ -64,6 +82,20 @@ fun main() {
         // 报错红不能和底色混
         val cErr = contrast(p.error, p.surface)
         check("${p.name} 错误色可见 ≥3.0", cErr >= 3.0, "%.2f".format(cErr))
+        if (p.id in newIds) {
+            val bodyMin = surfaces.minOf { contrast(p.onSurface, it) }
+            check("${p.name} 所有层级正文 ≥4.5", bodyMin >= 4.5, "%.2f".format(bodyMin))
+            check("${p.name} 小字号次要文字 ≥4.5", cSub >= 4.5, "%.2f".format(cSub))
+            val primaryText = contrast(p.onPrimaryContainer, p.primaryContainer)
+            check("${p.name} 主容器文字 ≥4.5", primaryText >= 4.5, "%.2f".format(primaryText))
+            val secondaryText = contrast(p.onSecondaryContainer, p.secondaryContainer)
+            check("${p.name} 次容器文字 ≥4.5", secondaryText >= 4.5, "%.2f".format(secondaryText))
+            check("${p.name} 深浅文字方向匹配", (lum(p.onSurface) < lum(p.surface)) == light)
+            val opaque = listOf(p.primary, p.onPrimary, p.primaryContainer, p.onPrimaryContainer,
+                p.secondaryContainer, p.onSecondaryContainer, p.onSurface, p.onSurfaceVariant,
+                p.outline, p.outlineVariant, p.error) + surfaces
+            check("${p.name} 色角色均不透明", opaque.all { (it ushr 24) == 255 })
+        }
     }
 
     if (bad > 0) { println("\nPaletteTest: $bad 项不通过"); kotlin.system.exitProcess(1) }

@@ -65,8 +65,27 @@ fun main() {
     // 书架不挂返回，搜索入口在标题行右端。
     val shelf = File(roots[0]).readText()
     check("书架没有返回箭头", !shelf.contains("Widgets.topBar("))
-    check("书架有搜索入口", shelf.contains("askKeyword()"))
-    check("书架有 ⋮ 菜单", shelf.contains("showShelfMenu()"))
+    // 只检查 showShelf 的头栏调用，不把保留的菜单函数或书籍行菜单当成头栏事件。
+    val showShelfStart = shelf.indexOf("internal fun MainActivity.showShelf(")
+    val showShelfBody = if (showShelfStart >= 0)
+        shelf.substring(showShelfStart).substringBefore("\ninternal fun ") else ""
+    val headerStart = showShelfBody.indexOf("Widgets.headerRow(")
+    val shelfHeader = if (headerStart >= 0) {
+        val call = showShelfBody.substring(headerStart)
+        var depth = 0
+        var end = -1
+        for (i in call.indexOf('(') until call.length) {
+            if (call[i] == '(') depth++
+            if (call[i] == ')' && --depth == 0) { end = i + 1; break }
+        }
+        if (end >= 0) call.substring(0, end) else ""
+    } else ""
+    check("书架头栏调用可定位", shelfHeader.isNotEmpty())
+    check("书架头栏有搜索入口", shelfHeader.contains("\"search\" to") &&
+        shelfHeader.contains("askKeyword()"))
+    check("书架头栏不挂 More 事件", shelfHeader.isNotEmpty() &&
+        !Regex("\\\"more\\\"\\s*to", RegexOption.IGNORE_CASE).containsMatchIn(shelfHeader) &&
+        !shelfHeader.contains("showShelfMenu"))
 
     // 四个根入口分布在三个文件；下载与设置共用一个文件。
     check("发现页不挂返回", !File(roots[1]).let { p ->

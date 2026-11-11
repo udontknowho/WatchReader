@@ -39,7 +39,7 @@ import kotlin.concurrent.thread
 
 /** 表冠每格位移的可调区间（px）。设置页滑杆与读档夹取共用同一对数。 */
 internal const val CROWN_STEP_MIN = 0f
-internal const val CROWN_STEP_MAX = 30f
+internal const val CROWN_STEP_MAX = 10f
 
 /**
  * 主界面。按 `ui/md3-final.html` 的定稿实现（189 × 248 dp）。
@@ -65,6 +65,8 @@ class MainActivity : Activity() {
     internal val multi: MultiSource get() = multiCache ?: buildMulti().also { multiCache = it }
 
     private fun buildMulti(): MultiSource {
+        // 搜索也必须铺底，不能依赖用户先打开本地书源页。
+        extractAssets()
         DeviceRegister.init(File(filesDir, "fanqie"))
         val list = mutableListOf<MultiSource.NamedSource>()
         runCatching { list += MultiSource.NamedSource("番茄", FanqieApp(DeviceRegister.get())) }
@@ -315,6 +317,9 @@ class MainActivity : Activity() {
         returnStack.remember(ReturnPoint(saved, body?.scrollY ?: 0, hitsWinStart, tocWinStart))
     }
 
+    /** 替换净化等子页共用返回入口，恢复阅读快照而非跳到设置根页。 */
+    internal fun returnToScreen() = goBackToPrevious()
+
     /** 回到进来的那一屏；没有记录就回首页。 */
     internal fun goBackToPrevious() {
         val point = returnStack.removeLastOrNull()
@@ -332,6 +337,7 @@ class MainActivity : Activity() {
             is Screen.Hits -> showHits(s.keyword, s.all, offset = s.offset, batch = s.searchedSources, replay = true)
             is Screen.Toc -> showToc(s.info, s.src)
             is Screen.Reader -> showReader(s.info, s.index, s.text, s.src)
+            is Screen.ReaderSettings -> showReaderSettings(s.info, s.index, s.text, s.src)
             is Screen.Market -> showMarket(s.page, s.hits)
             is Screen.Sources -> showSources()
             is Screen.Progress -> showProgress(s.info)
@@ -433,11 +439,9 @@ class MainActivity : Activity() {
     /**
      * 表冠灵敏度：每格位移（px）。表冠一格系统只给 1 个单位，必须放大才看得出。
      *
-     * 默认给 12：屏是 378 × 496 px、正文视口约 432 px，12 px 一格约 2.8% 一屏，
-     * 一次轻转（系统常拆成 5–10 个事件）也就十几到二十几个百分点，不至于一滑一大截。
-     * 上限 30 是实测上限，再往上轻转一下就过半屏，没有可用区间。
+     * 默认每格 8 px，最大 10 px；旧存档在读取时统一夹取。
      */
-    internal var crownStep = 12f
+    internal var crownStep = 8f
 
     /** 表冠跟手时长（ms）。越短越跟手，太短会抖。 */
     internal var crownGlide = 50
@@ -467,9 +471,8 @@ class MainActivity : Activity() {
         readerSize = p.getFloat("size", Md3.FS_READ)
         readerSpacing = p.getFloat("spacing", 1.75f)
         readerBackground = p.getInt("bg", Color.rgb(20, 18, 24))
-        // 旧存档里可能是 60 甚至更大（那时滑杆上限 200）：夹回 0–30，
-        // 否则滑杆位置会顶在右端、显示值与实际手感对不上。
-        crownStep = p.getFloat("crownStep", 12f).coerceIn(CROWN_STEP_MIN, CROWN_STEP_MAX)
+        // 旧档包括原默认 12 px，统一夹回 0–10 px。
+        crownStep = p.getFloat("crownStep", 8f).coerceIn(CROWN_STEP_MIN, CROWN_STEP_MAX)
         crownGlide = p.getInt("crownGlide", 50).coerceIn(0, 200)
     }
 
@@ -630,11 +633,11 @@ class MainActivity : Activity() {
      * 瓶颈是单章请求延迟，并发直接乘上去。各站限流强度差别很大，所以交给用户选。
      */
     internal fun lanes(): Int =
-        getSharedPreferences("reader", MODE_PRIVATE).getInt("lanes", DownloadService.DEFAULT_LANES)
+        getSharedPreferences("reader", MODE_PRIVATE).getInt("lanes", DownloadService.DEFAULT_LANES).coerceIn(1, 16)
 
     internal fun pickLanes() {
         val cur = lanes()
-        val items = listOf(1, 2, 3, 4, 6, 8).map { n ->
+        val items = (1..16).map { n ->
             (if (n == cur) "$n 线程（当前）" else "$n 线程") to {
                 getSharedPreferences("reader", MODE_PRIVATE).edit().putInt("lanes", n).apply()
                 toast("下载线程：$n")
@@ -1108,14 +1111,14 @@ class MainActivity : Activity() {
             })
             col.addView(head)
         }
-        // 列表锚点必须在过滤头之后取：前面每加一个子项，下标就往后错一位。
-        val listAnchor = col.childCount
         if (filterHits == null && base > 0) {
             col.addView(Widgets.button(this, "↑ 上面还有 $base 章", "text") {
                 tocWinStart = (base - TOC_WINDOW).coerceAtLeast(0)
                 showToc(info, useSrc)
             })
         }
+        // 过滤头与上一窗口按钮均在章节之前，锚点必须在两者之后取。
+        val listAnchor = col.childCount
         for (i in shown) {
             val ch = info.chapters[i]
             val st = job?.statuses?.get(i)
@@ -1318,11 +1321,12 @@ class MainActivity : Activity() {
      * 这与手表外的 e2e 逻辑一致（e2e 会逐个试到能用为止）。
      */
     internal fun loadToc(name: String, author: String, candidates: List<BookHit>, tried: Int = 0,
-                         swappingFrom: BookInfo? = null, failures: List<String> = emptyList()) {
+                         swappingFrom: BookInfo? = null, failures: List<String> = emptyList(),
+                         readAfterLoad: Boolean = false) {
         val valid = sameBookCandidates(BookInfo("", name, author, emptyList()), candidates)
         val hit = valid.getOrNull(tried)
         if (hit == null) {
-            showTocFailed(name, valid, failures, swappingFrom)
+            showTocFailed(name, valid, failures, swappingFrom, readAfterLoad)
             return
         }
         root.removeAllViews()
@@ -1396,7 +1400,7 @@ class MainActivity : Activity() {
                         oldFavorite?.let { shelfStore().replaceSource(it.shelfId, full, hit.sourceName, valid) }
                     }
                     if (saved.isFailure) {
-                        showTocFailed(name, valid, failures + "收藏保存失败：${saved.exceptionOrNull()?.message}", swappingFrom)
+                        showTocFailed(name, valid, failures + "收藏保存失败：${saved.exceptionOrNull()?.message}", swappingFrom, readAfterLoad)
                         return@bg
                     }
                     saveProgress(full, index)
@@ -1411,10 +1415,14 @@ class MainActivity : Activity() {
                     if (shelfStore().find(full) != null) shelfStore().add(full, hit.sourceName, valid)
                 }.onFailure { toast("收藏更新失败：${it.message}") }
                 detailCandidates = valid
-                showToc(full, pair.first)
+                if (readAfterLoad) {
+                    ReaderUi.fromShelf = false
+                    tocSrc = pair.first
+                    preview(full, readProgress(full).coerceIn(0, full.chapters.lastIndex), src = pair.first)
+                } else showToc(full, pair.first)
             } else {
                 val reason = "${hit.sourceName}：${res.exceptionOrNull()?.message ?: "目录为空"}"
-                loadToc(name, author, valid, tried + 1, swappingFrom, failures + reason)
+                loadToc(name, author, valid, tried + 1, swappingFrom, failures + reason, readAfterLoad)
             }
         }
     }
@@ -1427,7 +1435,7 @@ class MainActivity : Activity() {
      * 返回键自己会回到搜索结果。
      */
     private fun showTocFailed(name: String, candidates: List<BookHit>, failures: List<String> = emptyList(),
-                              swappingFrom: BookInfo? = null) {
+                              swappingFrom: BookInfo? = null, readAfterLoad: Boolean = false) {
         // 换源全失败：把「回原章」的残值清掉，否则下一次正常进目录会被它劫持。
         ReaderUi.swapReturnTitle = ""
         ReaderUi.swapReturnAt = 0
@@ -1445,7 +1453,7 @@ class MainActivity : Activity() {
             Md3.FS_SM, Md3.error))
         col.addView(Widgets.button(this, "换源重试", "filled") {
             if (candidates.isNotEmpty()) loadToc(name, candidates.first().author, candidates,
-                swappingFrom = swappingFrom) else toast("没有可重试的源")
+                swappingFrom = swappingFrom, readAfterLoad = readAfterLoad) else toast("没有可重试的源")
         }, Md3.lpDp(this, null, Md3.BTN).apply { topMargin = Md3.dp(this@MainActivity, Md3.GAP) })
         col.addView(Widgets.button(this, "返回搜索", "text", topMarginPx = Md3.dp(this, Md3.GAP)) {
             goBackToPrevious()
@@ -2256,7 +2264,7 @@ class MainActivity : Activity() {
             Screen.Records -> goBackToPrevious()
             Screen.Cache -> showSettingsRoot()
             Screen.Files -> showSettingsRoot()
-            Screen.Replace -> showSettingsRoot()
+            Screen.Replace -> returnToScreen()
             Screen.Logs -> showSettingsRoot()
             Screen.About -> showSettingsRoot()
             is Screen.Swap -> goBackToPrevious()
@@ -2324,7 +2332,7 @@ class MainActivity : Activity() {
      * 2. **失败要重试、不能静默** —— 以前包在 `runCatching` 里，
      *    解压失败时界面只是安静地显示 0 条，看不出原因。
      */
-    internal fun extractAssets() {
+    internal fun extractAssets() = synchronized(assetExtractLock) {
         copyAsset("charset.json", File(filesDir, "charset.json"))
         val srcDir = File(filesDir, "sources").apply { mkdirs() }
         val names = runCatching { assets.list("sources")?.toList() }.getOrNull().orEmpty()
@@ -2356,12 +2364,16 @@ class MainActivity : Activity() {
         }
         repeat(2) { attempt ->
             val ok = runCatching {
-                assets.open(assetPath).use { i ->
-                    // 先写临时文件再改名：中途被杀不会留下半个文件冒充成功
-                    val tmp = File(dest.parentFile, dest.name + ".tmp")
-                    tmp.outputStream().use { o -> i.copyTo(o) }
+                // 独立暂存文件不与其他写入方共用 .tmp；失败只清暂存，不删除有效目标。
+                val tmp = File.createTempFile(dest.name + ".asset-", ".tmp", dest.parentFile)
+                try {
+                    assets.open(assetPath).use { i ->
+                        tmp.outputStream().use { o -> i.copyTo(o) }
+                    }
                     if (tmp.length() == 0L) error("复制出的文件为空")
-                    if (!tmp.renameTo(dest)) { dest.delete(); tmp.renameTo(dest) }
+                    if (!tmp.renameTo(dest)) error("改名失败，保留原文件")
+                } finally {
+                    tmp.delete()
                 }
                 true
             }.getOrElse { false }
@@ -2379,6 +2391,9 @@ class MainActivity : Activity() {
         (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
 
     private companion object {
+        /** 跨 Activity 实例串行铺底，检查目标与复制必须处于同一次锁内。 */
+        val assetExtractLock = Any()
+
         /** 一次搜索最多跑几个源。源太多时后面的根本轮不到，只会被超时记成失败。 */
         const val MAX_SOURCES = 15
 

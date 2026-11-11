@@ -9,6 +9,7 @@ import com.watchdl.core.BookInfo
 import com.watchdl.core.BookSource
 import com.watchdl.core.ReaderStyle
 import com.watchdl.core.Screen
+import com.watchdl.ui.my.showReplace
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
 
@@ -156,7 +157,7 @@ internal fun MainActivity.showReaderSettings(
             val pv = Md3.text(this, PREVIEW_TEXT, Md3.FS_SM, Md3.onSurfaceVariant).apply {
                 setPadding(Md3.dp(this@showReaderSettings, 8), Md3.dp(this@showReaderSettings, 7),
                     Md3.dp(this@showReaderSettings, 8), Md3.dp(this@showReaderSettings, 7))
-                background = Md3.bg(Md3.surface3, Md3.R_ITEM.toFloat())
+                background = Md3.bg(readerBackground, Md3.R_ITEM.toFloat())
             }
             styleBody(pv, PREVIEW_TEXT)
             g.addView(pv, LinearLayout.LayoutParams(
@@ -226,6 +227,11 @@ internal fun MainActivity.showReaderSettings(
 
         // ── 菜单 ───────────────────────────────────────────
         card("菜单") { g ->
+            g.addView(
+                Widgets.groupItem(this, "替换净化", "管理正文替换规则",
+                    onClick = { rememberReturn(); showReplace() }),
+                Md3.lpDp(this, null, Md3.ITEM_TALL),
+            )
             g.addView(
                 Widgets.groupItem(this, "工具格按钮",
                     ReaderUi.tools.joinToString(" · ") { readerToolTitle(it) },

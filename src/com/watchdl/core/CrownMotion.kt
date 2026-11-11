@@ -42,8 +42,9 @@ class CrownMotion(private val durationMs: Int) {
     companion object {
         /** 旋转编码器使用 SCROLL；旧设备和鼠标仍使用 VSCROLL，避免双轴重复累计。 */
         fun delta(rotary: Boolean, vertical: Float, scroll: Float, step: Float): Float {
+            if (!step.isFinite() || step <= 0f) return 0f
             val axis = if (rotary && scroll != 0f && scroll.isFinite()) scroll else vertical
-            val value = -axis * step
+            val value = -axis * step.coerceAtMost(10f)
             return if (value.isFinite()) value else 0f
         }
     }

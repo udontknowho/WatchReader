@@ -89,6 +89,22 @@ private const val FLING_SCREEN_PER_SEC = 3f
 /** 位移到屏宽的几分之一就提前认领手势，不必等方向比攒够。 */
 private const val EARLY_CLAIM_DIVISOR = 8f
 
+/** 命中滑条或其控制行后，整轮触摸交给滑条和加减按钮。 */
+private fun hitsSliderControls(view: View, x: Int, y: Int): Boolean {
+    val bounds = android.graphics.Rect()
+    if (!view.getGlobalVisibleRect(bounds) || !bounds.contains(x, y)) return false
+    if (view is android.widget.SeekBar) return true
+    if (view !is ViewGroup) return false
+    // sliderRow 的加减按钮与 SeekBar 同属控制行，包含禁用的边界按钮。
+    for (i in 0 until view.childCount) {
+        if (view.getChildAt(i) is android.widget.SeekBar) return true
+    }
+    for (i in view.childCount - 1 downTo 0) {
+        if (hitsSliderControls(view.getChildAt(i), x, y)) return true
+    }
+    return false
+}
+
 internal fun MainActivity.handleTabSwipe(ev: MotionEvent): Boolean {
     val active = tabActive
     if (active !in 0..3) return false
@@ -97,11 +113,11 @@ internal fun MainActivity.handleTabSwipe(ev: MotionEvent): Boolean {
         MotionEvent.ACTION_DOWN -> {
             swiping = true
             claimed = false
-            gaveUp = false
+            gaveUp = hitsSliderControls(root, ev.rawX.toInt(), ev.rawY.toInt())
             startX = ev.rawX
             startY = ev.rawY
             tracker?.recycle()
-            tracker = VelocityTracker.obtain().also { it.addMovement(ev) }
+            tracker = if (gaveUp) null else VelocityTracker.obtain().also { it.addMovement(ev) }
         }
 
         MotionEvent.ACTION_MOVE -> {

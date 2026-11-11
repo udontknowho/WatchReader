@@ -141,7 +141,7 @@ class DownloadService : Service() {
 
     /** 用户选的并发线程数。作业开始时读一次，改设置不影响正在跑的作业。 */
     private fun lanes(): Int =
-        getSharedPreferences("reader", MODE_PRIVATE).getInt("lanes", DEFAULT_LANES)
+        getSharedPreferences("reader", MODE_PRIVATE).getInt("lanes", DEFAULT_LANES).coerceIn(1, 16)
 
     override fun onBind(intent: Intent?): IBinder? = null
 

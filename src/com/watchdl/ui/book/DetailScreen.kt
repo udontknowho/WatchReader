@@ -177,18 +177,18 @@ internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
     // 书架卡的文案与图标随状态走（legado `BookInfoActions` 的 inBookshelf 分叉)。
     val inShelf = shelfStore().find(info) != null
     val shelf = detailShelfAction(inShelf)
-    val acts = listOf(
-        ActCard(shelf.glyph, shelf.label, shelf.desc) {
+    val shelfAct = ActCard(shelf.glyph, shelf.label, shelf.desc) {
             if (inShelf) confirmRemoveShelf(info, src) else {
                 runCatching { shelfStore().add(info, srcName(src), candidates) }
                     .onSuccess { toast("已加入书架"); showDetail(info, src) }
                     .onFailure { toast("收藏失败：${it.message}") }
             }
-        },
+        }
+    val acts = listOf(
         // legado 的目录卡图标是 FormatListBulleted，我们对应 `list`。
         ActCard("list", "查看目录", "查看目录") { detailOpenToc(info, src) },
         ActCard("swap", "换源", "换源") { rememberReturn(); showSwap(info, src) },
-        ActCard("download", "缓存章节", "下载免费章节") {
+        ActCard("download", "下载免费章", "下载免费章节") {
             if (info.chapters.isEmpty()) detailOpenToc(info, src) else { rememberReturn(); startDownload(info) }
         },
     )
@@ -204,6 +204,11 @@ internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
             ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, 46))
             .apply { bottomMargin = Md3.dp(this@showDetail, Md3.GAP) })
     }
+
+    col.addView(actionCard(shelfAct.glyph, shelfAct.label, shelfAct.desc, shelfAct.act),
+        LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(this, 46)).apply {
+            bottomMargin = Md3.dp(this@showDetail, Md3.GAP)
+        })
 
     // ── 在读 / 最新 / 共 N 章（legado `BookInfoSummary` 的三行）──
     // legado 的层级：第一行 titleMedium 加粗（onSurface）、第二行 bodyMedium 次级色、
@@ -294,16 +299,9 @@ internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
     root.addView(body, Md3.lpWeight(1f))
 
     // ── 底部「阅读」：照 legado 的 FAB，点一下直接读上次那章 ──
-    // 还没有目录时不写「取目录并阅读」：这条路径只到目录屏，读到第一章要等用户挑章，
-    // 写「并阅读」是承诺了没做的事。
-    val go = Widgets.button(this, if (info.chapters.isEmpty()) "取目录" else "阅读", "filled") {
-        if (info.chapters.isEmpty()) detailOpenToc(info, src)
-        else {
-            ReaderUi.fromShelf = false
-            rememberReturn()
-            tocSrc = src ?: sourceForBook(info)
-            preview(info, if (readAt < info.chapters.size) readAt else 0)
-        }
+    // 空目录也保留阅读入口，取回章节后直接进入正文。
+    val go = Widgets.button(this, "阅读", "filled") {
+        detailOpenToc(info, src, readAfterLoad = true)
     }
     go.layoutParams = Md3.lpDp(this, null, Md3.BTN).apply {
         leftMargin = Md3.dp(this@showDetail, Md3.PAD)
@@ -404,8 +402,17 @@ private fun MainActivity.refreshToc(info: BookInfo, src: BookSource?) {
  * 从搜索结果进来时手上只有一个命中项，没有章节表 —— 走 [loadToc] 那条老路
  * （逐源重试 + 先验一章正文），而不是直接开一张空目录。
  */
-private fun MainActivity.detailOpenToc(info: BookInfo, src: BookSource?) {
-    if (info.chapters.isNotEmpty()) { rememberReturn(); showToc(info, src); return }
+private fun MainActivity.detailOpenToc(info: BookInfo, src: BookSource?, readAfterLoad: Boolean = false) {
+    fun open(full: BookInfo, resolved: BookSource?) {
+        DetailUi.tocFailed = false
+        rememberReturn()
+        if (readAfterLoad) {
+            ReaderUi.fromShelf = false
+            tocSrc = resolved
+            preview(full, readProgress(full).coerceIn(0, full.chapters.lastIndex), src = resolved)
+        } else showToc(full, resolved)
+    }
+    if (info.chapters.isNotEmpty()) { open(info, src ?: sourceForBook(info)); return }
     val resolved = src ?: sourceForBook(info)
     if (resolved != null && info.bookId.isNotBlank()) {
         toast("正在取目录…")
@@ -417,12 +424,13 @@ private fun MainActivity.detailOpenToc(info: BookInfo, src: BookSource?) {
                     showDetail(info, src)
                     return@onSuccess
                 }
-                val full = got.copy(name = got.name.ifBlank { info.name }, author = got.author.ifBlank { info.author })
+                val full = got.copy(name = got.name.ifBlank { info.name }, author = got.author.ifBlank { info.author },
+                    intro = got.intro.ifBlank { info.intro })
+                if (full.truncated) toast("目录可能不完整（${full.chapters.size} 章），可稍后更新目录")
                 if (shelfStore().find(info) != null) runCatching {
                     shelfStore().add(full, srcName(resolved), detailCandidates)
                 }.onFailure { toast("收藏更新失败：${it.message}") }
-                rememberReturn()
-                showToc(full, resolved)
+                open(full, resolved)
             }.onFailure { DetailUi.tocFailed = true; toast("目录失败：${it.message}"); showDetail(info, src) }
         }
         return
@@ -435,7 +443,7 @@ private fun MainActivity.detailOpenToc(info: BookInfo, src: BookSource?) {
         return
     }
     rememberReturn()
-    loadToc(info.name, info.author, candidates)
+    loadToc(info.name, info.author, candidates, readAfterLoad = readAfterLoad)
 }
 
 /** 书源名。legado 源有显示名，番茄源没有，单独给一个。 */

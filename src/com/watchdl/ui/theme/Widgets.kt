@@ -86,7 +86,7 @@ object Widgets {
      * 一行「标签 + 当前值 + 滑杆」。
      *
      * 档位式选项（小/中/大）粒度太粗，字号差一档就过大。滑杆给连续值。
-     * [steps] 为 0 表示无级。
+     * [steps] 是区间数；0 使用 0.01 单位档位。按钮每次移动一档。
      */
     fun sliderRow(
         ctx: Context,
@@ -114,34 +114,87 @@ object Widgets {
         val head = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
         head.addView(Md3.text(ctx, label, Md3.FS_SM, Md3.onSurfaceVariant),
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        val valText = Md3.text(ctx, fmt(value), Md3.FS_SM, Md3.primary)
+        require(min.isFinite() && max.isFinite() && max > min) { "滑条范围无效" }
+        // progress 直接代表合法档位，显示、拖动和按钮共用同一套量化。
+        val ticks = if (steps > 0) steps else Math.round((max - min) * 100).coerceAtLeast(1)
+        fun valueAt(index: Int): Float = when (index) {
+            0 -> min
+            ticks -> max
+            else -> (min.toDouble() + (max.toDouble() - min) * index / ticks).toFloat()
+        }
+        fun indexOf(v: Float): Int = Math.round(
+            ((if (v.isFinite()) v else min).coerceIn(min, max) - min).toDouble() /
+                (max.toDouble() - min) * ticks).toInt().coerceIn(0, ticks)
+        val valText = Md3.text(ctx, fmt(valueAt(indexOf(value))), Md3.FS_SM, Md3.primary)
         head.addView(valText)
         row.addView(head)
 
+        val controls = Md3.row(ctx)
+        val minus = Md3.text(ctx, "−", Md3.FS_LG, Md3.primary)
+        val plus = Md3.text(ctx, "+", Md3.FS_LG, Md3.primary)
         val bar = android.widget.SeekBar(ctx).apply {
-            this.max = ((max - min) * 100).toInt()
-            progress = ((value - min) * 100).toInt()
-            if (steps > 0) {
-                // SeekBar 的 keyProgressIncrement 只在触屏上按步进吸附；
-                // 这里靠 onChange 自己取整，避免两套吸附逻辑打架。
-                keyProgressIncrement = (((max - min) * 100 / steps).toInt()).coerceAtLeast(1)
+            this.max = ticks
+            progress = indexOf(value)
+            keyProgressIncrement = 1
+            minimumHeight = Md3.dp(ctx, 48)
+            splitTrack = false
+            progressTintList = android.content.res.ColorStateList.valueOf(Md3.primary)
+            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Md3.outlineVariant)
+            thumb = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.OVAL
+                setColor(Md3.primary)
+                setSize(Md3.dp(ctx, 28), Md3.dp(ctx, 28))
             }
-            setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: android.widget.SeekBar?, p: Int, fromUser: Boolean) {
-                    val raw = min + p / 100f
-                    val v = if (steps > 0) {
-                        // 按步取整，保证落到合法档位
-                        val q = Math.round((raw - min) / ((max - min) / steps))
-                        min + q * ((max - min) / steps)
-                    } else raw
-                    valText.text = fmt(v)
-                    if (fromUser) onChange(v)
+            thumbOffset = Md3.dp(ctx, 14)
+            contentDescription = label
+            // 全局横滑判定也应按命中子树排除 SeekBar；父 ViewGroup 走标准拦截协议。
+            setOnTouchListener { v, event ->
+                when (event.actionMasked) {
+                    android.view.MotionEvent.ACTION_DOWN -> v.parent?.requestDisallowInterceptTouchEvent(true)
+                    android.view.MotionEvent.ACTION_UP,
+                    android.view.MotionEvent.ACTION_CANCEL -> v.parent?.requestDisallowInterceptTouchEvent(false)
                 }
-                override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
-                override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {}
-            })
+                false
+            }
         }
-        row.addView(bar, LinearLayout.LayoutParams(
+        fun paint(index: Int) {
+            valText.text = fmt(valueAt(index))
+            minus.isEnabled = index > 0
+            plus.isEnabled = index < ticks
+            minus.alpha = if (minus.isEnabled) 1f else 0.35f
+            plus.alpha = if (plus.isEnabled) 1f else 0.35f
+        }
+        fun adjust(offset: Int) {
+            val next = (bar.progress + offset).coerceIn(0, ticks)
+            if (next != bar.progress) {
+                bar.progress = next
+                onChange(valueAt(next))
+            }
+        }
+        bar.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: android.widget.SeekBar?, p: Int, fromUser: Boolean) {
+                paint(p)
+                if (fromUser) onChange(valueAt(p))
+            }
+            override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {
+                sb?.parent?.requestDisallowInterceptTouchEvent(true)
+            }
+            override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {
+                sb?.parent?.requestDisallowInterceptTouchEvent(false)
+            }
+        })
+        listOf(minus to -1, plus to 1).forEach { (button, offset) ->
+            button.gravity = Gravity.CENTER
+            button.background = Md3.ripple(ctx, Md3.surface3, 16f)
+            button.contentDescription = "$label，${if (offset < 0) "减少" else "增加"}"
+            button.isClickable = true
+            button.setOnClickListener { adjust(offset) }
+        }
+        controls.addView(minus, LinearLayout.LayoutParams(Md3.dp(ctx, 40), Md3.dp(ctx, 48)))
+        controls.addView(bar, LinearLayout.LayoutParams(0, Md3.dp(ctx, 48), 1f))
+        controls.addView(plus, LinearLayout.LayoutParams(Md3.dp(ctx, 40), Md3.dp(ctx, 48)))
+        paint(bar.progress)
+        row.addView(controls, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ))
         if (lp != null) row.layoutParams = lp
@@ -749,6 +802,11 @@ object Widgets {
                 event.getAxisValue(android.view.MotionEvent.AXIS_VSCROLL),
                 event.getAxisValue(android.view.MotionEvent.AXIS_SCROLL), crownStep,
             )
+            // 关闭表冠时吞掉旋转事件，不能回落到 ScrollView 的默认滚动。
+            if (crownStep <= 0f) {
+                cancelCrownAnimation()
+                return true
+            }
             if (!delta.isFinite() || delta == 0f) return super.onGenericMotionEvent(event)
             onInputStart?.invoke()
             // 只在原生 fling 留有状态时终止一次，不对每个表冠事件重建原生惯性。

@@ -3,15 +3,14 @@ package com.watchdl.core
 /**
  * 主题配色表。
  *
- * 六套取值取自 legado-novel 的 `ui/theme/colorScheme` 目录（GPL-3.0），
- * 从每套 M3 的 40 个色角色里挑出本项目实际用到的 16 个。
+ * 原有六套取值取自 legado-novel 的 `ui/theme/colorScheme` 目录（GPL-3.0）。
+ * 新增六套以 `ui/theme-icon-six.html` 的五个预览色为基准，补齐容器与语义色。
  *
  * 放 core 而不是 ui/theme：这里全是 Int，不碰 Android API，
  * 纯 JVM 自检才能验对比度与层级（见 `test/PaletteTest.kt`）。
  * 装配到 `Md3` 的是 `ui/theme/Md3.applyPalette`。
  *
- * shortcut: 只做深色档与 6 套。要浅色档或更多套时在 [all] 里加一条 `Palette` 即可，
- * 调用方只认 id。
+ * 深浅主题均通过色角色装配，调用方只认 id。阅读背景独立存储，不随配色覆盖。
  */
 class Palette(
     val id: String,
@@ -22,7 +21,7 @@ class Palette(
     val onPrimaryContainer: Int,
     val secondaryContainer: Int,
     val onSecondaryContainer: Int,
-    /** 底色。surface1..4 逐级抬升，用于卡片、输入框、导航。 */
+    /** 底色。surface1..4 深色逐级变亮、浅色逐级变暗，用于卡片、输入框、导航。 */
     val surface: Int,
     val surface1: Int,
     val surface2: Int,
@@ -36,8 +35,8 @@ class Palette(
 ) {
     companion object {
 
-        /** 默认色。紫，与原写死的 MD3 基线色最接近。 */
-        const val DEFAULT_ID = "inkgreen"
+        /** 保留现有默认墨绿。新主题不覆盖已存储的主题与阅读背景。 */
+        const val DEFAULT_ID = "warmpaper"
 
         val all: List<Palette> = listOf(
             Palette(
@@ -119,9 +118,75 @@ class Palette(
                 outline = 0xFF8D9199.toInt(), outlineVariant = 0xFF43474E.toInt(),
                 error = 0xFFFFB4AB.toInt(),
             ),
+            Palette(
+                id = "duskblue", name = "暮蓝书签",
+                primary = 0xFFBBD8FF.toInt(), onPrimary = 0xFF16324F.toInt(),
+                primaryContainer = 0xFF294A6C.toInt(), onPrimaryContainer = 0xFFDCEAFF.toInt(),
+                secondaryContainer = 0xFF32445C.toInt(), onSecondaryContainer = 0xFFDCE7F7.toInt(),
+                surface = 0xFF101B2B.toInt(), surface1 = 0xFF17263A.toInt(), surface2 = 0xFF1E3046.toInt(),
+                surface3 = 0xFF293D54.toInt(), surface4 = 0xFF344A62.toInt(),
+                onSurface = 0xFFEDF3FF.toInt(), onSurfaceVariant = 0xFFAABDD5.toInt(),
+                outline = 0xFF889EB9.toInt(), outlineVariant = 0xFF435A73.toInt(),
+                error = 0xFFFFB4AB.toInt(),
+            ),
+            Palette(
+                id = "warmpaper", name = "暖纸灰黑",
+                primary = 0xFF586650.toInt(), onPrimary = 0xFFFFFFFF.toInt(),
+                primaryContainer = 0xFFF5D0C4.toInt(), onPrimaryContainer = 0xFF54251C.toInt(),
+                secondaryContainer = 0xFFDFCFB4.toInt(), onSecondaryContainer = 0xFF403326.toInt(),
+                surface = 0xFFF2EFE7.toInt(), surface1 = 0xFFECE9E0.toInt(), surface2 = 0xFFE5E1D6.toInt(),
+                surface3 = 0xFFDDD8CC.toInt(), surface4 = 0xFFD3CDBF.toInt(),
+                onSurface = 0xFF34342F.toInt(), onSurfaceVariant = 0xFF615F56.toInt(),
+                outline = 0xFF7D6957.toInt(), outlineVariant = 0xFFB7A68C.toInt(),
+                error = 0xFFB3261E.toInt(),
+            ),
+            Palette(
+                id = "amberblack", name = "曜黑琥珀",
+                primary = 0xFFEFBD76.toInt(), onPrimary = 0xFF402A0D.toInt(),
+                primaryContainer = 0xFF604319.toInt(), onPrimaryContainer = 0xFFFFDDB0.toInt(),
+                secondaryContainer = 0xFF493D30.toInt(), onSecondaryContainer = 0xFFF0DECB.toInt(),
+                surface = 0xFF0C0C0D.toInt(), surface1 = 0xFF181717.toInt(), surface2 = 0xFF242222.toInt(),
+                surface3 = 0xFF302C29.toInt(), surface4 = 0xFF3D3833.toInt(),
+                onSurface = 0xFFF2E8DB.toInt(), onSurfaceVariant = 0xFFB9AAA0.toInt(),
+                outline = 0xFFA18E7D.toInt(), outlineVariant = 0xFF54483D.toInt(),
+                error = 0xFFFFB4AB.toInt(),
+            ),
+            Palette(
+                id = "violetmist", name = "紫雾星页",
+                primary = 0xFFD4B9FA.toInt(), onPrimary = 0xFF3C245A.toInt(),
+                primaryContainer = 0xFF563D71.toInt(), onPrimaryContainer = 0xFFF0DDFF.toInt(),
+                secondaryContainer = 0xFF493B58.toInt(), onSecondaryContainer = 0xFFEBDDF5.toInt(),
+                surface = 0xFF1C1629.toInt(), surface1 = 0xFF261E34.toInt(), surface2 = 0xFF30253F.toInt(),
+                surface3 = 0xFF3C314C.toInt(), surface4 = 0xFF493D5B.toInt(),
+                onSurface = 0xFFF3EAFA.toInt(), onSurfaceVariant = 0xFFBEB0CE.toInt(),
+                outline = 0xFFA18DB5.toInt(), outlineVariant = 0xFF5B486E.toInt(),
+                error = 0xFFFFB4AB.toInt(),
+            ),
+            Palette(
+                id = "seasalt", name = "海盐晨光",
+                primary = 0xFF285F69.toInt(), onPrimary = 0xFFFFFFFF.toInt(),
+                primaryContainer = 0xFFB6DDE2.toInt(), onPrimaryContainer = 0xFF153F47.toInt(),
+                secondaryContainer = 0xFFC8DDE0.toInt(), onSecondaryContainer = 0xFF293F44.toInt(),
+                surface = 0xFFE9F1F1.toInt(), surface1 = 0xFFDFEBEB.toInt(), surface2 = 0xFFD4E3E4.toInt(),
+                surface3 = 0xFFC8DADD.toInt(), surface4 = 0xFFBBD0D4.toInt(),
+                onSurface = 0xFF20383D.toInt(), onSurfaceVariant = 0xFF455F65.toInt(),
+                outline = 0xFF5D787E.toInt(), outlineVariant = 0xFF99B5BA.toInt(),
+                error = 0xFFB3261E.toInt(),
+            ),
+            Palette(
+                id = "terracotta", name = "赤陶夜读",
+                primary = 0xFFEFB49B.toInt(), onPrimary = 0xFF48291E.toInt(),
+                primaryContainer = 0xFF6D4232.toInt(), onPrimaryContainer = 0xFFFFDBCA.toInt(),
+                secondaryContainer = 0xFF573C33.toInt(), onSecondaryContainer = 0xFFFFDDCD.toInt(),
+                surface = 0xFF241715.toInt(), surface1 = 0xFF30201C.toInt(), surface2 = 0xFF3C2722.toInt(),
+                surface3 = 0xFF49332C.toInt(), surface4 = 0xFF584037.toInt(),
+                onSurface = 0xFFFAE9DF.toInt(), onSurfaceVariant = 0xFFD0B0A3.toInt(),
+                outline = 0xFFB08D7F.toInt(), outlineVariant = 0xFF715044.toInt(),
+                error = 0xFFFF9FA8.toInt(),
+            ),
         )
 
         /** id 认不出来时回默认色，不抛。老存档的 id 作废不该让应用起不来。 */
-        fun find(id: String?): Palette = all.firstOrNull { it.id == id } ?: all[0]
+        fun find(id: String?): Palette = all.firstOrNull { it.id == id } ?: all.first { it.id == DEFAULT_ID }
     }
 }

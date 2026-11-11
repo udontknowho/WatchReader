@@ -5,14 +5,13 @@ import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.TextView
-import com.watchdl.CROWN_STEP_MAX
-import com.watchdl.CROWN_STEP_MIN
 import com.watchdl.MainActivity
 import com.watchdl.core.DevLog
 import com.watchdl.core.Palette
 import com.watchdl.core.ReaderStyle
 import com.watchdl.core.Screen
 import com.watchdl.ui.reader.ReaderUi
+import com.watchdl.ui.reader.readerInkFor
 import com.watchdl.ui.reader.loadReaderExtras
 import com.watchdl.ui.reader.saveReaderExtras
 import com.watchdl.ui.source.showSources
@@ -62,6 +61,10 @@ private const val LABEL_W_LONG = 58
  */
 internal fun MainActivity.showSettings(page: String = PAGE_MAIN) {
     setScreen(Screen.Settings(page))
+    // 子页不参与根栏横滑，不能沿用上一屏的 tabActive。
+    tabActive = -1
+    root.animate().cancel()
+    root.translationX = 0f
     root.removeAllViews()
     val title = when (page) {
         PAGE_THEME -> "外观"
@@ -203,7 +206,7 @@ private fun MainActivity.settingsRead(col: LinearLayout) {
     fun paintPreview() {
         preview.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, readerSize)
         preview.setLineSpacing(Md3.dp(this, 1).toFloat(), readerSpacing)
-        preview.setTextColor(if (Color.red(readerBackground) > 100) Color.rgb(28, 27, 31) else Md3.onSurface)
+        preview.setTextColor(readerInkFor(readerBackground))
         preview.background = Md3.bg(readerBackground, Md3.dp(this, 10).toFloat())
     }
 
@@ -252,14 +255,14 @@ private fun MainActivity.settingsRead(col: LinearLayout) {
             topMargin = Md3.dp(this@settingsRead, Md3.GAP)
         }
 
-        g.addView(Widgets.sliderRow(this, "字号", 11f, 26f, readerSize, 0,
+        g.addView(Widgets.sliderRow(this, "字号", 11f, 26f, readerSize, 150,
             { "%.1f sp".format(it) }) { v ->
             readerSize = v
             saveReaderPrefs(readerSize, readerSpacing, readerBackground)
             paintPreview()
         }, sliderLp())
 
-        g.addView(Widgets.sliderRow(this, "行距", 1.1f, 2.4f, readerSpacing, 0,
+        g.addView(Widgets.sliderRow(this, "行距", 1.1f, 2.4f, readerSpacing, 130,
             { "%.2f 倍".format(it) }) { v ->
             readerSpacing = v
             saveReaderPrefs(readerSize, readerSpacing, readerBackground)
@@ -288,17 +291,16 @@ private fun MainActivity.settingsRead(col: LinearLayout) {
  * 不套 legado 的列表形态：两个滑杆本身已经是最短路径。
  */
 private fun MainActivity.settingsCrown(col: LinearLayout) {
-    // 0–30 px。原来 20–200：上限 200 意味着轻转一格就过半屏，下限 20 实测仍然偏快。
-    // 现在整条都在可用区内，按 1 px 取档。0 是“表冠不滚动”，也留着 —— 有人就只用触摸。
-    col.addView(Widgets.sliderRow(this, "每格位移", CROWN_STEP_MIN, CROWN_STEP_MAX, crownStep,
-        30, { "%d px".format(it.toInt()) }) { v ->
+    // 0—10 px，按 1 px 取档。0 关闭表冠滚动，触摸仍可滚动。
+    col.addView(Widgets.sliderRow(this, "每格位移", 0f, 10f, crownStep,
+        10, { "%d px".format(it.toInt()) }) { v ->
         crownStep = v
         saveCrownPrefs()
     }, LinearLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
     ).apply { topMargin = Md3.dp(this@settingsCrown, Md3.GAP) })
 
-    col.addView(Widgets.sliderRow(this, "跟手时长", 0f, 200f, crownGlide.toFloat(), 0,
+    col.addView(Widgets.sliderRow(this, "跟手时长", 0f, 200f, crownGlide.toFloat(), 200,
         { if (it < 1f) "立即" else "%d ms".format(it.toInt()) }) { v ->
         crownGlide = v.toInt()
         saveCrownPrefs()

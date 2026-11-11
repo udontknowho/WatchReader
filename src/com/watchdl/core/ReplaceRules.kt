@@ -28,7 +28,7 @@ object ReplaceRuleStore {
     var file: File? = null
 
     /** scope 的合法取值。认不出的按 `text` 处理，见 [importJson]。 */
-    private val SCOPES = setOf("text", "title", "both")
+    private val SCOPES = setOf("text", "title", "both", "none")
 
     /** 编译结果缓存：pattern → 编译好的正则，失败存 null。 */
     private val regexCache = HashMap<String, Regex?>()
@@ -238,16 +238,21 @@ object ReplaceRuleStore {
      * 当前规则表。
      *
      * 读不到文件、或存档解析不出来，都退回默认表：功能默认可用，
-     * 而不是文件一坏就悄悄失效。空表也当解析失败 —— 没有规则等于没配。
+     * 而不是文件一坏就悄悄失效。合法空数组保留为空，允许用户清空。
      */
     fun list(): List<ReplaceRule> {
         val f = file
         cached?.let { if (cachedAt == f) return it }
         val parsed = if (f != null && f.isFile) {
             // 存档坏了不能让正文读不出来：解析失败就当没有自定义规则。
-            runCatching { parse(f.readText(Charsets.UTF_8)) }.getOrNull()
+            runCatching {
+                val raw = f.readText(Charsets.UTF_8)
+                val rules = parse(raw)
+                if (rules.isEmpty() && raw.trim() != "[]") null else rules
+            }.getOrNull()
         } else null
-        val out = if (parsed.isNullOrEmpty()) defaults() else parsed
+        // 合法空数组代表用户清空，不恢复默认规则。
+        val out = parsed ?: defaults()
         cached = out
         cachedAt = f
         return out
@@ -274,24 +279,27 @@ object ReplaceRuleStore {
      */
     fun importJson(raw: String): Int {
         val objs = objectsOf(raw)
-        if (objs.isEmpty()) return -1
+        if (objs.isEmpty()) return if (raw.trim() == "[]") 0 else -1
         val kept = list().toMutableList()
         var added = 0
         for (obj in objs) {
             val pattern = str(obj, "pattern")
             if (pattern.isNullOrBlank()) continue
             val name = str(obj, "name")?.takeIf { it.isNotBlank() } ?: pattern
+            val replacement = str(obj, "replacement") ?: ""
+            val isRegex = bool(obj, "isRegex", false)
+            // 不把不支持的脚本源码当成替换文本写进正文。
+            if (replacement.trimStart().startsWith("@js:") || pattern.trimStart().startsWith("@js:")) continue
+            if (isRegex && SafeRegex.compile(pattern) == null) continue
             val bookId = str(obj, "bookId").orEmpty()
             if (kept.any { it.name == name && it.pattern == pattern && it.bookId == bookId }) continue
             kept += ReplaceRule(
                 name = name,
                 pattern = pattern,
-                replacement = str(obj, "replacement") ?: "",
-                // 缺字段按「字面替换」处理：把字面串当正则跑会多删东西，错的一侧选保守的。
-                isRegex = bool(obj, "isRegex", false),
-                // 认不出的文本范围只作用于正文。
-                scope = str(obj, "scope")?.takeIf { it in SCOPES } ?: "text",
-                enabled = bool(obj, "enabled", true),
+                replacement = replacement,
+                isRegex = isRegex,
+                scope = scopeOf(obj),
+                enabled = enabledOf(obj),
                 bookId = bookId,
             )
             added++
@@ -302,6 +310,7 @@ object ReplaceRuleStore {
 
     /**
      * 逐条应用。scope 不匹配就跳过，正则编译失败也当这条不存在。
+     * 兼容旧存档里误导入的脚本：不执行，也不输出其源码。
      *
      * 每翻一页都要跑一遍全表，所以列表与编译结果都缓存；
      * 只有 [save] 会清缓存，别处不许直接改 replace.json。
@@ -311,15 +320,18 @@ object ReplaceRuleStore {
         var out = text
         for (r in list()) {
             if (!r.enabled || (r.bookId.isNotEmpty() && r.bookId != bookId)) continue
+            if (r.replacement.trimStart().startsWith("@js:") || r.pattern.trimStart().startsWith("@js:")) continue
             val scopeOk = when (r.scope) {
                 "title" -> isTitle
                 "both" -> true
+                "none" -> false
                 else -> !isTitle
             }
             if (!scopeOk) continue
             out = if (r.isRegex) {
                 val re = compiled(r.pattern) ?: continue
-                re.replace(out, r.replacement)
+                // 非法捕获组引用不能使整章打不开。
+                runCatching { re.replace(out, r.replacement) }.getOrDefault(out)
             } else {
                 out.replace(r.pattern, r.replacement)
             }
@@ -371,8 +383,8 @@ object ReplaceRuleStore {
                 pattern = pattern,
                 replacement = str(obj, "replacement") ?: "",
                 isRegex = bool(obj, "isRegex", false),
-                scope = str(obj, "scope")?.takeIf { it in SCOPES } ?: "text",
-                enabled = bool(obj, "enabled", true),
+                scope = scopeOf(obj),
+                enabled = enabledOf(obj),
                 bookId = str(obj, "bookId").orEmpty(),
             )
         }
@@ -385,6 +397,25 @@ object ReplaceRuleStore {
         TinyJson.field(obj, key)?.let {
             if (it.startsWith("\"")) TinyJson.unescape(it.trim('"')) else it
         }
+
+    /** 本地字段优先，兼容 aoaostar 实际使用的 Legado 字段。 */
+    private fun enabledOf(obj: String): Boolean =
+        bool(obj, "enabled", bool(obj, "isEnabled", true))
+
+    private fun scopeOf(obj: String): String {
+        str(obj, "scope")?.takeIf { it in SCOPES }?.let { return it }
+        val hasLegacyScope = TinyJson.field(obj, "scopeContent") != null ||
+            TinyJson.field(obj, "scopeTitle") != null
+        if (!hasLegacyScope) return "text"
+        val content = bool(obj, "scopeContent", false)
+        val title = bool(obj, "scopeTitle", false)
+        return when {
+            content && title -> "both"
+            title -> "title"
+            content -> "text"
+            else -> "none"
+        }
+    }
 
     private fun bool(obj: String, key: String, fallback: Boolean): Boolean =
         when (str(obj, key)?.trim()) {

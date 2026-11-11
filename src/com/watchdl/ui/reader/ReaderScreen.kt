@@ -21,6 +21,7 @@ import com.watchdl.ui.shelf.shelfStore
 import com.watchdl.ui.shelf.sourceForBook
 import com.watchdl.ui.shelf.matchingBookJob
 import com.watchdl.ui.search.askText
+import com.watchdl.ui.my.showReplace
 import com.watchdl.ui.theme.Icons
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
@@ -302,6 +303,10 @@ private const val FIND_MAX = 20
 /** 深色底（legado 默认背景）。主题胶囊与阅读设置里的「深」共用同一个值。 */
 private val DARK_BG = Color.rgb(20, 18, 24)
 
+/** 独立阅读底色的前景色，不借用全局主题的深浅状态。 */
+internal fun readerInkFor(bg: Int): Int = ReaderStyle.inkOverride(bg)
+    ?: if (Color.red(bg) > 100) Color.rgb(28, 27, 31) else Color.rgb(230, 225, 229)
+
 /**
  * 记下「刚才读到哪」（legado 的阅读锚点）。
  *
@@ -456,10 +461,9 @@ internal fun MainActivity.showReader(
     // 以前只换了正文，白底上顶栏还是黑块，上下章还是浅紫，几乎看不见。
     val light = Color.red(readerBackground) > 100
     // 番茄档带显式字色（legado readConfig 的 bgStr/textColor），优先；其余底色仍由深浅反推。
-    val readerInk = ReaderStyle.inkOverride(readerBackground)
-        ?: if (light) Color.rgb(28, 27, 31) else Md3.onSurface
-    val readerAccent = if (light) Color.rgb(56, 30, 114) else Md3.primary
-    val readerMuted = if (light) Color.rgb(73, 69, 79) else Md3.onSurfaceVariant
+    val readerInk = readerInkFor(readerBackground)
+    val readerAccent = if (light) Color.rgb(56, 30, 114) else Color.rgb(208, 188, 255)
+    val readerMuted = if (light) Color.rgb(73, 69, 79) else Color.rgb(202, 196, 208)
     val hairline = if (light) 0x24000000 else 0x24FFFFFF
     // 扩展设置（亮度、护眼、段距、缩进）与字号/行距/背景同一处落盘。
     loadReaderExtras()
@@ -485,10 +489,10 @@ internal fun MainActivity.showReader(
     // 顶栏收走后首行会顶到表壳圆弧上：四边补回页边距（scrollBody 只给了左右下）。
     // 阅读边距按「边距」档走：legado 的边距是四边滑杆，手表三档就够。
     val pad = Md3.dp(this, ReaderStyle.marginDp(ReaderUi.marginLevel))
-    // 四边同一条阅读边距。高度账：
-    // 屏 248 dp；上下各让出「边距」档 → 标准档正文可视 248−32=216 dp；
-    // 菜单展开时顶栏 TOP_BAR 64 + 底栏 111 以浮层盖住，不参与挤压正文。
-    body.setPadding(pad, pad, pad, pad)
+    // 状态区高 12 dp；窄边距也必须留足空间，并裁剪滚动正文，避免文字穿过浮层。
+    val statusH = Md3.dp(this, 12)
+    body.clipToPadding = true
+    body.setPadding(pad, pad, pad, maxOf(pad, statusH))
     val col = Widgets.contentColumn(body)
 
     // 标题：legado 把章节标题排正文之前（TypographyTitleTab 的「标题位置」）。
@@ -548,22 +552,23 @@ internal fun MainActivity.showReader(
         return ReaderPaging.anchor(layout.getLineStart(line), desired, top, layout.getLineTop(line))
     }
 
-    // ── 顶部状态条：时间 + 电量 ────────────────────────────
-    // 沉浸阅读时顶栏是浮层，平时整屏都是正文，读着读着想知道几点了只能抬腕另看。
-    // 做成常驻的 12 dp 浅行，正文整体下移同样的高度：不用浮层是因为浮层会压住第一行字。
-    val statusH = Md3.dp(this, 12)
-    val statusTv = Md3.text(this, "", 9f, readerMuted).apply {
-        gravity = Gravity.END or Gravity.CENTER_VERTICAL
+    // 底角状态浮层位于正文裁剪区之外，不参与滚动内容布局。
+    // 两个标签均不消费触摸，底部翻页分区保持完整。
+    fun statusLabel() = Md3.text(this, "", 9f, readerMuted).apply {
+        gravity = Gravity.CENTER_VERTICAL
         isSingleLine = true
-        setPadding(0, 0, Md3.dp(this@showReader, 2), 0)
-        // 不可点：12 dp 的条子要是吃掉触摸，上屏「回滚一屏」就在顶部漏一小块死区。
+        includeFontPadding = false
+        background = null
+        elevation = 0f
         isClickable = false
         isFocusable = false
     }
+    val timeTv = statusLabel()
+    val batteryTv = statusLabel()
     // 时间格式跟系统走：24 小时制 / 12 小时制由用户在系统里选的，写死 HH:mm 就是逆着用户。
     val timeFmt = android.text.format.DateFormat.getTimeFormat(this)
     fun refreshStatus() {
-        // 电量不挂 receiver：直接读 ACTION_BATTERY_CHANGED 的粘性广播，少一条回调链���
+        // 电量不挂 receiver：直接读 ACTION_BATTERY_CHANGED 的粘性广播。
         // 每 15 秒重读一次，电量变化最晚 15 秒后到位，不差这几秒。
         val pct = runCatching {
             val i = registerReceiver(
@@ -574,17 +579,18 @@ internal fun MainActivity.showReader(
             val scale = i?.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1) ?: -1
             if (lvl >= 0 && scale > 0) lvl * 100 / scale else -1
         }.getOrDefault(-1)
-        statusTv.text = timeFmt.format(java.util.Date()) + if (pct >= 0) "  $pct%" else ""
+        timeTv.text = timeFmt.format(java.util.Date())
+        batteryTv.text = if (pct >= 0) "$pct%" else ""
     }
     // 15 秒对一次表：分钟精度够用，秒级轮询在手表上纯费电。
     val statusTick = object : Runnable {
         override fun run() {
             refreshStatus()
-            statusTv.postDelayed(this, 15_000L)
+            timeTv.postDelayed(this, 15_000L)
         }
     }
     // 出屏就摘定时器：换章会整页重建，留着就是每隔 15 秒往已摘下的视图树里写字。
-    statusTv.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+    timeTv.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
         override fun onViewAttachedToWindow(v: View) {
             v.removeCallbacks(statusTick)
             v.post(statusTick)
@@ -594,12 +600,15 @@ internal fun MainActivity.showReader(
     })
 
     frame.addView(body, FrameLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT).apply {
-        // 正文让出状态条那一条：反之第一行字会被压住，且排版扫描线还会和字叠在一起。
-        topMargin = statusH
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+    frame.addView(timeTv, FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.WRAP_CONTENT, statusH, Gravity.BOTTOM or Gravity.START).apply {
+        leftMargin = pad
     })
-    frame.addView(statusTv, FrameLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT, statusH, Gravity.TOP))
+    frame.addView(batteryTv, FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.WRAP_CONTENT, statusH, Gravity.BOTTOM or Gravity.END).apply {
+        rightMargin = pad
+    })
 
     /** 章内百分比：正文滚到哪算哪，0 是章首、100 是章末（有拼接块时按 [mainLimit] 算）。 */
     fun innerPct(): Int {
@@ -874,7 +883,7 @@ internal fun MainActivity.showReader(
         returnFromReader(info)
     }, subtitle = subLine)
     bar.setBackgroundColor(readerBackground)
-    if (light) Widgets.tintSubtree(bar, readerInk)
+    Widgets.tintSubtree(bar, readerInk)
     // 顶栏副行的 TextView（widgets.topBar 在有 subtitle 时是「返回 / 两行栈 / 动作」三层）。
     // 拖全书进度滑条时把它临时改成「第 n/N 章 · 章名」，松手再恢复。
     val subTv = ((bar.getChildAt(1) as? LinearLayout)?.getChildAt(1) as? TextView)
@@ -1431,8 +1440,7 @@ internal fun MainActivity.showReader(
  */
 internal fun MainActivity.restyleReader(raw: String) {
     val tv = ReaderUi.bodyView ?: return
-    val ink = ReaderStyle.inkOverride(readerBackground)
-        ?: if (Color.red(readerBackground) > 100) Color.rgb(28, 27, 31) else Md3.onSurface
+    val ink = readerInkFor(readerBackground)
     styleBody(tv, raw)
     // 拼接块里的下一章正文用同一条样式：不同步就会在翻过去时字号突换一档。
     ReaderUi.nextView?.let { styleBody(it, ReaderUi.nextRaw) }
@@ -1446,9 +1454,7 @@ internal fun MainActivity.restyleReader(raw: String) {
  * [raw] 必须是**原始文本**（未缩进、未挂 span）。
  */
 internal fun MainActivity.styleBody(tv: TextView, raw: String) {
-    val light = Color.red(readerBackground) > 100
-    val ink = ReaderStyle.inkOverride(readerBackground)
-        ?: if (light) Color.rgb(28, 27, 31) else Md3.onSurface
+    val ink = readerInkFor(readerBackground)
     // 缩进改的是文本本身，先把文本重设一遍再挂段距 span：
     // 旧的 ParaSpan 不会自己脱落，段距改回「无」时必须整串重设。
     val shown = if (raw.isEmpty()) "本章无正文" else shownText(raw)
@@ -1588,6 +1594,7 @@ private fun MainActivity.showReaderMenu(
     row("书籍详情", "file") { rememberReturn(); showDetail(info, src ?: sourceForBook(info)) }
     row("目录", "menu") { markAnchor(info, index); showToc(info, src) }
     row("章内查找", "search") { showFind(info, index, text, src) }
+    row("替换净化", "edit") { rememberReturn(); showReplace() }
     // 自动翻页：标题带当前开着还是关着。开的时候顺手收菜单，直接回正文看它滚。
     row("自动翻页 · ${if (ReaderAuto.on) "开" else "关"}", "play") {
         val open = !ReaderAuto.on
@@ -1802,8 +1809,8 @@ private fun bodyText(s: String, isLocal: Boolean): String = if (isLocal) {
 /**
  * 滚动内容里能滚多远。
  *
- * ScrollView 的滚动范围是「子控件高 + 上下内边距 − 视口高」（clipToPadding=false 时
- * 内边距也算在内容里），不是简单的「子控件高 − 视口高」。
+ * ScrollView 的滚动范围是「子控件高 + 上下内边距 − 视口高」，
+ * clipToPadding 只改变绘制裁剪，不改变滚动范围。
  */
 private fun scrollLimit(body: ScrollView): Int {    val child = body.getChildAt(0) ?: return 0
     return (child.height - body.height + body.paddingTop + body.paddingBottom).coerceAtLeast(0)

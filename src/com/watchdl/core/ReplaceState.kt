@@ -64,6 +64,7 @@ fun replaceKeys(rules: List<ReplaceRule>): List<String> = rules.map { replaceKey
 fun replaceScopeLabel(scope: String): String = when (scope) {
     "title" -> "标题"
     "both" -> "正文+标题"
+    "none" -> "不作用"
     else -> "正文"
 }
 
@@ -236,7 +237,7 @@ fun replacePruneSelection(selected: MutableSet<String>, alive: Collection<String
 
 /** 删除确认正文。手表上没有回收站，所以把「怎么找回」写进去。 */
 fun replaceDeleteMessage(count: Int): String =
-    "会删掉 $count 条规则，删掉就找不回来。\n要恢复只能重新导入 replace.json。"
+    "会删掉 $count 条规则，删掉就找不回来。\n要恢复需从 replace.import.json 重新导入。"
 
 // ── 落盘 ───────────────────────────────────────────────────────────
 

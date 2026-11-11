@@ -118,7 +118,7 @@ internal fun MainActivity.showReplace() {
     } else {
         // 统计放顶栏副标题而不是列表上方一张统计卡：248 dp 高的屏上，
         // 卡片会把首屏列表挤到只剩两行（书源页同样的处理）。
-        root.addView(Widgets.topBar(this, "替换净化", onBack = { showMy() },
+        root.addView(Widgets.topBar(this, "替换净化", onBack = { returnToScreen() },
             subtitle = replaceSubtitle(all.size, on),
             trailing = listOf(
                 "search" to { askReplaceQuery() },
@@ -257,7 +257,8 @@ private fun MainActivity.replaceSelectBar(): LinearLayout {
             bold = true)).apply { gravity = Gravity.CENTER_VERTICAL },
         LinearLayout.LayoutParams(0, Md3.dp(this, Md3.TAB_H), 1f))
     bar.addView(slot("select_all", "全选", 36) {
-        replaceSelectAll(ReplaceUi.selected, replaceKeys(ReplaceRuleStore.list()))
+        replaceSelectAll(ReplaceUi.selected,
+            replaceKeys(replaceMatch(ReplaceRuleStore.list(), ReplaceUi.query)))
         showReplace()
     })
     return bar
@@ -327,13 +328,18 @@ private fun MainActivity.showReplaceMenu() {
     // 推荐规则集只在「还差几条」时出现：全加过了就不该再占一行菜单。
     val missing = ReplaceRuleStore.missingPresets()
     if (missing > 0) {
-        items += "加入推荐规则（$missing 条）" to {
+        items += "加入 aoaostar 兼容规则（$missing 条）" to {
             val n = ReplaceRuleStore.addPresets()
             toast(if (n > 0) "加入 $n 条推荐规则" else "推荐规则已经都在了")
             showReplace()
         }
     }
-    items += "从 replace.json 导入" to { importRules() }
+    items += "规则来源与兼容范围" to {
+        Widgets.md3Dialog(this, title = "aoaostar 净化规则",
+            body = "来源：https://legado.aoaostar.com/sources/3f067eb2.json\n上游 20 条：19 条启用。内置 15 条正文兼容规则，默认启用。4 条脚本与 1 条不兼容正则未收录。加入仅补缺，不覆盖已停用或已修改的规则。",
+            confirm = "知道了", onConfirm = {}).show()
+    }
+    items += "从 replace.import.json 导入" to { importRules() }
     Widgets.longMenuDialog(this, "替换净化", items).show()
 }
 
@@ -387,8 +393,9 @@ private fun MainActivity.setReplaceEnabled(keys: List<String>, enabled: Boolean)
  */
 private fun MainActivity.moveReplaceToEdge(key: String, toTop: Boolean) {
     val rules = ReplaceRuleStore.list()
+    val order = replaceMoveToEdge(rules, ReplaceUi.order.toList(), listOf(key), toTop)
     ReplaceUi.order.clear()
-    ReplaceUi.order += replaceMoveToEdge(rules, ReplaceUi.order.toList(), listOf(key), toTop)
+    ReplaceUi.order += order
     ReplaceUi.sort = ReplaceSort.Order
     ReplaceUi.save(filesDir)
     toast(if (toTop) "已置顶" else "已置底")
@@ -405,17 +412,12 @@ private fun MainActivity.toggleReplaceSelection(key: String) {
  * 删除，必须二次确认（legado 也过一遍 `sure_del`）。
  *
  * 两处与 legado 不同，都因为我们的存储是整份 JSON：
- * - 空表会被 `ReplaceRuleStore.list()` 当成坏文件退回内置默认规则，
- *   删到一条不剩等于删了个寂寞，所以这里直接拦住；
+ * - 合法空表按用户清空处理，允许删到一条不剩；
  * - 删除后写回的是「剩下的规则」，文件里没有回收站可言，
  *   确认文案要把「只能重新导入 replace.json」说清。
  */
 private fun MainActivity.confirmDeleteRules(keys: List<String>) {
     if (keys.isEmpty()) return toast("先选规则")
-    if (replaceRemove(ReplaceRuleStore.list(), keys).isEmpty()) {
-        toast("至少留一条：空表会被当成坏文件")
-        return
-    }
     Widgets.md3Dialog(this,
         title = "删除规则",
         body = replaceDeleteMessage(keys.size),
@@ -584,21 +586,22 @@ private fun MainActivity.askReplaceRule(existing: ReplaceRule?) {
 
 /** 文件由用户自己放进应用私有目录（adb push），本页只负责解析与合并。 */
 private fun MainActivity.importRules() {
-    val f = ReplaceRuleStore.file
+    // 存档与导入分离：外部文件不得先覆盖用户正在使用的 replace.json。
+    val f = ReplaceRuleStore.file?.parentFile?.let { File(it, "replace.import.json") }
     if (f == null || !f.isFile) {
-        toast("还没有 replace.json：先把规则文件放进应用目录")
+        toast("先把 replace.import.json 放进应用目录；不要覆盖 replace.json")
         return
     }
     val raw = runCatching { f.readText(Charsets.UTF_8) }.getOrNull()
     if (raw == null) {
-        toast("replace.json 读不出来")
+        toast("replace.import.json 读不出来")
         return
     }
     val n = ReplaceRuleStore.importJson(raw)
     when {
-        n < 0 -> toast("replace.json 不是规则数组")
-        n == 0 -> toast("没有新规则（已有的按名称+模式跳过）")
-        else -> toast("导入 $n 条")
+        n < 0 -> toast("replace.import.json 不是规则数组")
+        n == 0 -> toast("没有兼容新规则：重复、脚本或无效正则已跳过")
+        else -> toast("导入 $n 条；重复、脚本或无效正则已跳过")
     }
     showReplace()
 }
