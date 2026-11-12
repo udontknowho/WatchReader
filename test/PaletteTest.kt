@@ -1,7 +1,7 @@
 /**
  * 主题配色表自检。
  *
- * 原有主题保持兼容，新增六套深浅主题按预览基色回归。
+ * 仅保留日夜主题，并校验旧主题迁移方向。
  * 深色层级逐级变亮，浅色层级逐级变暗。
  * 正文、次要文字、按钮及容器分别校验对比度。
  */
@@ -32,18 +32,16 @@ fun main() {
     println("[Palette] 表结构")
     val legacyIds = setOf("inkgreen", "yuuka", "elink", "mujika", "gr", "phoebe", "sora")
     val previewThemes = listOf(
-        Triple("duskblue", "暮蓝书签", 0xFF101B2B.toInt()),
-        Triple("warmpaper", "暖纸灰黑", 0xFFF2EFE7.toInt()),
-        Triple("amberblack", "曜黑琥珀", 0xFF0C0C0D.toInt()),
-        Triple("violetmist", "紫雾星页", 0xFF1C1629.toInt()),
-        Triple("seasalt", "海盐晨光", 0xFFE9F1F1.toInt()),
-        Triple("terracotta", "赤陶夜读", 0xFF241715.toInt()),
+        Triple("day", "日间", 0xFFF2EFE7.toInt()),
+        Triple("night", "夜间", 0xFF0E0E0E.toInt()),
     )
-    val newIds = previewThemes.map { it.first }.toSet()
-    val lightIds = setOf("warmpaper", "seasalt")
-    check("保留七套旧主题并新增六套", Palette.all.size == 13, "共 ${Palette.all.size} 套")
-    check("旧主题 ID 仍能解析", legacyIds.all { Palette.find(it).id == it })
-    check("默认暖纸灰黑", Palette.DEFAULT_ID == "warmpaper")
+    val newIds = setOf("day", "night")
+    val lightIds = setOf("day")
+    check("仅保留日夜主题", Palette.all.map { it.id } == listOf("day", "night"))
+    check("七套旧深色主题迁移夜间", legacyIds.all { Palette.find(it).id == "night" })
+    check("旧浅色主题迁移日间", listOf("warmpaper", "seasalt").all { Palette.find(it).id == "day" })
+    check("旧新增深色主题迁移夜间", listOf("duskblue", "amberblack", "violetmist", "terracotta").all { Palette.find(it).id == "night" })
+    check("默认日间", Palette.DEFAULT_ID == "day")
     for ((id, name, surface) in previewThemes) {
         val p = Palette.find(id)
         check("$name 可按 ID 切换", p.id == id && p.name == name)
@@ -53,10 +51,10 @@ fun main() {
         Palette.all.joinToString { it.id })
     check("name 非空", Palette.all.all { it.name.isNotBlank() })
     check("默认色在表内", Palette.all.any { it.id == Palette.DEFAULT_ID }, Palette.DEFAULT_ID)
-    check("默认解析为暖纸", Palette.find(null).id == "warmpaper")
+    check("默认解析为日间", Palette.find(null).id == "day")
     check("认不出 id 回默认", Palette.find("no-such-id").id == Palette.DEFAULT_ID)
     check("null 回默认", Palette.find(null).id == Palette.DEFAULT_ID)
-    check("认得出的原样返回", Palette.find("sora").id == "sora")
+    check("日夜原样返回", listOf("day", "night").all { Palette.find(it).id == it })
 
     println("[Palette] 层级与对比度")
     for (p in Palette.all) {

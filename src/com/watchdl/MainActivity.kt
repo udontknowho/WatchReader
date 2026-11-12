@@ -451,7 +451,10 @@ class MainActivity : Activity() {
      * 删掉一套配色不该让应用起不来。
      */
     private fun loadThemePrefs() {
-        Md3.applyPalette(Palette.find(getSharedPreferences("reader", MODE_PRIVATE).getString("theme", null)))
+        val p = getSharedPreferences("reader", MODE_PRIVATE)
+        val palette = Palette.find(p.getString("theme", null))
+        Md3.applyPalette(palette)
+        p.edit().putString("theme", palette.id).apply()
     }
 
     /**
@@ -459,8 +462,11 @@ class MainActivity : Activity() {
      * 所以存盘后必须重画当前屏，否则屏上还是旧色。
      */
     internal fun pickTheme(id: String) {
-        getSharedPreferences("reader", MODE_PRIVATE).edit().putString("theme", id).apply()
-        Md3.applyPalette(Palette.find(id))
+        val palette = Palette.find(id)
+        Md3.applyPalette(palette)
+        readerBackground = palette.surface
+        getSharedPreferences("reader", MODE_PRIVATE).edit()
+            .putString("theme", palette.id).putInt("bg", readerBackground).apply()
         // 只从设置页进得来，重画设置页即可；滚动会回顶（主题行本来就在顶上）。
         showSettings()
     }
@@ -470,7 +476,7 @@ class MainActivity : Activity() {
         val p = getSharedPreferences("reader", MODE_PRIVATE)
         readerSize = p.getFloat("size", Md3.FS_READ)
         readerSpacing = p.getFloat("spacing", 1.75f)
-        readerBackground = p.getInt("bg", Color.rgb(20, 18, 24))
+        readerBackground = Md3.surface
         // 旧档包括原默认 12 px，统一夹回 0–10 px。
         crownStep = p.getFloat("crownStep", 8f).coerceIn(CROWN_STEP_MIN, CROWN_STEP_MAX)
         crownGlide = p.getInt("crownGlide", 50).coerceIn(0, 200)
@@ -480,23 +486,28 @@ class MainActivity : Activity() {
      * 上次读到第几章（下标）。跟着最后一次阅读走，回看会退回去。
      * 0 表示没记录过（和「读到第一章」等价，不影响使用）。
      */
-    internal fun readProgress(info: BookInfo): Int = readProgress(readingId(info))
-    internal fun readTime(info: BookInfo): Long = readTime(readingId(info))
-    internal fun readOffset(info: BookInfo): Int = readOffset(readingId(info))
+    internal fun readProgress(info: BookInfo): Int = readProgressTag(readerProgressTag(info))
+    internal fun readTime(info: BookInfo): Long =
+        getSharedPreferences("reader", MODE_PRIVATE).getLong("last_" + readerProgressTag(info), 0L)
+    internal fun readOffset(info: BookInfo): Int =
+        getSharedPreferences("reader", MODE_PRIVATE).getInt("off_" + readerProgressTag(info), 0)
     internal fun saveProgress(info: BookInfo, index: Int) {
         saveReadingBook(info, null)
-        saveProgress(readingId(info), index)
+        saveProgressFor(info, index)
     }
     internal fun saveOffset(info: BookInfo, index: Int, offset: Int, sync: Boolean = false) =
         saveOffset(readingId(info), index, offset, sync)
 
     internal fun readProgress(bookId: String): Int {
-        if (resolveReadingBook(bookId) == null) return 0
-        val tag = readerProgressTag(bookId)
+        val info = resolveReadingBook(bookId) ?: return 0
+        return readProgressTag(readerProgressTag(info))
+    }
+
+    private fun readProgressTag(tag: String): Int {
         val prefs = getSharedPreferences("reader", MODE_PRIVATE)
         // S20：换算逻辑抽到 core 的 resolveStoredIndex，测试调的是真实现。
         val (fixed, writeBack) = resolveStoredIndex(
-            raw = readIndex(bookId),
+            raw = prefs.getInt("pos_$tag", -1),
             lastSeen = prefs.contains("last_$tag"),
             segBase = SEG_BASE,
         )
@@ -516,26 +527,44 @@ class MainActivity : Activity() {
     internal fun saveProgress(bookId: String, index: Int) {
         if (bookId.isBlank() || index < 0) return
         val info = resolveReadingBook(bookId) ?: return
+        saveProgressFor(info, index)
+    }
+
+    private fun saveProgressFor(info: BookInfo, index: Int) {
+        if (info.bookId.isBlank() || index < 0) return
         val prefs = getSharedPreferences("reader", MODE_PRIVATE)
-        val tag = readerProgressTag(readingId(info))
+        val tag = readerProgressTag(info)
         val prevIndex = prefs.getInt("oidx_$tag", -1)
+        val at = System.currentTimeMillis()
         val e = prefs.edit().putInt("oidx_$tag", index)
-            .putLong("last_$tag", System.currentTimeMillis())
+            .putLong("last_$tag", at)
         // 无条件写：和 legado 一致，进度就是最后一次停下的地方，回看会退回去。
         // 旧值不先解包：搬运工作由 readProgress 负责，存进来的永远是纯章号。
         e.putInt("pos_$tag", index)
         // 换章时滚动偏移作废，否则沿用上一章的像素位置，进新章可能直接顶到底。
         if (prevIndex != index) e.putInt("off_$tag", 0)
-        // commit 而非 apply：进程被杀时 apply 的异步写入可能还没落盘。
-        e.commit()
-        runCatching { ReadingHistory.record(filesDir, info, index) }
-            .onFailure { DevLog.log("History", "阅读记录保存失败：${it.message}") }
+        // apply 先更新内存；生命周期的偏移 commit 会同时刷新这些进度键。
+        e.apply()
+        val dir = filesDir
+        historyWriter.execute {
+            runCatching { ReadingHistory.record(dir, info, index, at) }
+                .onFailure { DevLog.log("History", "阅读记录保存失败：${it.message}") }
+        }
     }
 
     /** 新键只迁移一次；存在同前缀书籍时保留旧档且不猜归属。 */
     private fun readerProgressTag(bookId: String): String {
         val info = resolveReadingBook(bookId) ?: return progressKey("unresolved:$bookId")
+        return readerProgressTag(info)
+    }
+
+    private val migratedProgressTags = java.util.IdentityHashMap<BookInfo, String>()
+
+    private fun readerProgressTag(info: BookInfo): String {
+        migratedProgressTags[info]?.let { return it }
         val tag = progressKey(info)
+        if (migratedProgressTags.size >= 64) migratedProgressTags.clear()
+        migratedProgressTags[info] = tag
         val prefs = getSharedPreferences("reader", MODE_PRIVATE)
         if (prefs.getBoolean("migrated_$tag", false)) return tag
         val editor = prefs.edit().putBoolean("migrated_$tag", true)
@@ -555,7 +584,7 @@ class MainActivity : Activity() {
             for (old in oldTags) for (prefix in listOf("pos_", "oidx_", "off_", "last_"))
                 editor.remove(prefix + old)
         }
-        editor.commit()
+        editor.apply()
         return tag
     }
 
@@ -590,9 +619,10 @@ class MainActivity : Activity() {
         getSharedPreferences("reader", MODE_PRIVATE).getInt("off_" + readerProgressTag(bookId), 0)
 
     internal fun saveOffset(bookId: String, index: Int, offset: Int, sync: Boolean = false) {
-        if (bookId.isBlank() || index < 0 || resolveReadingBook(bookId) == null) return
+        if (bookId.isBlank() || index < 0) return
+        val info = resolveReadingBook(bookId) ?: return
         val prefs = getSharedPreferences("reader", MODE_PRIVATE)
-        val tag = readerProgressTag(bookId)
+        val tag = readerProgressTag(info)
         val kIndex = "oidx_$tag"
         // 偏移只对当时那一章有意义。章号对不上就丢弃，免得上一次读到第 3000 像素，
         // 换个更短的章一进去就顶到底。
@@ -616,9 +646,17 @@ class MainActivity : Activity() {
     internal fun saveReaderPrefs(size: Float, spacing: Float, bg: Int) {
         readerSize = size
         readerSpacing = spacing
-        readerBackground = bg
+        // 阅读设置仍传旧日夜底色；排版滑杆传当前 surface，不应误切主题。
+        val palette = when (bg) {
+            ReaderStyle.BG_FANQIE_DAY -> Palette.find("day")
+            ReaderStyle.BG_FANQIE_NIGHT -> Palette.find("night")
+            else -> Md3.palette
+        }
+        Md3.applyPalette(palette)
+        readerBackground = palette.surface
         getSharedPreferences("reader", MODE_PRIVATE).edit()
-            .putFloat("size", size).putFloat("spacing", spacing).putInt("bg", bg).apply()
+            .putFloat("size", size).putFloat("spacing", spacing)
+            .putString("theme", palette.id).putInt("bg", readerBackground).apply()
     }
 
     internal fun saveCrownPrefs() {
@@ -2393,6 +2431,11 @@ class MainActivity : Activity() {
     private companion object {
         /** 跨 Activity 实例串行铺底，检查目标与复制必须处于同一次锁内。 */
         val assetExtractLock = Any()
+
+        /** 不随页面取消，跨 Activity 实例保持记录顺序。 */
+        val historyWriter = java.util.concurrent.Executors.newSingleThreadExecutor { task ->
+            Thread(task, "reading-history").apply { isDaemon = true }
+        }
 
         /** 一次搜索最多跑几个源。源太多时后面的根本轮不到，只会被超时记成失败。 */
         const val MAX_SOURCES = 15

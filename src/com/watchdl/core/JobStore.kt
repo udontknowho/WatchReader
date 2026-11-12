@@ -78,9 +78,14 @@ class JobStore(private val root: File) {
     fun markDeleted(bookId: String): Boolean {
         deleted.add(bookId)
         return synchronized(lockFor(bookId)) {
+            invalidateChapterIndex(bookId)
             val dir = dirOf(bookId)
             if (!ownsDirectory(dir, bookId)) false else dir.deleteRecursively() || !dir.exists()
         }
+    }
+
+    private fun invalidateChapterIndex(bookId: String) {
+        synchronized(chapterIndexes) { chapterIndexes.remove(rootKey + "\u0000" + bookId) }
     }
 
     /** 重新下载同一本书时撤销墓碑。 */
@@ -108,6 +113,11 @@ class JobStore(private val root: File) {
 
         private val locks = java.util.concurrent.ConcurrentHashMap<String, Any>()
         private val fallbackDirs = java.util.concurrent.ConcurrentHashMap<String, File>()
+        private data class ChapterIndex(val length: Long, val modified: Long, val offsets: Map<String, Long>)
+        // 只缓存定位，不保留正文。跨实例共享，并限制同时驻留的书数。
+        private val chapterIndexes = object : LinkedHashMap<String, ChapterIndex>(16, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ChapterIndex>?) = size > 8
+        }
 
         /** 从 chapters.jsonl 的一行里取 itemId。正文里可能有别的 JSON，只认这个键。 */
         private val ITEM_ID = Regex("\"itemId\"\\s*:\\s*\"([^\"]*)\"")
@@ -213,6 +223,7 @@ class JobStore(private val root: File) {
     /** 追加一章并立即 flush。内容里的换行会被 JSON 转义，行分隔安全。 */
     fun appendChapter(bookId: String, chapterJson: String) {
         synchronized(lockFor(bookId)) {
+            invalidateChapterIndex(bookId)
             if (bookId in deleted) return
             val dir = dirOf(bookId)
             check(ownsDirectory(dir, bookId)) { "作业目录身份不符：${dir.name}" }
@@ -233,6 +244,7 @@ class JobStore(private val root: File) {
      */
     fun writeChapters(bookId: String, lines: List<String>) {
         synchronized(lockFor(bookId)) {
+            invalidateChapterIndex(bookId)
             if (bookId in deleted) return
             val dir = dirOf(bookId)
             check(ownsDirectory(dir, bookId)) { "作业目录身份不符：${dir.name}" }
@@ -295,6 +307,7 @@ class JobStore(private val root: File) {
             synchronized(lockFor(bookId)) {
                 check(ownsDirectory(dir, bookId)) { "作业目录身份不符：${dir.name}" }
                 if (bookId in deleted) { tmp.delete(); return }
+                invalidateChapterIndex(bookId)
                 val f = File(dir, "chapters.jsonl")
                 if (!tmp.renameTo(f)) {
                     tmp.copyTo(f, overwrite = true)
@@ -343,6 +356,7 @@ class JobStore(private val root: File) {
      */
     fun commitStaging(bookId: String, json: String) {
         synchronized(lockFor(bookId)) {
+            invalidateChapterIndex(bookId)
             require(TinyJson.path(json, "bookId") == bookId) { "快照 bookId 不符" }
             check(ownsDirectory(dirOf(bookId), bookId)) { "作业目录身份不符" }
             val st = stagingDir(bookId)
@@ -439,6 +453,7 @@ class JobStore(private val root: File) {
      * 返回是否真的删了一行。
      */
     fun deleteChapter(bookId: String, itemId: String): Boolean = synchronized(lockFor(bookId)) {
+        invalidateChapterIndex(bookId)
         if (bookId in deleted || !ownsDirectory(dirOf(bookId), bookId)) return@synchronized false
         val f = chaptersFile(bookId)
         var removed = false
@@ -500,25 +515,45 @@ class JobStore(private val root: File) {
         out
     }
 
-    /**
-     * 只读某一章：扫到命中行就停。
-     *
-     * [readChapters] 会把整本 jsonl 逐行进 Map，三千章的书在手表上要十几兆内存、
-     * 秒级的正则；而换章与拼接块预取都只关心当前这一章，顺读时每章付一次整表代价。
-     * 先用 `contains` 粗筛再解 itemId：粗筛不命中就不跑正则。
-     */
+    /** 首次扫描建立字节偏移，后续换章直接定位；写入与删除在同一根锁内失效。 */
     fun readChapter(bookId: String, itemId: String): String? = synchronized(lockFor(bookId)) {
         if (!ownsDirectory(dirOf(bookId), bookId)) return@synchronized null
         val f = chaptersFile(bookId)
         if (!f.isFile || itemId.isEmpty()) return@synchronized null
-        // 不能抛：并发落盘时文件可能正被改名/清理。
         runCatching {
-            f.useLines { lines ->
-                lines.firstOrNull { line ->
-                    line.contains(itemId) &&
-                        Regex("\"itemId\"\\s*:\\s*\"([^\"]*)\"").find(line)
-                            ?.groupValues?.get(1) == itemId
+            val key = rootKey + "\u0000" + bookId
+            var index = synchronized(chapterIndexes) { chapterIndexes[key] }
+            if (index == null || index.length != f.length() || index.modified != f.lastModified()) {
+                val offsets = HashMap<String, Long>()
+                var position = 0L
+                var start = 0L
+                val line = java.io.ByteArrayOutputStream()
+                fun record() {
+                    val text = line.toString("UTF-8")
+                    ITEM_ID.find(text)?.groupValues?.get(1)?.let { offsets.putIfAbsent(it, start) }
+                    line.reset()
                 }
+                f.inputStream().buffered().use { input ->
+                    val buffer = ByteArray(8192)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        for (i in 0 until count) {
+                            position++
+                            if (buffer[i] == 10.toByte()) { record(); start = position }
+                            else line.write(buffer[i].toInt())
+                        }
+                    }
+                    if (line.size() > 0) record()
+                }
+                index = ChapterIndex(f.length(), f.lastModified(), offsets)
+                synchronized(chapterIndexes) { chapterIndexes[key] = index!! }
+            }
+            val offset = index!!.offsets[itemId] ?: return@runCatching null
+            RandomAccessFile(f, "r").use { raf ->
+                raf.seek(offset)
+                // readLine 按单字节解码，需还原为 UTF-8。
+                raf.readLine()?.let { String(it.toByteArray(Charsets.ISO_8859_1), Charsets.UTF_8) }
             }
         }.getOrNull()
     }
@@ -538,6 +573,7 @@ class JobStore(private val root: File) {
      */
     fun clearChapters(bookId: String) {
         synchronized(lockFor(bookId)) {
+            invalidateChapterIndex(bookId)
             if (!ownsDirectory(dirOf(bookId), bookId)) return
             chaptersFile(bookId).delete()
             val raw = readJob(bookId) ?: return

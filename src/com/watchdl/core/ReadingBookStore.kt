@@ -5,17 +5,41 @@ import java.security.MessageDigest
 
 /** 在线阅读的目录与来源快照。地址精确匹配，不合并同名书。 */
 class ReadingBookStore(private val file: File) {
-    companion object { private val lock = Any() }
+    companion object {
+        private val lock = Any()
+        private data class Snapshot(
+            val length: Long, val modified: Long, val books: List<ShelfBook>,
+            val identities: Map<String, ShelfBook?>, val addresses: Map<String, ShelfBook?>,
+        )
+        private val snapshots = object : LinkedHashMap<String, Snapshot>(4, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Snapshot>?) = size > 4
+        }
+    }
+    private val fileKey = file.canonicalPath
+
+    /** 所有实例在同一锁内验证文件与更新索引，保存失败不发布新数据。 */
+    private fun snapshot(): Snapshot {
+        val length = file.length()
+        val modified = file.lastModified()
+        snapshots[fileKey]?.takeIf { it.length == length && it.modified == modified }?.let { return it }
+        val books = read()
+        return Snapshot(length, modified, books,
+            books.groupBy { readingId(it.info) }.mapValues { it.value.singleOrNull() },
+            books.groupBy { it.info.bookId }.mapValues { it.value.singleOrNull() }).also { snapshots[fileKey] = it }
+    }
 
     fun books(): List<ShelfBook> = synchronized(lock) {
-        runCatching { read() }.getOrDefault(emptyList())
+        runCatching { snapshot().books.toList() }.getOrDefault(emptyList())
     }
 
     /** 裸地址仅在无歧义时解析；身份键精确匹配。 */
-    fun find(bookId: String): ShelfBook? = books().filter { readingId(it.info) == bookId }.singleOrNull()
-        ?: books().filter { it.info.bookId == bookId }.singleOrNull()
+    fun find(bookId: String): ShelfBook? = synchronized(lock) {
+        runCatching { snapshot().let { it.identities[bookId] ?: it.addresses[bookId] } }.getOrNull()
+    }
 
-    fun find(info: BookInfo): ShelfBook? = books().firstOrNull { readingId(it.info) == readingId(info) }
+    fun find(info: BookInfo): ShelfBook? = synchronized(lock) {
+        runCatching { snapshot().identities[readingId(info)] }.getOrNull()
+    }
 
     fun save(info: BookInfo, sourceName: String = "") = synchronized(lock) {
         require(info.bookId.isNotBlank()) { "书籍地址为空" }
@@ -41,6 +65,7 @@ class ReadingBookStore(private val file: File) {
         try {
             tmp.outputStream().use { out -> out.write(json.toByteArray(Charsets.UTF_8)); out.fd.sync() }
             check(tmp.renameTo(file)) { "阅读目录快照保存失败" }
+            snapshots.remove(fileKey)
         } finally { tmp.delete() }
     }
 

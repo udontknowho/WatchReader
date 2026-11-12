@@ -50,7 +50,7 @@ internal object ReaderUi {
      * 为真时 [applyBright] 不再写死窗口亮度，而是交回 -1f；用户一拖亮度滑条就自动关掉，
      * 与 legado 的 ToggleBrightnessAuto 同一个语义。
      */
-    var brightAuto = false
+    var brightAuto = true
     /**
      * 这次阅读是从书架直接点进来的（legado 点书架就进 ReadBook）。
      *
@@ -204,6 +204,10 @@ internal object ReaderUi {
      * 先发的那次可能后回来盖掉新章 —— 只认最后一次派发的令牌。
      */
     var pageToken = 0
+    /** 等待属于当前请求；失败时解除，旧页仍可翻动。 */
+    var pendingToken: Int? = null
+    /** 预取和主动加载共享进行中的请求。 */
+    val requests = mutableMapOf<String, java.util.concurrent.FutureTask<String>>()
 }
 
 /**
@@ -364,7 +368,7 @@ private fun readerTools(csv: String?): List<String> {
 internal fun MainActivity.loadReaderExtras() {
     val p = getSharedPreferences("reader", android.content.Context.MODE_PRIVATE)
     ReaderUi.bright = ReaderStyle.brightClamp(p.getFloat("bright", ReaderStyle.BRIGHT_MID))
-    ReaderUi.brightAuto = p.getBoolean("brightAuto", false)
+    ReaderUi.brightAuto = true
     ReaderUi.tools = readerTools(p.getString("tools", null))
     ReaderUi.autoPageSec = p.getInt("autoPageSec", 10).coerceIn(1, 60)
     // 护眼整组已下线（用户要求）。旧存档里可能还留着 eye=true，
@@ -397,7 +401,7 @@ internal fun MainActivity.loadReaderExtras() {
 internal fun MainActivity.saveReaderExtras() {
     getSharedPreferences("reader", android.content.Context.MODE_PRIVATE).edit()
         .putFloat("bright", ReaderStyle.brightClamp(ReaderUi.bright))
-        .putBoolean("brightAuto", ReaderUi.brightAuto)
+        .putBoolean("brightAuto", true)
         .putString("tools", ReaderUi.tools.joinToString(","))
         .putInt("autoPageSec", ReaderUi.autoPageSec)
         .putBoolean("eye", ReaderUi.eyeCare)
@@ -426,7 +430,7 @@ internal fun MainActivity.applyBright() {
     val w = window ?: return
     val attrs = w.attributes ?: return
     // 跟随系统时交回 -1f（BRIGHTNESS_OVERRIDE_NONE）：系统按环境光自己调，比锁死一档舒服。
-    attrs.screenBrightness = if (ReaderUi.brightAuto) -1f else ReaderStyle.brightClamp(ReaderUi.bright)
+    attrs.screenBrightness = android.view.WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
     w.attributes = attrs
     if (ReaderUi.keepOn) {
         w.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -451,6 +455,7 @@ internal fun MainActivity.showReader(
     /** 直接把正文落在章末（从上一屏退上来的跨章）。 */
     atEnd: Boolean = false,
 ) {
+    ReaderUi.pendingToken = null
     setScreen(Screen.Reader(info, index, text, src))
     // setScreen 只切状态、撤后台任务，**不碰视图树**。preview() 先铺了顶栏 +「正在取正文…」，
     // 这里不清干净，正文那一帧会与加载页各占 root 的一半（两个 weight=1）：
@@ -459,11 +464,11 @@ internal fun MainActivity.showReader(
     saveProgress(info, index)
     // 浅色底时整套前景色都要换：正文、顶栏、底栏按钮、进度。
     // 以前只换了正文，白底上顶栏还是黑块，上下章还是浅紫，几乎看不见。
+    readerBackground = Md3.surface
     val light = Color.red(readerBackground) > 100
-    // 番茄档带显式字色（legado readConfig 的 bgStr/textColor），优先；其余底色仍由深浅反推。
-    val readerInk = readerInkFor(readerBackground)
-    val readerAccent = if (light) Color.rgb(56, 30, 114) else Color.rgb(208, 188, 255)
-    val readerMuted = if (light) Color.rgb(73, 69, 79) else Color.rgb(202, 196, 208)
+    val readerInk = Md3.onSurface
+    val readerAccent = Md3.primary
+    val readerMuted = Md3.onSurfaceVariant
     val hairline = if (light) 0x24000000 else 0x24FFFFFF
     // 扩展设置（亮度、护眼、段距、缩进）与字号/行距/背景同一处落盘。
     loadReaderExtras()
@@ -513,12 +518,9 @@ internal fun MainActivity.showReader(
     // 两边样式不会走形。
     restyleReader(text)
 
-    // ── 拼接块：章末不足一屏时把下一章开头接在正文之后 ───────────
-    // legado 是窗口替换、邻页同屏绘制；这里一次性只装一章，章末剩三行时用户必须再戳一下。
-    // 做法：正文 tv 之后接一条分隔线 + 下一章标题 + 下一章开头，滚到底才真跳章。
-    var tvNext: TextView? = null
-    var chapterPending = false
-    var userMoved = false
+    // 当前布局只包含本章；预取不会增加滚动高度。
+    val tvNext: TextView? = null
+    fun chapterPending(): Boolean = ReaderUi.pendingToken != null
     /** 本页的拼接世代号：回调里先比它，页面重建了就把旧结果丢掉。 */
     val spliceGen = ++ReaderUi.spliceGen
 
@@ -529,9 +531,7 @@ internal fun MainActivity.showReader(
      * （分母里含了下一章那几百字）。可滚上限仍用 [scrollLimit]。
      * 正文未排版时 tv.height 为 0，这里退回 0，调用方自己当「无进度」处理。
      */
-    fun mainLimit(): Int = if (tvNext == null) scrollLimit(body)
-        else (childTopIn(body, tv) + tv.height + body.paddingBottom - body.height)
-            .coerceAtLeast(0)
+    fun mainLimit(): Int = scrollLimit(body)
 
     /**
      * 拼接块读完处在那块正文里的**字符偏移**；下一章从这一处接着显示，不重读。
@@ -684,34 +684,30 @@ internal fun MainActivity.showReader(
     }
     body.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
         override fun onViewAttachedToWindow(v: View) = Unit
-        override fun onViewDetachedFromWindow(v: View) { cancelMotion() }
+        override fun onViewDetachedFromWindow(v: View) {
+            cancelMotion()
+            ReaderUi.pendingToken = null
+            ReaderUi.pageToken++
+        }
     })
 
     /** 往下滚到章末：有拼接块就把「读完处」当偏移带过去，没有就整章换。 */
-    fun toNext(advance: Int) {
-        if (chapterPending) return
+    fun toNext() {
+        if (chapterPending()) return
         val next = (index + 1 until info.chapters.size).firstOrNull { !info.chapters[it].locked }
         if (next == null) { ReaderAuto.stop(); toast("已是最后一章"); return }
         cancelMotion()
-        chapterPending = true
         ReaderUi.anchor = null
-        val resume = if (next == index + 1) spliceAnchor(advance) else null
-        if (resume != null) {
-            ReaderUi.restoreKey = "${readingId(info)}#$next"
-            ReaderUi.restoreChars = resume.chars
-            ReaderUi.restoreDelta = resume.delta
-        }
         ReaderUi.capture?.invoke(1)
         preview(info, next)
     }
     fun toPrevious() {
-        if (chapterPending) return
+        if (chapterPending()) return
         if ((index - 1 downTo 0).none { !info.chapters[it].locked }) {
             toast("已是第一章")
             return
         }
         cancelMotion()
-        chapterPending = true
         prevChapter(info, index, atEnd = true)
     }
 
@@ -725,14 +721,13 @@ internal fun MainActivity.showReader(
      * 落点再吸附到行顶，行号用落点所在那一块自己的 layout（两块版式相同，坐标独立）。
      */
     fun scrollPage(forward: Boolean) {
-        if (chapterPending || !body.isLaidOut) return
+        if (chapterPending() || !body.isLaidOut) return
         cancelMotion()
-        userMoved = true
         val limit = scrollLimit(body)
         val from = body.scrollY
         val vp = (body.height - body.paddingTop - body.paddingBottom).coerceAtLeast(1)
         val pageStep = ReaderPaging.step(vp, tv.lineHeight)
-        if (forward && from >= limit) { toNext(pageStep); return }
+        if (forward && from >= limit) { toNext(); return }
         if (!forward && from <= 0) { toPrevious(); return }
 
         // 两块的行顶：控件在滚动内容里的顶边 + 自身 paddingTop，与章内查找同一套算法。
@@ -814,7 +809,7 @@ internal fun MainActivity.showReader(
                 if (!ReaderAuto.on || !body.isAttachedToWindow) { ReaderAuto.stop(); return }
                 if (ReaderMenu.open) return
                 scrollPage(true)
-                if (ReaderAuto.handle === this && ReaderAuto.on && !chapterPending) {
+                if (ReaderAuto.handle === this && ReaderAuto.on && !chapterPending()) {
                     ReaderAuto.MAIN.postDelayed(this, ReaderAuto.sec * 1000L)
                 }
             }
@@ -838,20 +833,31 @@ internal fun MainActivity.showReader(
         }
     })
     body.onInputStart = {
-        userMoved = true
         cancelPageMotion()
         ReaderAuto.cancel()
         if (!ReaderMenu.open && ReaderAuto.on) scheduleAuto()
     }
     body.onBoundary = { forward, distance ->
-        if (!ReaderMenu.open && !chapterPending && body.isLaidOut) {
-            if (forward) toNext(distance) else toPrevious()
+        if (!ReaderMenu.open && !chapterPending() && body.isLaidOut) {
+            if (forward) toNext() else toPrevious()
         }
     }
+    var touchY = 0f
+    var touchScroll = 0
     body.setOnTouchListener { _, e ->
         if (e.actionMasked == MotionEvent.ACTION_DOWN) {
+            touchY = e.y
+            touchScroll = body.scrollY
             cancelMotion()
             ReaderAuto.cancel()
+        }
+        if (e.actionMasked == MotionEvent.ACTION_UP && !ReaderMenu.open && !chapterPending()) {
+            // 同一手势先滚到边界再继续拖：用未被正文消费的距离判断，不能要求再拖一次。
+            val drag = touchY - e.y
+            val unconsumed = drag - (body.scrollY - touchScroll)
+            val threshold = android.view.ViewConfiguration.get(this).scaledTouchSlop * 2
+            if (unconsumed > threshold && body.scrollY >= scrollLimit(body)) toNext()
+            else if (unconsumed < -threshold && body.scrollY <= 0) toPrevious()
         }
         taps.onTouchEvent(e)
         // 返回 false：事件继续交给 ScrollView，滚动、表冠、长按都不受影响。
@@ -1116,46 +1122,7 @@ internal fun MainActivity.showReader(
     foot.addView(next, LinearLayout.LayoutParams(Md3.dp(this, 28), Md3.dp(this, 28)))
     foot.layoutParams = Md3.lpDp(this, null, 36)
 
-    // 亮度行：照 legado `ReadBookMenuBarBottom.kt:138-158` 的「跟随系统按钮 + 亮度滑条」。
-    // 按钮亮 = 跟随系统开着；一拖滑条就退出跟随系统（legado 的 ToggleBrightnessAuto 同义）。
-    val brightRow = Md3.row(this)
-    brightRow.setPadding(Md3.dp(this, 12), 0, Md3.dp(this, 12), 0)
-    brightRow.setBackgroundColor(readerBackground)
-    val autoBtn = Icons.view(this, "brightness", readerMuted, 18)
-    autoBtn.minimumWidth = Md3.dp(this, 32)
-    autoBtn.minimumHeight = Md3.dp(this, 32)
-    autoBtn.isClickable = true
-    autoBtn.contentDescription = "跟随系统亮度"
-    autoBtn.background = Md3.ripple(this, Color.TRANSPARENT, Md3.dp(this, 16).toFloat())
-    fun paintAuto() { autoBtn.tint = if (ReaderUi.brightAuto) readerAccent else readerMuted }
-    paintAuto()
-    brightRow.addView(autoBtn, LinearLayout.LayoutParams(Md3.dp(this, 32), Md3.dp(this, 32)))
-    // max 取 85：亮度档是 0.15–1.0，每格 1% 正好 85 档。
-    val brightSeek = android.widget.SeekBar(this)
-    brightSeek.max = 85
-    brightSeek.progress = (((ReaderUi.bright - 0.15f) / 0.85f) * 85).toInt().coerceIn(0, 85)
-    // SeekBar 自带 48 dp 最小高，不归零会把 32 dp 的亮度行顶高。
-    brightSeek.minimumHeight = 0
-    brightSeek.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
-        override fun onProgressChanged(sb: android.widget.SeekBar?, p: Int, fromUser: Boolean) {
-            if (!fromUser) return
-            // 一动手就不再跟随系统：手动值优先，否则改了也看不出变化。
-            if (ReaderUi.brightAuto) { ReaderUi.brightAuto = false; paintAuto() }
-            ReaderUi.bright = 0.15f + p / 85f * 0.85f
-            applyBright()
-        }
-        override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
-        // 拖动过程中每帧写盘没有意义，松手存一次。
-        override fun onStopTrackingTouch(sb: android.widget.SeekBar?) { saveReaderExtras() }
-    })
-    autoBtn.setOnClickListener {
-        ReaderUi.brightAuto = !ReaderUi.brightAuto
-        paintAuto()
-        applyBright()
-        saveReaderExtras()
-    }
-    brightRow.addView(brightSeek, LinearLayout.LayoutParams(0, Md3.dp(this, 32), 1f))
-    brightRow.layoutParams = Md3.lpDp(this, null, 32)
+    // 亮度始终交还系统，底栏仅保留进度和工具格。
 
     // 底栏三行（自上而下）：分隔线 / 亮度行 32 / 分隔线 / 进度行 36 / 分隔线 / 工具格。
     // 行序照 legado 的 ReadBookMenuBarBottom：亮度在上、进度居中、工具格在下。
@@ -1164,8 +1131,6 @@ internal fun MainActivity.showReader(
     val bottom = Md3.column(this)
     bottom.setBackgroundColor(readerBackground)
     bottom.isClickable = true
-    bottom.addView(View(this).apply { setBackgroundColor(hairline) }, Md3.lpDp(this, null, 1))
-    bottom.addView(brightRow)
     bottom.addView(View(this).apply { setBackgroundColor(hairline) }, Md3.lpDp(this, null, 1))
     bottom.addView(foot)
     bottom.addView(View(this).apply { setBackgroundColor(hairline) }, Md3.lpDp(this, null, 1))
@@ -1284,7 +1249,7 @@ internal fun MainActivity.showReader(
         // 从上屏退上来的：落在上一章末屏，接着往上读。
         // legado 的窗口一次带四页，退一屏跨章时看到的正是上一章的末页，不是章首。
         // 有拼接块时章末是正文底边：整页底会落进下一章的开头（读的是别人的字）。
-        placeBeforeDraw { if (tvNext != null) mainLimit() else Int.MAX_VALUE }
+        placeBeforeDraw { mainLimit() }
     } else if (pinnedChars >= 0) {
         // 拼接块里读完换过来的：按字符偏移落位。新页自己排版后的行号才是准的，
         // 旧页的像素坐标在这里没有意义（那个坐标里多着一整章正文）。
@@ -1306,34 +1271,11 @@ internal fun MainActivity.showReader(
     val nextCh = info.chapters.getOrNull(index + 1)
     if (nextCh != null && !nextCh.locked) {
         bg(curScreen, body = { loadOpening(info, nextCh, src) }) { r ->
-            val full = r.getOrNull().orEmpty()
-            val raw = spliceHead(full)
-            // 页面已换代（换章 / 改设置重建）：旧章的开头不能往新页上接。
-            if (raw.isEmpty() || spliceGen != ReaderUi.spliceGen) return@bg
-            // 正文已从视图树摘下（已离开阅读页）也不再接。
-            if (body.parent == null || chapterPending) return@bg
-            ReaderUi.opening = ReaderUi.Opening(openingKey(info, nextCh), full)
-            col.addView(View(this).apply { setBackgroundColor(hairline) },
-                Md3.lpDp(this, null, 1))
-            val nxTitle = Md3.text(this, nextCh.title, readerSize + ReaderUi.titleAdd,
-                readerInk, bold = ReaderUi.titleBold)
-            col.addView(nxTitle)
-            val nx = Md3.text(this, "", readerSize, readerInk)
-            nx.setPadding(Md3.dp(this, 3), Md3.dp(this, 2), Md3.dp(this, 3), Md3.dp(this, 24))
-            col.addView(nx)
-            ReaderUi.nextTitleView = nxTitle
-            ReaderUi.nextView = nx
-            ReaderUi.nextRaw = raw
-            tvNext = nx
-            // 样式与正文完全同一条路：改字号 / 行距时两块一起变。
-            styleBody(nx, raw)
-            // 新标题也得跟上「标题位置 / 字号」设置：它就是一个章标题。
-            restyleTitle(readerInk)
-            // 从下一章退上来、这一页本应落在「章末」：有拼接块时章末是正文底边。
-            // 用户已输入或程序已翻页时，迟到的预取不能把视口拉回章末。
-            if (atEnd && !userMoved) placeBeforeDraw {
-                if (userMoved) body.scrollY else mainLimit()
+            val full = r.getOrNull() ?: return@bg
+            if (spliceGen == ReaderUi.spliceGen && body.parent != null) {
+                ReaderUi.opening = ReaderUi.Opening(openingKey(info, nextCh), full)
             }
+
         }
     }
 
@@ -1417,7 +1359,10 @@ internal fun MainActivity.showReader(
         ReaderUi.themeHint = false
         pill("brightness", if (light) "切换到深色模式" else "切换到浅色模式") {
             // 只换底色，字号行距不动；重建页是因为整套前景色都得跟着换。
-            saveReaderPrefs(readerSize, readerSpacing, if (light) DARK_BG else Color.WHITE)
+            ReaderUi.restoreKey = findKey
+            ReaderUi.restoreAt = body.scrollY
+            saveReaderPrefs(readerSize, readerSpacing,
+                if (light) ReaderStyle.BG_FANQIE_NIGHT else ReaderStyle.BG_FANQIE_DAY)
             showReader(info, index, text, src)
         }
     }
@@ -1440,7 +1385,7 @@ internal fun MainActivity.showReader(
  */
 internal fun MainActivity.restyleReader(raw: String) {
     val tv = ReaderUi.bodyView ?: return
-    val ink = readerInkFor(readerBackground)
+    val ink = Md3.onSurface
     styleBody(tv, raw)
     // 拼接块里的下一章正文用同一条样式：不同步就会在翻过去时字号突换一档。
     ReaderUi.nextView?.let { styleBody(it, ReaderUi.nextRaw) }
@@ -1454,7 +1399,7 @@ internal fun MainActivity.restyleReader(raw: String) {
  * [raw] 必须是**原始文本**（未缩进、未挂 span）。
  */
 internal fun MainActivity.styleBody(tv: TextView, raw: String) {
-    val ink = readerInkFor(readerBackground)
+    val ink = Md3.onSurface
     // 缩进改的是文本本身，先把文本重设一遍再挂段距 span：
     // 旧的 ParaSpan 不会自己脱落，段距改回「无」时必须整串重设。
     val shown = if (raw.isEmpty()) "本章无正文" else shownText(raw)
@@ -1758,40 +1703,44 @@ private const val COVER_MS = 220L
 private fun openingKey(info: BookInfo, ch: ChapterRef): String =
     "${info.bookId}\u0000${info.name}\u0000${info.author}\u0000${ch.itemId}"
 
-/** 拼接块的长度：约两屏多一点，足够滚到底再跳章时不重读。 */
-private const val SPLICE_CHARS = 800
-
-/** 拼接块用的那一段：切在段落边界上，下一章正文不从半句接起。 */
-private fun spliceHead(text: String): String {
-    if (text.length <= SPLICE_CHARS) return text
-    val cut = text.lastIndexOf('\n', SPLICE_CHARS)
-    return if (cut > SPLICE_CHARS / 2) text.substring(0, cut) else text.substring(0, SPLICE_CHARS)
-}
-
 /**
  * 取一章正文（拼接块用），与 [preview] 同一条路。
  *
- * 先本地缓存（jobsStore 里该章 itemId 的 content）净化转纯文本，
- * 本地没有才联网取；任何异常一律吞掉返回空串 —— 拼接块是锦上添花，
- * 不能因为多取一章把正文页弄挂。
+ * 先读本地缓存，缺章再联网。预取和主动加载共享正在执行的任务，
+ * 异常交由调用方处理，失败不缓存空正文。
  * 注意这是阻塞调用，必须在 [bg] 的线程里跑。
  */
 private fun MainActivity.loadOpening(
     info: BookInfo,
     ch: ChapterRef,
     src: BookSource?,
-): String = try {
+): String {
+    val key = openingKey(info, ch)
+    val task = synchronized(ReaderUi.requests) {
+        ReaderUi.requests[key] ?: java.util.concurrent.FutureTask<String> {
+            readChapterText(info, ch, src)
+        }.also { ReaderUi.requests[key] = it }
+    }
+    try {
+        task.run() // FutureTask 只执行一次；其他调用等待同一结果。
+        return task.get()
+    } finally {
+        synchronized(ReaderUi.requests) {
+            if (ReaderUi.requests[key] === task && task.isDone) ReaderUi.requests.remove(key)
+        }
+    }
+}
+
+private fun MainActivity.readChapterText(info: BookInfo, ch: ChapterRef, src: BookSource?): String {
     val line = if (matchingBookJob(info) != null) jobsStore().readChapter(info.bookId, ch.itemId) else null
     val localHtml = line?.let { TinyJson.path(it, "content") }
     // 本地书缺章不联网：返回空串，拼接块自然跳过。
-    val html = localHtml ?: if (LocalImport.isLocal(info.bookId)) ""
+    val html = localHtml ?: if (LocalImport.isLocal(info.bookId)) error("这一章没有正文，导入时丢了")
                           else (src ?: sourceForBook(info) ?: error("原书源不可用，且本章没有缓存，请换源")).content(ch.itemId, info.bookId)
     val raw = bodyText(html, LocalImport.isLocal(info.bookId))
     val full = ReplaceRuleStore.apply(raw, isTitle = false, bookId = info.bookId)
     // 工作线程只返回数据。缓存由通过世代校验的主线程回调发布。
-    full
-} catch (e: Exception) {
-    ""
+    return full
 }
 
 /**
@@ -1891,9 +1840,8 @@ internal fun MainActivity.preview(
         else -> null
     } ?: sourceForBook(info),
 ) {
-    val ch = info.chapters[index]
-    // 正文要重取，屏上的菜单连着的旧视图树跟着作废。
-    com.watchdl.ui.reader.ReaderMenu.reset()
+    val ch = info.chapters.getOrNull(index) ?: return
+    // 等待期间保留旧页回调；失败后旧页仍可操作。
     // 换章不清屏（legado 是旧页一直画着、新页就绪后当帧换窗口，
     // `feature/reader/ReaderCanvasSurface.kt:607-636` 的 pendingPageWindow）：
     // 已在阅读页时旧正文继续显着，正文取到后同帧交给 showReader 替换。
@@ -1910,54 +1858,51 @@ internal fun MainActivity.preview(
     val owner: Screen = curScreen
     // 连点两下就会有两个线程在跑，先发的可能后回来盖掉新章。
     val token = ++ReaderUi.pageToken
+    ReaderUi.pendingToken = token
+    val previous = owner as? Screen.Reader
+    val previousOffset = readerBody?.scrollY ?: 0
+    scrollSave?.let { readerBody?.removeCallbacks(it) }
+    if (previous != null) saveOffset(previous.info, previous.index, previousOffset)
+
+    fun clearRequest() {
+        if (ReaderUi.pendingToken == token) ReaderUi.pendingToken = null
+    }
+    fun failed(error: Throwable) {
+        clearRequest()
+        ReaderUi.takeSnap()?.recycle()
+        ReaderUi.restoreKey = ""
+        ReaderUi.restoreAt = -1
+        ReaderUi.restoreChars = -1
+        ReaderUi.restoreDelta = 0
+        toast("正文失败：${error.message}")
+        if (previous == null) showToc(info, src)
+        else ReaderAuto.reschedule?.invoke()
+    }
 
     // 拼接块预取时已经把这一章的**整文**取下来了：直接上屏，不起线程、不读盘。
     // 顺读时每章都命中，换页的等待就只剩排版。
     val opening = ReaderUi.opening
     if (opening?.key == openingKey(info, ch) && opening.text.isNotEmpty()) {
         ReaderUi.opening = null
+        clearRequest()
         showReader(info, index, opening.text, src, atEnd)
         return
     }
 
     thread {
         try {
-            val line = if (matchingBookJob(info) != null) jobsStore().readChapter(info.bookId, ch.itemId) else null
-            val localHtml = line?.let { TinyJson.path(it, "content") }
-            // 本地书没有网络源兜底：缺章就是缺章，说明白比拿 local:xxx 去发请求好。
-            if (localHtml == null && LocalImport.isLocal(info.bookId)) {
-                postAlive(owner) {
-                    if (token == ReaderUi.pageToken) {
-                        ReaderUi.takeSnap()?.recycle()
-                        ReaderUi.restoreKey = ""
-                        ReaderUi.restoreChars = -1
-                        ReaderUi.restoreAt = -1
-                        ReaderUi.restoreDelta = 0
-                        toast("这一章没有正文，导入时丢了")
-                        showToc(info, src)
-                    }
-                }
-                return@thread
-            }
-            val actualSrc = if (localHtml == null) {
-                src ?: error("原书源不可用，且本章没有缓存，请换源")
-            } else src
-            val html = localHtml ?: actualSrc!!.content(ch.itemId, info.bookId)
-            val raw = bodyText(html, LocalImport.isLocal(info.bookId))
-            // 只过滤正文，章标题**不过滤**：目录里的标题一旦被规则吃掉，用户就找不到章，
-            // 这个代价比「标题里的广告尾巴没去掉」大得多。所以在 preview 这一处做，
-            // 不在目录、不在 showReader。
-            val text = ReplaceRuleStore.apply(raw, isTitle = false, bookId = info.bookId)
+            val text = loadOpening(info, ch, src)
             postAlive(owner) {
                 if (token != ReaderUi.pageToken) return@postAlive
-                showReader(info, index, text, actualSrc, atEnd)
+                clearRequest()
+                showReader(info, index, text, src, atEnd)
             }
         } catch (e: Exception) {
             postAlive(owner) {
                 if (token != ReaderUi.pageToken) return@postAlive
                 // 这一页没建成：抓下的旧屏位图没用了，不回收就泄一张整屏。
                 ReaderUi.takeSnap()?.recycle()
-                toast("正文失败：${e.message}"); showToc(info, src)
+                failed(e)
             }
         }
     }

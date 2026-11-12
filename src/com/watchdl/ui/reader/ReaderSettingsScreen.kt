@@ -9,6 +9,7 @@ import com.watchdl.core.BookInfo
 import com.watchdl.core.BookSource
 import com.watchdl.core.ReaderStyle
 import com.watchdl.core.Screen
+import com.watchdl.core.readingId
 import com.watchdl.ui.my.showReplace
 import com.watchdl.ui.theme.Md3
 import com.watchdl.ui.theme.Widgets
@@ -45,6 +46,9 @@ private const val PREVIEW_TEXT = "夜里风声很轻。\n他翻过一页。"
 internal fun MainActivity.showReaderSettings(
     info: BookInfo, index: Int, text: String, src: BookSource?,
 ) {
+    // 设置离开正文前固定当前位置，返回和切主题都恢复同一屏。
+    ReaderUi.restoreKey = "${readingId(info)}#$index"
+    ReaderUi.restoreAt = readerBody?.scrollY ?: readerOffset
     setScreen(Screen.ReaderSettings(info, index, text, src))
     root.removeAllViews()
 
@@ -136,19 +140,15 @@ internal fun MainActivity.showReaderSettings(
 
         // ── 外观 ───────────────────────────────────────────
         card("外观") { g ->
-            chips(g, "底色", listOf("日" to false as Any, "夜" to true),
-                { Color.red(readerBackground) <= 100 }) { night ->
+            chips(g, "主题", listOf("日" to false as Any, "夜" to true),
+                { Color.red(Md3.surface) <= 100 }) { night ->
                 // 底色一换，整套前景色都要跟着换，只能重建整屏；这也是本页唯一离开此屏的项。
                 val bg = if (night as Boolean) ReaderStyle.BG_FANQIE_NIGHT else ReaderStyle.BG_FANQIE_DAY
                 saveReaderPrefs(readerSize, readerSpacing, bg)
                 saveReaderExtras()
                 showReader(info, index, text, src)
             }
-            slider(g, "亮度", 0.15f, 1f, 17, ReaderUi.bright, { "${(it * 100).toInt()}%" }) {
-                // 手动改亮度就退出跟随系统，与底栏那条亮度滑条同一口径。
-                ReaderUi.bright = it
-                ReaderUi.brightAuto = false
-            }
+
         }
 
         // ── 正文 ───────────────────────────────────────────

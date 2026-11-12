@@ -8,10 +8,8 @@ import android.widget.TextView
 import com.watchdl.MainActivity
 import com.watchdl.core.DevLog
 import com.watchdl.core.Palette
-import com.watchdl.core.ReaderStyle
 import com.watchdl.core.Screen
 import com.watchdl.ui.reader.ReaderUi
-import com.watchdl.ui.reader.readerInkFor
 import com.watchdl.ui.reader.loadReaderExtras
 import com.watchdl.ui.reader.saveReaderExtras
 import com.watchdl.ui.source.showSources
@@ -128,7 +126,7 @@ private fun MainActivity.settingsMain(col: LinearLayout) {
  * 当前那行照 legado 的 `option` 位写「当前」，用主色。
  *
  * legado 这页还有主题模式（跟随/浅/深）、纯黑、字体、切图标、字体缩放、背景图、模糊：
- * 本应用只有深色档、没有字体与背景图能力，这些不造假开关。
+ * 本应用仅提供共享日夜主题，不提供字体与背景图开关。
  */
 private fun MainActivity.settingsTheme(col: LinearLayout) {
     col.addView(Widgets.groupCard(this, "配色") { g ->
@@ -156,7 +154,7 @@ private fun MainActivity.settingsTheme(col: LinearLayout) {
         g.addView(Widgets.groupItem(
             ctx = this,
             title = "恢复默认",
-            subtitle = "恢复墨绿书页。保留阅读设置与书架排序。",
+            subtitle = "恢复日间主题。保留阅读设置与书架排序。",
             onClick = { askResetPalette() },
         ))
     })
@@ -166,7 +164,7 @@ private fun MainActivity.settingsTheme(col: LinearLayout) {
 private fun MainActivity.askResetPalette() {
     Widgets.md3Dialog(
         this, "恢复默认配色",
-        body = "应用配色恢复为墨绿书页，不改阅读排版与书架排序。",
+        body = "应用与阅读恢复日间主题，不改阅读排版与书架排序。",
         confirm = "恢复",
         onConfirm = {
             pickTheme(Palette.DEFAULT_ID)
@@ -183,12 +181,7 @@ private fun MainActivity.paletteDot(color: Int): android.view.View = android.vie
 }
 
 /**
- * 阅读界面：预览块 + 「屏幕显示与亮度」组 + 「正文」组。
- *
- * 分组照 legado `ReadConfigScreen`：屏幕显示与亮度、翻页控制、其他。
- * 我们没有屏幕方向和翻页方式（手表只有表冠与触摸滚动），留下的项按语义归两组：
- * 背景、亮度、跟随系统、护眼是「屏幕」，字号、行距、段距、首行缩进是「正文」。
- * 亮度、护眼、段距、缩进本来就有（阅读页菜单里能改），这里只是把它们露出来。
+ * 阅读界面：共享主题预览与正文排版。亮度始终交还系统。
  */
 private fun MainActivity.settingsRead(col: LinearLayout) {
     // 进页先读盘：ReaderUi 只在打开阅读页时加载过，开机直接进设置会看到默认档。
@@ -206,44 +199,12 @@ private fun MainActivity.settingsRead(col: LinearLayout) {
     fun paintPreview() {
         preview.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, readerSize)
         preview.setLineSpacing(Md3.dp(this, 1).toFloat(), readerSpacing)
-        preview.setTextColor(readerInkFor(readerBackground))
-        preview.background = Md3.bg(readerBackground, Md3.dp(this, 10).toFloat())
+        preview.setTextColor(Md3.onSurface)
+        preview.background = Md3.bg(Md3.surface, Md3.dp(this, 10).toFloat())
     }
 
-    val bgs = listOf(
-        "深" to Color.rgb(20, 18, 24),
-        "浅" to Color.WHITE,
-        "暖" to Color.rgb(255, 248, 230),
-    )
-
-    col.addView(Widgets.groupCard(this, "屏幕显示与亮度") { g ->
-        segmentRow(g, "背景", bgs.map { it.first to (it.second as Any) },
-            get = { readerBackground as Any },
-            set = { readerBackground = it as Int }) {
-            saveReaderPrefs(readerSize, readerSpacing, readerBackground)
-            paintPreview()
-        }
-        // 亮度这里只给三档：设置页是全局项，详细排版去阅读页的「阅读设置」调。
-        segmentRow(g, "亮度", listOf("暗" to 0, "中" to 1, "亮" to 2).map { it.first to (it.second as Any) },
-            get = { ReaderStyle.brightTier(ReaderUi.bright) as Any },
-            set = { ReaderUi.bright = ReaderStyle.brightValue(it as Int) }) {
-            // 只落盘，不在这里改窗口亮度：applyBright 压的是整个窗口，
-            // 而离开阅读页本来就没复位（已知遗留）。从设置里改会连书架一起变暗。
-            saveReaderExtras()
-        }
-        // legado 的亮度是「滑杆 + 跟随系统」两项；我们的滑杆在阅读页里，设置页给三档。
-        // 跟随系统这一项一直缺（`brightAuto` 存了盘却没处改），这里补上。
-        segmentRow(g, "跟随系统", listOf("关" to false, "开" to true).map { it.first to (it.second as Any) },
-            get = { ReaderUi.brightAuto as Any },
-            set = { ReaderUi.brightAuto = it as Boolean }) {
-            saveReaderExtras()
-        }
-        segmentRow(g, "护眼", listOf("关" to false, "开" to true).map { it.first to (it.second as Any) },
-            get = { ReaderUi.eyeCare as Any },
-            set = { ReaderUi.eyeCare = it as Boolean }) {
-            saveReaderExtras()
-        }
-    })
+    col.addView(Md3.text(this, "日夜主题与应用外观一致，亮度跟随系统",
+        Md3.FS_SM, Md3.onSurfaceVariant))
 
     col.addView(Widgets.groupCard(this, "正文") { g ->
         // 字号与行距用滑杆：三档粒度太粗，字号差一档就过大（legado 是 −/+ 与滑杆）。

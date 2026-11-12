@@ -10,7 +10,7 @@ package com.watchdl.core
  * 纯 JVM 自检才能验对比度与层级（见 `test/PaletteTest.kt`）。
  * 装配到 `Md3` 的是 `ui/theme/Md3.applyPalette`。
  *
- * 深浅主题均通过色角色装配，调用方只认 id。阅读背景独立存储，不随配色覆盖。
+ * 全局与阅读共用日夜色角色。旧配色只用于迁移深浅模式。
  */
 class Palette(
     val id: String,
@@ -35,10 +35,10 @@ class Palette(
 ) {
     companion object {
 
-        /** 保留现有默认墨绿。新主题不覆盖已存储的主题与阅读背景。 */
-        const val DEFAULT_ID = "warmpaper"
+        /** 日间为默认模式，夜间沿用低亮度中性色。 */
+        const val DEFAULT_ID = "day"
 
-        val all: List<Palette> = listOf(
+        private val legacy: List<Palette> = listOf(
             Palette(
                 id = "inkgreen", name = "墨绿书页",
                 primary = 0xFFB6E1C8.toInt(), onPrimary = 0xFF14251C.toInt(),
@@ -67,7 +67,7 @@ class Palette(
                 id = "elink", name = "素",
                 primary = 0xFFFFFFFF.toInt(), onPrimary = 0xFF000000.toInt(),
                 primaryContainer = 0xFFFFFFFF.toInt(), onPrimaryContainer = 0xFF000000.toInt(),
-                secondaryContainer = 0xFF808080.toInt(), onSecondaryContainer = 0xFFFFFFFF.toInt(),
+                secondaryContainer = 0xFF707070.toInt(), onSecondaryContainer = 0xFFFFFFFF.toInt(),
                 surface = 0xFF0E0E0E.toInt(), surface1 = 0xFF1C1B1B.toInt(), surface2 = 0xFF201F1F.toInt(),
                 surface3 = 0xFF2A2A2A.toInt(), surface4 = 0xFF353434.toInt(),
                 onSurface = 0xFFFFFFFF.toInt(), onSurfaceVariant = 0xFFC4C7C5.toInt(),
@@ -186,7 +186,23 @@ class Palette(
             ),
         )
 
-        /** id 认不出来时回默认色，不抛。老存档的 id 作废不该让应用起不来。 */
-        fun find(id: String?): Palette = all.firstOrNull { it.id == id } ?: all.first { it.id == DEFAULT_ID }
+        val all: List<Palette> = listOf(
+            legacy.first { it.id == "warmpaper" }.mode("day", "日间"),
+            legacy.first { it.id == "elink" }.mode("night", "夜间"),
+        )
+
+        private fun Palette.mode(id: String, name: String) = Palette(
+            id, name, primary, onPrimary, primaryContainer, onPrimaryContainer,
+            secondaryContainer, onSecondaryContainer, surface, surface1, surface2,
+            surface3, surface4, onSurface, onSurfaceVariant, outline, outlineVariant, error,
+        )
+
+        /** 旧主题保持原深浅倾向，不触碰字号、排版与阅读进度。 */
+        fun find(id: String?): Palette {
+            all.firstOrNull { it.id == id }?.let { return it }
+            val old = legacy.firstOrNull { it.id == id }
+            val night = old != null && ((old.surface ushr 16) and 255) < 128
+            return all.first { it.id == if (night) "night" else DEFAULT_ID }
+        }
     }
 }

@@ -20,8 +20,8 @@ KOTLIN_LIB="${KOTLIN_LIB:-$PREFIX/opt/kotlin/lib}"
 OUT="$ROOT/build"
 MIN_SDK=30
 TARGET_SDK=34
-APP_VERSION="${APP_VERSION:-1.6.1.2}"
-APP_VERSION_CODE="${APP_VERSION_CODE:-43}"
+APP_VERSION="${APP_VERSION:-1.6.1.3}"
+APP_VERSION_CODE="${APP_VERSION_CODE:-44}"
 
 # kotlinc 读 JAVA_OPTS（$PREFIX/bin/kotlinc 只在未设置时用默认 -Xmx512M）。
 # 本机内存被系统压到只剩几百兆，编译峰值必须自己封顶：串行 GC 不占并发 GC 线程池，
@@ -185,7 +185,7 @@ if [ "${1:-}" = "test" ]; then
   run_kotlinc "$OUT/uicheck.jar" $(find "$ROOT/src" -name '*.kt')
   rm -f "$OUT/uicheck.jar"
   echo "== 运行 =="
-  for t in CoreTest CharsetFontDecoderTest ChapterOrderTest CloudSourceTest DownloadTest EngineTest HttpTest P0RegressionTest FinishTest SignTest RankConfigTest RankFilterTest ShelfStoreTest ReadingBookStoreTest JobDirectoryIdentityTest RotationTest AsyncGuardTest NavProgressTest JobLockTest CacheUsageTest com.watchdl.core.RuleBoundaryTest TocBudgetTest TextSelectorTest LegadoDefaultTest DevLogTest JsSyntaxProbeTest Es5CompatTest JsApiSurfaceTest UrlJsTest SearchPartialTest PaletteTest BackAffordanceTest IconDataTest ReaderPagingTest com.watchdl.core.SourceImportPreviewTest ReplaceImportB1Test SecondaryFeaturesTest com.watchdl.test.CrownMotionTest com.watchdl.test.AppUpdateTest; do
+  for t in CoreTest CharsetFontDecoderTest ChapterOrderTest CloudSourceTest DownloadTest EngineTest HttpTest P0RegressionTest FinishTest SignTest RankConfigTest RankFilterTest ShelfStoreTest ReadingBookStoreTest ReaderStoreIndexTest JobDirectoryIdentityTest RotationTest AsyncGuardTest NavProgressTest JobLockTest CacheUsageTest com.watchdl.core.RuleBoundaryTest TocBudgetTest TextSelectorTest LegadoDefaultTest DevLogTest JsSyntaxProbeTest Es5CompatTest JsApiSurfaceTest UrlJsTest SearchPartialTest PaletteTest BackAffordanceTest IconDataTest ReaderPagingTest com.watchdl.core.SourceImportPreviewTest ReplaceImportB1Test SecondaryFeaturesTest com.watchdl.test.CrownMotionTest com.watchdl.test.AppUpdateTest; do
     echo "--- $t ---"
     test_env=(env -u SONOVEL_RULES "CHARSET_JSON=${CHARSET_JSON:-$ROOT/app/assets/charset.json}")
     sonovel_rules="${SONOVEL_RULES:-$HOME/novel/sonovel/rules/main.json}"
