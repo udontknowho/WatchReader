@@ -13,6 +13,12 @@ fun main() {
         check(store.books().size == 1)
         check(ShelfStore(file).find(info.bookId)?.info == info)
         check(store.find(info.bookId)?.addedAt == 42L)
+        // 相同收藏更新不重写整个目录，跨实例读取保持一致。
+        check(file.setLastModified(1234000L))
+        val stableTime = file.lastModified()
+        repeat(5) { ShelfStore(file).add(info, "测试源") }
+        check(file.lastModified() == stableTime)
+        check(ShelfStore(file).find(info)?.addedAt == 42L)
         store.add(info.copy(name = "更新书名", chapters = emptyList()), "")
         check(store.books().size == 1)
         check(store.find(info.bookId)?.info?.chapters == info.chapters)
@@ -123,6 +129,24 @@ fun main() {
         migratedStore.migrateOnce { listOf(first, secondBook, third).map { ShelfBook(it) } }
         check(ShelfStore(migrationFile).books().map { it.info }.toSet() == setOf(first, secondBook, third))
         check(migratedStore.books().map { it.shelfId }.toSet().size == 3)
+        // 同文件跨实例串行化读改写，避免并发收藏丢失。
+        val concurrentFile = dir.resolve("concurrent-shelf.json")
+        val failures = java.util.concurrent.ConcurrentLinkedQueue<Throwable>()
+        val workers = (0 until 8).map { n -> Thread {
+            runCatching {
+                val entry = info.copy(bookId = "parallel-$n", name = "并发书$n")
+                ShelfStore(concurrentFile).add(entry, "源$n")
+                check(ShelfStore(concurrentFile).find(entry)?.info == entry)
+            }.exceptionOrNull()?.let { failures.add(it) }
+        }.apply { start() } }
+        workers.forEach { it.join() }
+        check(failures.isEmpty()) { failures.toString() }
+        check(ShelfStore(concurrentFile).books().size == 8)
+        val mutableChapters = info.chapters.toMutableList()
+        val isolated = info.copy(bookId = "isolated", chapters = mutableChapters)
+        ShelfStore(concurrentFile).add(isolated)
+        mutableChapters.clear()
+        check(ShelfStore(concurrentFile).find(isolated)?.info?.chapters == info.chapters)
         file.writeText("{invalid")
         check(runCatching { store.add(info) }.isFailure)
         check(file.readText() == "{invalid")

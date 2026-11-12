@@ -18,6 +18,12 @@ fun main() {
         val firstBytes = file.readBytes()
         store.save(info, "测试源")
         check(file.readBytes().contentEquals(firstBytes))
+        // 无变化保存不写盘；跨实例直接复用成功保存后的完整快照。
+        check(file.setLastModified(1234000L))
+        val stableTime = file.lastModified()
+        repeat(5) { ReadingBookStore(file).save(info, "测试源") }
+        check(file.lastModified() == stableTime)
+        check(ReadingBookStore(file).find(info) == loaded)
         store.save(info.copy(chapters = emptyList(), intro = ""))
         check(store.find(info.bookId)?.info == info)
         check(store.find(info.bookId)?.sourceName == "测试源")
@@ -84,6 +90,24 @@ fun main() {
         ReadingHistory.remove(dir, setOf(bothEvents.first().id))
         check(ReadingHistory.list(dir).single().readingId == readingId(sharedB))
         ReadingHistory.removeBooks(dir, setOf(sharedA.bookId))
+        // 同文件多个实例并发保存不丢记录，输入目录被调用方修改不污染快照。
+        val concurrentFile = dir.resolve("concurrent-reading.json")
+        val failures = java.util.concurrent.ConcurrentLinkedQueue<Throwable>()
+        val workers = (0 until 8).map { n -> Thread {
+            runCatching {
+                val entry = info.copy(bookId = "parallel-$n")
+                ReadingBookStore(concurrentFile).save(entry, "源$n")
+                check(ReadingBookStore(concurrentFile).find(entry)?.info == entry)
+            }.exceptionOrNull()?.let { failures.add(it) }
+        }.apply { start() } }
+        workers.forEach { it.join() }
+        check(failures.isEmpty()) { failures.toString() }
+        check(ReadingBookStore(concurrentFile).books().size == 8)
+        val mutableChapters = info.chapters.toMutableList()
+        val isolated = info.copy(bookId = "isolated", chapters = mutableChapters)
+        ReadingBookStore(concurrentFile).save(isolated)
+        mutableChapters.clear()
+        check(ReadingBookStore(concurrentFile).find(isolated)?.info?.chapters == info.chapters)
         // v1 缺失来源、简介、锁定标志时仍能读取。
         file.writeText("""{"books":[{"bookId":"legacy","name":"旧书","chapters":[{"itemId":"old-c1","title":"旧章"}]}]}""")
         val legacy = ReadingBookStore(file).find("legacy")!!

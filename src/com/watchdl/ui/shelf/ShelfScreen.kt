@@ -584,22 +584,42 @@ internal fun MainActivity.readShelfBook(bookId: String, name: String, author: St
 }
 
 internal fun MainActivity.readShelfBook(request: BookInfo) {
-    val favorite = shelfStore().find(request)
-    val saved = favorite?.info ?: request
-    val job = matchingBookJob(saved)
-    val info = if (job != null && job.chapters.isNotEmpty()) saved.copy(chapters = job.chapters) else saved
-    val bookId = info.bookId
-    val src = sourceForBook(info)
-    if (info.chapters.isEmpty()) {
-        rememberReturn()
-        showDetail(info, src)
-        return
-    }
-    val at = readProgress(info).coerceIn(0, info.chapters.lastIndex)
-    com.watchdl.ui.reader.ReaderUi.fromShelf = true
-    tocSrc = src
     rememberReturn()
-    preview(info, at)
+    // 先挂加载视图，收藏解析、目录恢复与冷书源初始化不能占用点击帧。
+    val owner = Screen.Detail(request, null)
+    setScreen(owner)
+    // 入口已保存；异步进正文时不能再把 Detail 占位压进返回栈。
+    shelfBookLoading = true
+    root.removeAllViews()
+    root.addView(Widgets.topBar(this, request.name, onBack = { showShelf() }))
+    val body = Widgets.scrollBody(this, crownStep, crownGlide)
+    Widgets.contentColumn(body).addView(Widgets.emptyState(this, "refresh", "正在打开书籍…"))
+    root.addView(body)
+    val token = ++com.watchdl.ui.reader.ReaderUi.pageToken
+    bg(owner, {
+        val favorite = shelfStore().find(request)
+        val saved = favorite?.info ?: request
+        val job = matchingBookJob(saved)
+        val info = if (job != null && job.chapters.isNotEmpty()) saved.copy(chapters = job.chapters) else saved
+        val source = resolveBookSource(info.bookId, favorite
+            ?: ReadingBookStore(File(filesDir, "reading-books.json")).find(info))
+        info to source
+    }) { result ->
+        if (token != com.watchdl.ui.reader.ReaderUi.pageToken) return@bg
+        result.onSuccess { (info, src) ->
+            if (info.chapters.isEmpty()) {
+                showDetail(info, src)
+            } else {
+                com.watchdl.ui.reader.ReaderUi.fromShelf = true
+                tocSrc = src
+                val at = readProgress(info).coerceIn(0, info.chapters.lastIndex)
+                preview(info, at, src = src)
+            }
+        }.onFailure {
+            toast("打开书籍失败：${it.message}")
+            showShelf()
+        }
+    }
 }
 
 // ══════════════════ 布局设置 ══════════════════

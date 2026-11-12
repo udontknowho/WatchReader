@@ -23,10 +23,12 @@ class ReadingBookStore(private val file: File) {
         val modified = file.lastModified()
         snapshots[fileKey]?.takeIf { it.length == length && it.modified == modified }?.let { return it }
         val books = read()
-        return Snapshot(length, modified, books,
-            books.groupBy { readingId(it.info) }.mapValues { it.value.singleOrNull() },
-            books.groupBy { it.info.bookId }.mapValues { it.value.singleOrNull() }).also { snapshots[fileKey] = it }
+        return index(length, modified, books).also { snapshots[fileKey] = it }
     }
+
+    private fun index(length: Long, modified: Long, books: List<ShelfBook>) = Snapshot(length, modified, books,
+        books.groupBy { readingId(it.info) }.mapValues { it.value.singleOrNull() },
+        books.groupBy { it.info.bookId }.mapValues { it.value.singleOrNull() })
 
     fun books(): List<ShelfBook> = synchronized(lock) {
         runCatching { snapshot().books.toList() }.getOrDefault(emptyList())
@@ -43,15 +45,18 @@ class ReadingBookStore(private val file: File) {
 
     fun save(info: BookInfo, sourceName: String = "") = synchronized(lock) {
         require(info.bookId.isNotBlank()) { "书籍地址为空" }
-        val books = read()
-        val old = books.firstOrNull { readingId(it.info) == readingId(info) }
+        val current = snapshot()
+        val books = current.books
+        val id = readingId(info)
+        val old = current.identities[id]
         val book = ShelfBook(info.copy(
-            chapters = info.chapters.ifEmpty { old?.info?.chapters.orEmpty() },
+            chapters = info.chapters.ifEmpty { old?.info?.chapters.orEmpty() }.toList(),
             intro = info.intro.ifBlank { old?.info?.intro.orEmpty() },
         ), sourceName.ifBlank { old?.sourceName.orEmpty() }, old?.addedAt ?: System.currentTimeMillis())
         if (book == old) return@synchronized
         val q: (String) -> String = { Downloader.quote(it) }
-        val json = "{\"version\":2,\"books\":[" + (books.filterNot { readingId(it.info) == readingId(info) } + book)
+        val next = books.filterNot { readingId(it.info) == id } + book
+        val json = "{\"version\":2,\"books\":[" + next
             .joinToString(",") { b ->
                 val i = b.info
                 "{\"readingId\":${q(readingId(i))},\"bookId\":${q(i.bookId)},\"name\":${q(i.name)},\"author\":${q(i.author)}," +
@@ -65,7 +70,7 @@ class ReadingBookStore(private val file: File) {
         try {
             tmp.outputStream().use { out -> out.write(json.toByteArray(Charsets.UTF_8)); out.fd.sync() }
             check(tmp.renameTo(file)) { "阅读目录快照保存失败" }
-            snapshots.remove(fileKey)
+            snapshots[fileKey] = index(file.length(), file.lastModified(), next)
         } finally { tmp.delete() }
     }
 

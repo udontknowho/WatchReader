@@ -1,37 +1,62 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!--
-      深色主题。界面本身是程序化绘制的 MD3 深色，这里只负责窗口底色调性，
-      避免启动时闪白、以及状态栏/导航栏与内容不一致。
-
-      不用 Material 库的主题：项目走手工构建链，没有依赖 aapt2 之外的主题资源。
-      所以「MD3 化」只能靠覆盖平台主题属性：光标色、对话框面板、按钮强调色。
-    -->
-    <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar">
-        <item name="android:windowBackground">@color/surface</item>
-        <item name="android:colorBackground">@color/surface</item>
-        <item name="android:statusBarColor">@color/surface</item>
-        <item name="android:navigationBarColor">@color/surface</item>
+    <style name="AppTheme" parent="AppTheme.Day" />
+    <style name="AppTheme.Day" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+        <item name="android:windowBackground">#f3f0e8</item>
+        <item name="android:colorBackground">#f3f0e8</item>
+        <item name="android:statusBarColor">#f3f0e8</item>
+        <item name="android:navigationBarColor">#f3f0e8</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:textColorPrimary">#282922</item>
+        <item name="android:textColorSecondary">#606156</item>
+        <item name="android:colorAccent">#3d5942</item>
+        <item name="android:colorControlActivated">#3d5942</item>
+        <item name="android:colorControlNormal">#737b6c</item>
+        <item name="android:textColorHighlight">#663d5942</item>
+        <item name="android:colorEdgeEffect">#3d5942</item>
+        <item name="android:alertDialogTheme">@style/Md3DialogTheme.Day</item>
+        <item name="android:datePickerDialogTheme">@style/Md3DialogTheme.Day</item>
+        <item name="android:timePickerDialogTheme">@style/Md3DialogTheme.Day</item>
+    </style>
+    <style name="AppTheme.Night" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">#101113</item>
+        <item name="android:colorBackground">#101113</item>
+        <item name="android:statusBarColor">#101113</item>
+        <item name="android:navigationBarColor">#101113</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
-
-        <!-- 平台控件跟随 MD3 紫。不设的话输入框光标和对话框按钮是 OEM 绿。 -->
-        <item name="android:colorAccent">@color/md_primary</item>
-        <item name="android:colorControlActivated">@color/md_primary</item>
-        <item name="android:colorControlNormal">@color/md_outline</item>
-        <item name="android:textColorHighlight">@color/md_primary</item>
-        <item name="android:colorEdgeEffect">@color/md_primary</item>
-        <item name="android:alertDialogTheme">@style/Md3DialogTheme</item>
-        <item name="android:datePickerDialogTheme">@style/Md3DialogTheme</item>
-        <item name="android:timePickerDialogTheme">@style/Md3DialogTheme</item>
+        <item name="android:textColorPrimary">#e4e5df</item>
+        <item name="android:textColorSecondary">#b2b7b0</item>
+        <item name="android:colorAccent">#b6cfad</item>
+        <item name="android:colorControlActivated">#b6cfad</item>
+        <item name="android:colorControlNormal">#90988c</item>
+        <item name="android:textColorHighlight">#66b6cfad</item>
+        <item name="android:colorEdgeEffect">#b6cfad</item>
+        <item name="android:alertDialogTheme">@style/Md3DialogTheme.Night</item>
+        <item name="android:datePickerDialogTheme">@style/Md3DialogTheme.Night</item>
+        <item name="android:timePickerDialogTheme">@style/Md3DialogTheme.Night</item>
     </style>
-
-    <!-- 对话框：MD3 的 surface container high + 28 dp 圆角 -->
-    <style name="Md3DialogTheme" parent="@android:style/Theme.DeviceDefault.Dialog.Alert">
-        <item name="android:windowBackground">@drawable/dialog_surface</item>
-        <item name="android:colorAccent">@color/md_primary</item>
-        <item name="android:colorControlActivated">@color/md_primary</item>
-        <item name="android:textColorPrimary">@color/md_on_primary</item>
+    <style name="Md3DialogTheme" parent="Md3DialogTheme.Day" />
+    <style name="Md3DialogTheme.Day" parent="@android:style/Theme.DeviceDefault.Light.Dialog.Alert">
+        <item name="android:windowBackground">#ded8ca</item>
+        <item name="android:colorBackground">#ded8ca</item>
+        <item name="android:colorAccent">#3d5942</item>
+        <item name="android:colorControlActivated">#3d5942</item>
+        <item name="android:colorControlNormal">#737b6c</item>
+        <item name="android:textColorPrimary">#282922</item>
+        <item name="android:textColorSecondary">#606156</item>
+        <item name="android:windowMinWidthMajor">80%</item>
+        <item name="android:windowMinWidthMinor">80%</item>
+    </style>
+    <style name="Md3DialogTheme.Night" parent="@android:style/Theme.DeviceDefault.Dialog.Alert">
+        <item name="android:windowBackground">#292c30</item>
+        <item name="android:colorBackground">#292c30</item>
+        <item name="android:colorAccent">#b6cfad</item>
+        <item name="android:colorControlActivated">#b6cfad</item>
+        <item name="android:colorControlNormal">#90988c</item>
+        <item name="android:textColorPrimary">#e4e5df</item>
+        <item name="android:textColorSecondary">#b2b7b0</item>
         <item name="android:windowMinWidthMajor">80%</item>
         <item name="android:windowMinWidthMinor">80%</item>
     </style>

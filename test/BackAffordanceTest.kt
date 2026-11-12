@@ -64,11 +64,11 @@ fun main() {
     }
     // 书架不挂返回，搜索入口在标题行右端。
     val shelf = File(roots[0]).readText()
-    check("书架没有返回箭头", !shelf.contains("Widgets.topBar("))
     // 只检查 showShelf 的头栏调用，不把保留的菜单函数或书籍行菜单当成头栏事件。
     val showShelfStart = shelf.indexOf("internal fun MainActivity.showShelf(")
     val showShelfBody = if (showShelfStart >= 0)
         shelf.substring(showShelfStart).substringBefore("\ninternal fun ") else ""
+    check("书架根页没有返回箭头", showShelfBody.isNotEmpty() && !showShelfBody.contains("Widgets.topBar("))
     val headerStart = showShelfBody.indexOf("Widgets.headerRow(")
     val shelfHeader = if (headerStart >= 0) {
         val call = showShelfBody.substring(headerStart)

@@ -155,15 +155,6 @@ internal object ReaderUi {
     var nextView: TextView? = null
     var nextRaw = ""
 
-    /**
-     * 拼接块预取时拿到的**整章**正文（单槽），键是「书号#itemId」。
-     *
-     * 拼接块只显示下一章开头，但整章已经在手上。换章时直接用这份，不再起线程读盘，
-     * 换页的等待就只剩排版。内容取的是过完替换规则、没截头的全文（与 preview 同口径）。
-     */
-    data class Opening(val key: String, val text: String)
-    var opening: Opening? = null
-
     /** 换章前抓下的旧屏位图与滑动方向（1 顺读 / -1 回读）。 */
     var snap: Bitmap? = null
     var snapDir = 1
@@ -207,7 +198,8 @@ internal object ReaderUi {
     /** 等待属于当前请求；失败时解除，旧页仍可翻动。 */
     var pendingToken: Int? = null
     /** 预取和主动加载共享进行中的请求。 */
-    val requests = mutableMapOf<String, java.util.concurrent.FutureTask<String>>()
+    val requests = mutableMapOf<ChapterTextKey, java.util.concurrent.FutureTask<String>>()
+    val completed = ChapterTextCache()
 }
 
 /**
@@ -461,7 +453,7 @@ internal fun MainActivity.showReader(
     // 这里不清干净，正文那一帧会与加载页各占 root 的一半（两个 weight=1）：
     // 上半屏卡着加载提示、下半屏才是正文，每次换章重画一次就是一闪一闪。
     root.removeAllViews()
-    saveProgress(info, index)
+    saveProgress(info, index, rememberBook = false)
     // 浅色底时整套前景色都要换：正文、顶栏、底栏按钮、进度。
     // 以前只换了正文，白底上顶栏还是黑块，上下章还是浅紫，几乎看不见。
     readerBackground = Md3.surface
@@ -521,8 +513,7 @@ internal fun MainActivity.showReader(
     // 当前布局只包含本章；预取不会增加滚动高度。
     val tvNext: TextView? = null
     fun chapterPending(): Boolean = ReaderUi.pendingToken != null
-    /** 本页的拼接世代号：回调里先比它，页面重建了就把旧结果丢掉。 */
-    val spliceGen = ++ReaderUi.spliceGen
+    ++ReaderUi.spliceGen
 
     /**
      * 拼接块存在时，「本章读完」的位置是正文 tv 的底边，不是整页底边。
@@ -1270,13 +1261,8 @@ internal fun MainActivity.showReader(
     // 取不到或拿到空正文就什么都不加，行为与以前一样（章末需再戳一下）。
     val nextCh = info.chapters.getOrNull(index + 1)
     if (nextCh != null && !nextCh.locked) {
-        bg(curScreen, body = { loadOpening(info, nextCh, src) }) { r ->
-            val full = r.getOrNull() ?: return@bg
-            if (spliceGen == ReaderUi.spliceGen && body.parent != null) {
-                ReaderUi.opening = ReaderUi.Opening(openingKey(info, nextCh), full)
-            }
-
-        }
+        bg(curScreen, body = { loadOpening(info, nextCh, src); Unit }) { _ -> }
+        // 完成缓存只含数据，不再把全文挂在页面单槽，统一受条数和字符上限约束。
     }
 
     // 护眼：整屏暖色半透明层盖在正文上，不消费触摸，滚动照常。
@@ -1700,8 +1686,8 @@ private fun MainActivity.showFindResults(
 private const val COVER_MS = 220L
 
 /** 预取正文同时绑定逻辑身份，避免不同来源的相同地址复用另一书的正文。 */
-private fun openingKey(info: BookInfo, ch: ChapterRef): String =
-    "${info.bookId}\u0000${info.name}\u0000${info.author}\u0000${ch.itemId}"
+private fun openingKey(info: BookInfo, ch: ChapterRef, src: BookSource?): ChapterTextKey =
+    ChapterTextKey(src, info.bookId, info.name, info.author, ch.itemId, ch.title)
 
 /**
  * 取一章正文（拼接块用），与 [preview] 同一条路。
@@ -1715,15 +1701,19 @@ private fun MainActivity.loadOpening(
     ch: ChapterRef,
     src: BookSource?,
 ): String {
-    val key = openingKey(info, ch)
+    val key = openingKey(info, ch, src)
+    ReaderUi.completed.get(key)?.let { return applyChapterRules(info, it) }
     val task = synchronized(ReaderUi.requests) {
         ReaderUi.requests[key] ?: java.util.concurrent.FutureTask<String> {
-            readChapterText(info, ch, src)
+            // 取得请求锁后再查一次，避免刚完成的预取与主动打开重复读取。
+            ReaderUi.completed.get(key) ?: readChapterText(info, ch, src).also {
+                ReaderUi.completed.put(key, it)
+            }
         }.also { ReaderUi.requests[key] = it }
     }
     try {
         task.run() // FutureTask 只执行一次；其他调用等待同一结果。
-        return task.get()
+        return applyChapterRules(info, task.get())
     } finally {
         synchronized(ReaderUi.requests) {
             if (ReaderUi.requests[key] === task && task.isDone) ReaderUi.requests.remove(key)
@@ -1737,11 +1727,11 @@ private fun MainActivity.readChapterText(info: BookInfo, ch: ChapterRef, src: Bo
     // 本地书缺章不联网：返回空串，拼接块自然跳过。
     val html = localHtml ?: if (LocalImport.isLocal(info.bookId)) error("这一章没有正文，导入时丢了")
                           else (src ?: sourceForBook(info) ?: error("原书源不可用，且本章没有缓存，请换源")).content(ch.itemId, info.bookId)
-    val raw = bodyText(html, LocalImport.isLocal(info.bookId))
-    val full = ReplaceRuleStore.apply(raw, isTitle = false, bookId = info.bookId)
-    // 工作线程只返回数据。缓存由通过世代校验的主线程回调发布。
-    return full
+    return bodyText(html, LocalImport.isLocal(info.bookId))
 }
+
+private fun applyChapterRules(info: BookInfo, raw: String): String =
+    ReplaceRuleStore.apply(raw, isTitle = false, bookId = info.bookId)
 
 /**
  * 正文的纯文本化。
@@ -1832,13 +1822,13 @@ internal fun MainActivity.preview(
     info: BookInfo,
     index: Int,
     atEnd: Boolean = false,
-    // 默认来源只从同书页面或目标元数据解析；显式 null 保持无源，不借全局状态。
+    // 同书页面直接复用来源，冷启动来源解析放在下方工作线程。
     src: BookSource? = when (val screen = curScreen) {
         is Screen.Toc -> screen.src.takeIf { screen.info == info }
         is Screen.Reader -> screen.src.takeIf { screen.info == info }
         is Screen.Detail -> screen.src.takeIf { screen.info == info }
         else -> null
-    } ?: sourceForBook(info),
+    },
 ) {
     val ch = info.chapters.getOrNull(index) ?: return
     // 等待期间保留旧页回调；失败后旧页仍可操作。
@@ -1879,23 +1869,15 @@ internal fun MainActivity.preview(
         else ReaderAuto.reschedule?.invoke()
     }
 
-    // 拼接块预取时已经把这一章的**整文**取下来了：直接上屏，不起线程、不读盘。
-    // 顺读时每章都命中，换页的等待就只剩排版。
-    val opening = ReaderUi.opening
-    if (opening?.key == openingKey(info, ch) && opening.text.isNotEmpty()) {
-        ReaderUi.opening = null
-        clearRequest()
-        showReader(info, index, opening.text, src, atEnd)
-        return
-    }
-
+    // 命中完成缓存也在后台应用替换规则，避免正则处理阻塞上屏。
     thread {
         try {
-            val text = loadOpening(info, ch, src)
+            val source = src ?: if (LocalImport.isLocal(info.bookId)) null else sourceForBook(info)
+            val text = loadOpening(info, ch, source)
             postAlive(owner) {
                 if (token != ReaderUi.pageToken) return@postAlive
                 clearRequest()
-                showReader(info, index, text, src, atEnd)
+                showReader(info, index, text, source, atEnd)
             }
         } catch (e: Exception) {
             postAlive(owner) {

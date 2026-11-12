@@ -51,7 +51,7 @@ object Md3 {
     var error = 0xFFF2B8B5.toInt(); private set
 
     /** 成功/正常态的绿。语义色不跟主题走：换主题后「已下载」还是得是绿的。 */
-    val ok = 0xFF7BD88F.toInt()
+    val ok: Int get() = if (palette.id == "night") 0xFF7BD88F.toInt() else 0xFF286838.toInt()
 
     /** 占位封面色：按书名哈希固定选一个容器色。同一本书颜色稳定。 */
     fun nameColor(name: String): Int {
@@ -63,7 +63,18 @@ object Md3 {
     var palette: Palette = Palette.all[0]; private set
 
     /** 灌一套配色。调用方负责落盘与重画。 */
-    fun applyPalette(p: Palette) {
+    fun applyPalette(selected: Palette) {
+        val p = if (selected.id == "night") Palette(
+            "night", "夜间", 0xFFB6CFAD.toInt(), 0xFF20351F.toInt(),
+            0xFF32422F.toInt(), 0xFFD8EBCF.toInt(), 0xFF32422F.toInt(), 0xFFD8EBCF.toInt(),
+            0xFF101113.toInt(), 0xFF1C1E21.toInt(), 0xFF222428.toInt(), 0xFF292C30.toInt(), 0xFF34383D.toInt(),
+            0xFFE4E5DF.toInt(), 0xFFB2B7B0.toInt(), 0xFF90988C.toInt(), 0xFF454B43.toInt(), 0xFFFFB4AB.toInt(),
+        ) else Palette(
+            "day", "日间", 0xFF3D5942.toInt(), 0xFFFFFFFF.toInt(),
+            0xFFD6E3CF.toInt(), 0xFF1E3622.toInt(), 0xFFD6E3CF.toInt(), 0xFF1E3622.toInt(),
+            0xFFF3F0E8.toInt(), 0xFFE8E4D9.toInt(), 0xFFE3DED2.toInt(), 0xFFDED8CA.toInt(), 0xFFD4CDBE.toInt(),
+            0xFF282922.toInt(), 0xFF606156.toInt(), 0xFF737B6C.toInt(), 0xFFB9BBAE.toInt(), 0xFFB3261E.toInt(),
+        )
         palette = p
         primary = p.primary
         onPrimary = p.onPrimary
@@ -209,7 +220,7 @@ object Md3 {
             setColor(Color.WHITE)
             cornerRadius = radiusDp.toFloat()
         }
-        val rippleColor = ColorStateList.valueOf(0x22FFFFFF)
+        val rippleColor = ColorStateList.valueOf((onSurface and 0x00FFFFFF) or 0x22000000)
         return RippleDrawable(rippleColor, content, mask)
     }
 

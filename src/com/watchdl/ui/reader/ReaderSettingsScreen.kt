@@ -94,7 +94,7 @@ internal fun MainActivity.showReaderSettings(
          * `TinySliderSettingItem` 与下拉型设置项同一分工）。
          */
         fun chips(parent: LinearLayout, label: String, options: List<Pair<String, Any>>,
-                  get: () -> Any, set: (Any) -> Unit) {
+                  get: () -> Any, rebuildsScreen: Boolean = false, set: (Any) -> Unit) {
             val p = Md3.dp(this, 3)
             val row = Md3.row(this).apply { setPadding(ip, p, ip, p) }
             // 标签列收窄到 26 dp：卡里比整页少两档边距，三档芯片才排得下。
@@ -115,8 +115,11 @@ internal fun MainActivity.showReaderSettings(
                         if (sel) null else Md3.outlineVariant)
                     setOnClickListener {
                         set(opt.second)
-                        applyNow()
-                        paint()
+                        // 日夜选项已重建页面，旧闭包不得继续写脱离窗口的控件。
+                        if (!rebuildsScreen) {
+                            applyNow()
+                            paint()
+                        }
                     }
                 }
                 row.addView(chip, LinearLayout.LayoutParams(0, Md3.dp(this, 26), 1f).apply {
@@ -141,12 +144,12 @@ internal fun MainActivity.showReaderSettings(
         // ── 外观 ───────────────────────────────────────────
         card("外观") { g ->
             chips(g, "主题", listOf("日" to false as Any, "夜" to true),
-                { Color.red(Md3.surface) <= 100 }) { night ->
+                { Md3.palette.id == "night" }, rebuildsScreen = true) { night ->
                 // 底色一换，整套前景色都要跟着换，只能重建整屏；这也是本页唯一离开此屏的项。
                 val bg = if (night as Boolean) ReaderStyle.BG_FANQIE_NIGHT else ReaderStyle.BG_FANQIE_DAY
                 saveReaderPrefs(readerSize, readerSpacing, bg)
                 saveReaderExtras()
-                showReader(info, index, text, src)
+                showReaderSettings(info, index, text, src)
             }
 
         }

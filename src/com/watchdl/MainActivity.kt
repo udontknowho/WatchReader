@@ -61,8 +61,11 @@ class MainActivity : Activity() {
      * **可作废**：启动同步云端书源后要重读（见 [rebuildSources]），
      * 所以不能写成 `by lazy` —— 那样云端更新完还拿旧列表，等于白拉。
      */
-    private var multiCache: MultiSource? = null
-    internal val multi: MultiSource get() = multiCache ?: buildMulti().also { multiCache = it }
+    private val multiLock = Any()
+    @Volatile private var multiCache: MultiSource? = null
+    internal val multi: MultiSource get() = synchronized(multiLock) {
+        multiCache ?: buildMulti().also { multiCache = it }
+    }
 
     private fun buildMulti(): MultiSource {
         // 搜索也必须铺底，不能依赖用户先打开本地书源页。
@@ -129,6 +132,9 @@ class MainActivity : Activity() {
 
     private var screen: Screen = Screen.Shelf
 
+    /** 书架打开书籍时的 Detail 仅作加载占位，不是可返回的详情页。 */
+    internal var shelfBookLoading = false
+
     /**
      * 当前屏。搬出去的屏代码只读它，不写 —— 换屏一律走 [setScreen]。
      * 不能直接开放 `screen`：internal var 的 setter 与 [setScreen] 的 JVM 名撞车。
@@ -169,6 +175,9 @@ class MainActivity : Activity() {
 
     /** 切屏统一入口。换屏就意味着上一屏的后台任务全部作废。 */
     internal fun setScreen(next: Screen) {
+        val leavingShelfLoading = shelfBookLoading
+        // 包括同身份的真实详情重绘：一旦交给目标页，加载标记就失效。
+        shelfBookLoading = false
         if (screen is Screen.Reader && next != screen) {
             // 先保存旧视图，再解绑，防止删除记录后生命周期重新保存。
             saveReaderPosNow()
@@ -190,8 +199,8 @@ class MainActivity : Activity() {
         }
         cancelReturnScroll?.invoke()
         pendingReturnPoint = null
-        if (!replayingReturn && next is Screen.Reader && screen !is Screen.Reader && screen !is Screen.ReaderSettings)
-            rememberReturn()
+        if (!replayingReturn && !leavingShelfLoading && next is Screen.Reader &&
+            screen !is Screen.Reader && screen !is Screen.ReaderSettings) rememberReturn()
         if (!replayingReturn && next is Screen.Progress && screen !is Screen.Progress) rememberReturn()
         // 书架阅读页的顶栏直接 showShelf，不经过 goBackToPrevious。
         val shelfReturn = if (next == Screen.Shelf && returnStack.lastOrNull()?.screen == next)
@@ -453,7 +462,7 @@ class MainActivity : Activity() {
     private fun loadThemePrefs() {
         val p = getSharedPreferences("reader", MODE_PRIVATE)
         val palette = Palette.find(p.getString("theme", null))
-        Md3.applyPalette(palette)
+        applyAppTheme(palette)
         p.edit().putString("theme", palette.id).apply()
     }
 
@@ -463,12 +472,37 @@ class MainActivity : Activity() {
      */
     internal fun pickTheme(id: String) {
         val palette = Palette.find(id)
-        Md3.applyPalette(palette)
-        readerBackground = palette.surface
+        applyAppTheme(palette)
+        readerBackground = Md3.surface
         getSharedPreferences("reader", MODE_PRIVATE).edit()
             .putString("theme", palette.id).putInt("bg", readerBackground).apply()
         // 只从设置页进得来，重画设置页即可；滚动会回顶（主题行本来就在顶上）。
         showSettings()
+    }
+
+    /** 更新平台主题、窗口及常驻根布局；调用方随后重建当前页。 */
+    private fun applyAppTheme(palette: Palette) {
+        Md3.applyPalette(palette)
+        val night = Md3.palette.id == "night"
+        val style = appThemeStyle(palette)
+        // 重建 Theme 对象，避免从深色切浅色时残留父主题属性。
+        theme.setTo(resources.newTheme().apply { applyStyle(style, true) })
+        setTheme(style)
+        window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Md3.surface))
+        window.statusBarColor = Md3.surface
+        window.navigationBarColor = Md3.surface
+        val status = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+        val nav = if (Build.VERSION.SDK_INT >= 26) View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR else 0
+        val flags = window.decorView.systemUiVisibility and (status or nav).inv()
+        window.decorView.systemUiVisibility = flags or if (night) 0 else (status or nav)
+        if (::root.isInitialized) root.setBackgroundColor(Md3.surface)
+    }
+
+    private fun appThemeStyle(palette: Palette): Int {
+        val name = if (palette.id == "night") "AppTheme.Night" else "AppTheme.Day"
+        return resources.getIdentifier(name, "style", packageName).also {
+            check(it != 0) { "日夜主题资源缺失" }
+        }
     }
 
     /** 阅读设置落盘。以前改完只活在内存里，杀进程就全丢。 */
@@ -491,8 +525,8 @@ class MainActivity : Activity() {
         getSharedPreferences("reader", MODE_PRIVATE).getLong("last_" + readerProgressTag(info), 0L)
     internal fun readOffset(info: BookInfo): Int =
         getSharedPreferences("reader", MODE_PRIVATE).getInt("off_" + readerProgressTag(info), 0)
-    internal fun saveProgress(info: BookInfo, index: Int) {
-        saveReadingBook(info, null)
+    internal fun saveProgress(info: BookInfo, index: Int, rememberBook: Boolean = true) {
+        if (rememberBook) saveReadingBook(info, null)
         saveProgressFor(info, index)
     }
     internal fun saveOffset(info: BookInfo, index: Int, offset: Int, sync: Boolean = false) =
@@ -628,7 +662,12 @@ class MainActivity : Activity() {
         // 换个更短的章一进去就顶到底。
         if (prefs.getInt(kIndex, -1) != index) return
         val e = prefs.edit().putInt("off_$tag", offset.coerceAtLeast(0))
-        if (sync) e.commit() else e.apply()
+        // apply 立即发布内存值；同步刷盘交串行后台，生命周期不等待 fsync。
+        e.apply()
+        if (sync) historyWriter.execute {
+            runCatching { prefs.edit().commit() }
+                .onFailure { DevLog.log("History", "阅读位置刷盘失败：${it.message}") }
+        }
     }
 
     /** 立刻把当前阅读位置写盘。切后台、息屏、进程被杀前都走这里。 */
@@ -652,8 +691,8 @@ class MainActivity : Activity() {
             ReaderStyle.BG_FANQIE_NIGHT -> Palette.find("night")
             else -> Md3.palette
         }
-        Md3.applyPalette(palette)
-        readerBackground = palette.surface
+        applyAppTheme(palette)
+        readerBackground = Md3.surface
         getSharedPreferences("reader", MODE_PRIVATE).edit()
             .putFloat("size", size).putFloat("spacing", spacing)
             .putString("theme", palette.id).putInt("bg", readerBackground).apply()
@@ -687,6 +726,9 @@ class MainActivity : Activity() {
     private val exportLock = Any()
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // super 前只选父主题，不创建或访问窗口及 decorView。
+        val palette = Palette.find(getSharedPreferences("reader", MODE_PRIVATE).getString("theme", null))
+        setTheme(appThemeStyle(palette))
         super.onCreate(savedInstanceState)
         // 版面表必须在建任何视图之前定下来：手写档和手机档的导航/页签高度不同。
         Md3.load(this)
@@ -910,7 +952,7 @@ class MainActivity : Activity() {
 
     /** 把 multi 缓存作废并重读源目录。必须先重建才能拿到新库。 */
     internal fun rebuildSources(then: () -> Unit = {}) {
-        multiCache = buildMulti()
+        synchronized(multiLock) { multiCache = buildMulti() }
         then()
     }
 
@@ -976,8 +1018,11 @@ class MainActivity : Activity() {
             // 倒序时同一个章号在显示顺序里的位置是镜像的，不能直接拿章号当滑动位置。
             tocWinStart = (tocPos(info, readProgress(info)) - TOC_WINDOW / 2).coerceAtLeast(0)
         }
-        if (shelfStore().contains(info)) runCatching { shelfStore().add(info) }
-            .onFailure { DevLog.log("Shelf", "更新收藏目录失败：${it.message}") }
+        val shelf = shelfStore()
+        historyWriter.execute {
+            runCatching { if (shelf.contains(info)) shelf.add(info) }
+                .onFailure { DevLog.log("Shelf", "更新收藏目录失败：${it.message}") }
+        }
         setScreen(Screen.Toc(info, useSrc))
         // 换源成功后回到原来那一章：loadToc → showToc 两步都拿不到章号，只能靠标题找回。
         val wantTitle = ReaderUi.swapReturnTitle
@@ -1533,8 +1578,20 @@ class MainActivity : Activity() {
     /** 目录仅在展示目录或正文时落盘，滚动仅保存位置。 */
     private fun saveReadingBook(info: BookInfo, src: BookSource?) {
         if (info.bookId.isBlank() || info.chapters.isEmpty()) return
-        runCatching { readingBookStore().save(info, readingSourceName(info, src)) }
-            .onFailure { DevLog.log("History", "阅读目录快照保存失败：${it.message}") }
+        // 只捕获 UI 所属状态，不在主线程建 multi、读收藏或序列化整本目录。
+        val named = multiCache?.allNamed()?.firstOrNull { it.source === src }?.name.orEmpty()
+        val snapshot = info.copy(chapters = info.chapters.toList())
+        val store = readingBookStore()
+        val shelf = shelfStore()
+        historyWriter.execute {
+            runCatching {
+                val sourceName = if (LocalImport.isLocal(snapshot.bookId)) "本地" else named.ifBlank {
+                    store.find(snapshot)?.sourceName?.takeIf { it.isNotBlank() }
+                        ?: shelf.find(snapshot)?.takeIf { it.info.bookId == snapshot.bookId }?.sourceName.orEmpty()
+                }
+                store.save(snapshot, sourceName)
+            }.onFailure { DevLog.log("History", "阅读目录快照保存失败：${it.message}") }
+        }
     }
 
     private fun toggleTocShelf(info: BookInfo, src: BookSource?) {
@@ -2248,6 +2305,7 @@ class MainActivity : Activity() {
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
         Md3.load(this)
+        applyAppTheme(Md3.palette)
         when (val s = screen) {
             is Screen.Toc -> showToc(s.info, s.src)
             is Screen.Reader -> showReader(s.info, s.index, s.text, s.src)

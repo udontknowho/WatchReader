@@ -9,20 +9,55 @@ data class ShelfBook(
 )
 
 class ShelfStore(private val file: File) {
-    companion object { private val lock = Any() }
+    companion object {
+        private val lock = Any()
+        private data class Snapshot(
+            val length: Long, val modified: Long, val migrated: Boolean, val books: List<ShelfBook>,
+            val ids: Map<String, ShelfBook?>, val addresses: Map<String, ShelfBook?>,
+        )
+        private val snapshots = object : LinkedHashMap<String, Snapshot>(4, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Snapshot>?) = size > 4
+        }
+    }
+    private val fileKey = file.canonicalPath
+
+    private fun index(migrated: Boolean, books: List<ShelfBook>): Snapshot {
+        val addresses = HashMap<String, ShelfBook?>()
+        books.forEach { book ->
+            (listOf(book.info.bookId) + book.candidates.map { it.bookId }).distinct().forEach { address ->
+                if (addresses.containsKey(address)) addresses[address] = null else addresses[address] = book
+            }
+        }
+        return Snapshot(file.length(), file.lastModified(), migrated, books,
+            books.groupBy { it.shelfId }.mapValues { it.value.singleOrNull() }, addresses)
+    }
+
+    /** 必须持有 lock；只有成功读取或原子保存后才发布快照。 */
+    private fun snapshot(): Snapshot {
+        snapshots[fileKey]?.takeIf { it.length == file.length() && it.modified == file.lastModified() }
+            ?.let { return it }
+        val (migrated, books) = read()
+        return index(migrated, books).also { snapshots[fileKey] = it }
+    }
+
+    private fun state(): Pair<Boolean, List<ShelfBook>> = snapshot().let { it.migrated to it.books }
 
     /** 读取失败不阻断启动；写入口仍严格读取，绝不覆盖损坏原档。 */
-    fun books(): List<ShelfBook> = synchronized(lock) { runCatching { read().second }.getOrDefault(emptyList()) }
-    fun readError(): String? = synchronized(lock) { runCatching { read() }.exceptionOrNull()?.message }
+    fun books(): List<ShelfBook> = synchronized(lock) { runCatching { snapshot().books.toList() }.getOrDefault(emptyList()) }
+    fun readError(): String? = synchronized(lock) { runCatching { snapshot() }.exceptionOrNull()?.message }
     /** 裸字符串优先解释为稳定收藏标识；来源地址仅在不歧义时可用。 */
-    fun find(id: String): ShelfBook? = resolveId(books(), id)
+    fun find(id: String): ShelfBook? = synchronized(lock) {
+        if (id.isBlank()) null else runCatching { snapshot().let { it.ids[id] ?: it.addresses[id] } }.getOrNull()
+    }
     fun contains(id: String): Boolean = find(id) != null
-    fun find(info: BookInfo): ShelfBook? = logicalBook(books(), info)
+    fun find(info: BookInfo): ShelfBook? = synchronized(lock) {
+        runCatching { logicalBook(snapshot().books, info) }.getOrNull()
+    }
     fun contains(info: BookInfo): Boolean = find(info) != null
 
     fun add(info: BookInfo, sourceName: String = "", candidates: List<BookHit> = emptyList()) = synchronized(lock) {
         require(info.bookId.isNotBlank()) { "书籍地址为空，不能收藏" }
-        val (migrated, list) = read()
+        val (migrated, list) = state()
         val old = logicalBook(list, info) ?: list.filter { it.info.bookId == info.bookId }
             .singleOrNull()?.takeIf {
                 // 兼容旧调用：空目录、未指定来源的同作者元数据刷新。
@@ -33,48 +68,50 @@ class ShelfStore(private val file: File) {
         // 另一条源的搜索命中只补候选，不能用空目录替换当前可读来源。
         val keepCurrent = old != null && old.info.bookId != info.bookId
         val keep = if (keepCurrent) old!!.info else info.copy(
-            chapters = info.chapters.ifEmpty { old?.info?.chapters.orEmpty() },
+            chapters = info.chapters.ifEmpty { old?.info?.chapters.orEmpty() }.toList(),
             intro = info.intro.ifBlank { old?.info?.intro.orEmpty() },
         )
         val origins = mergeCandidates(keep, (old?.candidates.orEmpty() + candidates +
             BookHit(info.bookId, info.name, info.author, info.intro, sourceName = sourceName)))
         val book = ShelfBook(keep, if (keepCurrent) old!!.sourceName else sourceName.ifBlank { old?.sourceName.orEmpty() },
             old?.addedAt ?: System.currentTimeMillis(), old?.shelfId ?: newShelfId(info.bookId, list), origins)
-        save(migrated, list.filterNot { it.shelfId == book.shelfId } + book)
+        if (book != old) save(migrated, list.filterNot { it.shelfId == book.shelfId } + book)
     }
 
     /** 仅验证成功后调用。保留收藏身份、加入时间和旧来源。 */
     fun replaceSource(oldId: String, info: BookInfo, sourceName: String, candidates: List<BookHit> = emptyList()) = synchronized(lock) {
         require(info.bookId.isNotBlank() && info.chapters.isNotEmpty()) { "新源目录为空" }
-        val (migrated, list) = read()
+        val (migrated, list) = state()
         val old = resolveId(list, oldId) ?: return@synchronized
         require(sameBook(old.info.name, old.info.author, info.name, info.author)) { "新源书名或作者不匹配" }
         val origins = mergeCandidates(info, old.candidates + candidates +
             BookHit(info.bookId, info.name, info.author, info.intro, sourceName = sourceName))
-        val book = old.copy(info = info, sourceName = sourceName, candidates = origins)
-        save(migrated, list.filterNot { it.shelfId == old.shelfId } + book)
+        val book = old.copy(info = info.copy(chapters = info.chapters.toList()), sourceName = sourceName, candidates = origins)
+        if (book != old) save(migrated, list.filterNot { it.shelfId == old.shelfId } + book)
     }
 
     fun remove(id: String) = synchronized(lock) {
-        val (migrated, list) = read()
+        val (migrated, list) = state()
         val old = resolveId(list, id) ?: return@synchronized
         save(migrated, list.filterNot { it.shelfId == old.shelfId })
     }
 
     fun remove(info: BookInfo) = synchronized(lock) {
-        val (migrated, list) = read()
+        val (migrated, list) = state()
         val old = logicalBook(list, info) ?: return@synchronized
         save(migrated, list.filterNot { it.shelfId == old.shelfId })
     }
 
     fun migrateOnce(legacy: () -> List<ShelfBook>) = synchronized(lock) {
-        val (migrated, list) = read()
+        val (migrated, list) = state()
         if (!migrated) {
             val merged = mutableListOf<ShelfBook>()
             (legacy().filter { it.info.bookId.isNotBlank() } + list).forEach { book ->
                 val old = logicalBook(merged, book.info)
                 if (old != null) merged.remove(old)
-                merged.add(book)
+                merged.add(book.copy(info = book.info.copy(chapters = book.info.chapters.toList()),
+                    candidates = mergeCandidates(book.info, book.candidates + BookHit(book.info.bookId,
+                        book.info.name, book.info.author, book.info.intro, sourceName = book.sourceName))))
             }
             save(true, uniqueShelfIds(merged))
         }
@@ -144,6 +181,8 @@ class ShelfStore(private val file: File) {
     }
 
     private fun save(migrated: Boolean, list: List<ShelfBook>) {
+        val current = snapshot()
+        if (current.migrated == migrated && current.books == list) return
         val q: (String) -> String = { Downloader.quote(it) }
         val json = "{\"version\":2,\"migrated\":$migrated,\"books\":[" + list.joinToString(",") { b ->
             val i = b.info
@@ -160,6 +199,7 @@ class ShelfStore(private val file: File) {
         try {
             tmp.outputStream().use { out -> out.write(json.toByteArray(Charsets.UTF_8)); out.fd.sync() }
             check(tmp.renameTo(file)) { "无法保存收藏" }
+            snapshots[fileKey] = index(migrated, list)
         } finally { tmp.delete() }
     }
 }
