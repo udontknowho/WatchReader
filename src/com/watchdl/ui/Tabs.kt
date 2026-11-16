@@ -39,7 +39,8 @@ internal fun MainActivity.attachTabs(active: Int) {
             gravity = android.view.Gravity.CENTER
             contentDescription = "$label${if (chosen) "，当前栏" else "，切换栏"}"
             background = com.watchdl.ui.theme.Md3.ripple(this@attachTabs,
-                if (chosen) com.watchdl.ui.theme.Md3.surface3 else android.graphics.Color.TRANSPARENT, 6f)
+                if (chosen) com.watchdl.ui.theme.Md3.surfaceContainerHigh else android.graphics.Color.TRANSPARENT,
+                com.watchdl.ui.theme.Md3.R_GRID.toFloat())
             isClickable = true
             setOnClickListener {
                 if (i == selected) scrollToTop(root) else when (i) {

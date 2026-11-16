@@ -63,6 +63,16 @@ private fun MainActivity.nextSourceBatch(h: Screen.Hits): Int? =
     SourceRotation.next(h.offset, h.searchedSources, multi.searchable)
 private fun MainActivity.hitKey(h: BookHit) = "${h.name.trim()}\u0001${h.author.trim()}"
 
+/**
+ * 一轮搜索的完整口径。
+ *
+ * 显示层按名字去重（同名同作者只留一条），而「这一轮已经出现过的窗口」
+ * 必须按**结果对象**去重：第二次搜索同一个关键词时命中对象全换了一批，
+ * 空作者字段补不同的值、简介不同，都是新条目，不能被上一轮的名字集合挡掉。
+ */
+private fun identityOf(h: BookHit): String =
+    "${h.sourceName}\u0001${h.bookId}\u0001${h.name.trim()}\u0001${h.author.trim()}"
+
 /** 搜索结果页的「换一批源」。 */
 private fun MainActivity.rotateSources(h: Screen.Hits) {
     val next = nextSourceBatch(h)
@@ -96,15 +106,16 @@ internal fun MainActivity.showHits(keyword: String, allHits: List<BookHit>, stat
     // 合并同名书放在排序之后，保证留下的是「源数最多」的那一条。
     // 重放是「回到已经看过的那一屏」，条目必然都在 seenHits 里；
     // 再过滤一次会把整屏清空，用户看到的是「没有找到」。
+    // 上一轮见过的条目按对象身份记；重放时不再过滤（它们必然都在集合里）。
     val all = allHits.asSequence()
         .filter { it.name.isNotBlank() }
-        .filter { replay || hitKey(it) !in seenHits }
+        .filter { replay || identityOf(it) !in seenHits }
         // 精准搜索：关掉时这一句是恒等变换。开启后命中里都含关键词，
         // 分档自然落到 0–2 档，所以排序规则不必另写一套。
         .filter { !SearchUi.exact || searchPreciseKeep(it, keyword) }
         .toList()
     // 记下来，换一批时不再重复显示。
-    if (!replay) all.forEach { seenHits += hitKey(it) }
+    if (!replay) all.forEach { seenHits += identityOf(it) }
     // 同名书共几源：必须在合并前统计，合并后每个名字只剩一条。
     val sourceCount = all.groupingBy { hitKey(it) }.eachCount()
     // 来源筛选要排在合并之前：同名书在别的源的命中本来就会被合并掉。
@@ -229,7 +240,7 @@ private fun MainActivity.searchBand(
     onClear: () -> Unit,
 ): LinearLayout {
     val band = Md3.row(this)
-    band.background = Md3.ripple(this, Md3.surface3, Md3.R_ITEM.toFloat())
+    band.background = Md3.ripple(this, Md3.surfaceContainerHigh, Md3.R_ITEM.toFloat())
     band.setPadding(Md3.dp(this, Md3.PAD * 0.6), Md3.dp(this, 4),
                     Md3.dp(this, 2), Md3.dp(this, 4))
     band.isClickable = true
@@ -262,8 +273,8 @@ private fun MainActivity.searchBand(
  */
 private fun MainActivity.searchHitItem(h: BookHit, sourceCount: Int, onClick: () -> Unit): LinearLayout {
     val row = Md3.row(this)
-    // 结果屏沿用 highlight 底色（surface3）+ 水波纹，与其它列表项同一观感。
-    row.background = Md3.ripple(this, Md3.surface3, Md3.R_ITEM.toFloat())
+    // 结果屏沿用 highlight 底色（surfaceContainerHigh）+ 水波纹，与其它列表项同一观感。
+    row.background = Md3.ripple(this, Md3.surfaceContainerHigh, Md3.R_ITEM.toFloat())
     row.setPadding(Md3.dp(this, Md3.PAD), Md3.dp(this, 4),
                    Md3.dp(this, Md3.PAD), Md3.dp(this, 4))
     row.minimumHeight = Md3.dp(this, Md3.ITEM)
@@ -293,8 +304,8 @@ private fun MainActivity.searchHitItem(h: BookHit, sourceCount: Int, onClick: ()
     searchSourceBadge(sourceCount)?.let { text ->
         titleRow.addView(Md3.text(this, text, Md3.FS_SM, Md3.onSecondaryContainer).apply {
             gravity = Gravity.CENTER
-            // 4dp 圆角是 M3 小标签档，比列表卡的 12dp 轻一档，不抢书名。
-            background = Md3.bg(Md3.secondaryContainer, 4f)
+            // M3 小标签档，比列表卡的 12dp 轻一档，不抢书名。
+            background = Md3.bg(Md3.secondaryContainer, Md3.R_XS)
             setPadding(Md3.dp(this@searchHitItem, 4), 0, Md3.dp(this@searchHitItem, 4),
                        Md3.dp(this@searchHitItem, 1))
             contentDescription = "$sourceCount 个源"
@@ -503,7 +514,7 @@ internal fun MainActivity.askText(
             setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, Md3.FS_MD)
             setHintTextColor(Md3.onSurfaceVariant)
             setTextColor(Md3.onSurface)
-            background = Md3.bg(Md3.surface4, Md3.dp(this@askText, 8).toFloat())
+            background = Md3.bg(Md3.surfaceContainerHighest, Md3.R_GRID.toFloat())
             setPadding(Md3.dp(this@askText, 10), 0, Md3.dp(this@askText, 10), 0)
             // 不再外套一层带 padding 的容器：md3Dialog 已给 16dp，
             // 高度只要给输入框自身的最小高度。

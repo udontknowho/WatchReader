@@ -176,8 +176,13 @@ class MainActivity : Activity() {
     /** 切屏统一入口。换屏就意味着上一屏的后台任务全部作废。 */
     internal fun setScreen(next: Screen) {
         val leavingShelfLoading = shelfBookLoading
-        // 包括同身份的真实详情重绘：一旦交给目标页，加载标记就失效。
-        shelfBookLoading = false
+        // 加载标记要留给「真正离开占位详情页」的那一次 setScreen 消费。
+        // 以前在这里无条件清零，而占位页转正文走的是同身份早退
+        // （ Detail(request,null) → setScreen 同屏），早退前就把它清了，
+        // 真正的 Reader 那一跳读到的 leavingShelfLoading 已是 false，
+        // 于是多压一层 Detail 占位——从书架进正文后按返回落到空白页。
+        // 现在只在目标不是占位详情时才清。
+        if (!(shelfBookLoading && next is Screen.Detail)) shelfBookLoading = false
         if (screen is Screen.Reader && next != screen) {
             // 先保存旧视图，再解绑，防止删除记录后生命周期重新保存。
             saveReaderPosNow()
@@ -188,6 +193,12 @@ class MainActivity : Activity() {
             readerIndex = -1
         }
         if (next is Screen.Reader) saveReadingBook(next.info, next.src)
+        // 离开进度屏就解绑刷新目标：广播接收器在 onResume~onPause 之间仍会到，
+        // 旧 card 已随 removeAllViews 脱离窗口，继续 removeViewAt/addView 白跑，
+        // 而且 getChildAt(2) 索引漂移会把 progressSub 换成非 TextView。
+        if (next !is Screen.Progress) {
+            progressNum = null; progressCard = null; progressSub = null; progressTotal = 0
+        }
         if (next == Screen.Records && screen != Screen.Records && !replayingReturn) rememberReturn()
         if (next === screen || next == screen) return
         // 同一屏换内容（搜索结果边跑边上屏、目录重载）时**不能撤任务**：
@@ -1627,9 +1638,21 @@ class MainActivity : Activity() {
         val owner: Screen = Screen.Toc(BookInfo(bookId, name, author, emptyList()))
         val resolved = sourceForBook(target)
         if (resolved == null) { toast("原书源不可用，请从详情换源"); goBackToPrevious(); return }
+        // 屏身份只含书名+作者，不含书源。换源后同名不同源的两次取目录身份相同，
+        // 慢源先发后到能把新源的目录盖掉。所以守卫拿**源名**一起比 —— 用引用比不行：
+        // 书源列表重建后同一个源是新实例，会把合法回调也能丢掉。
+        fun srcName(s: BookSource?): String =
+            s?.let { one -> multi.allNamed().firstOrNull { it.source === one }?.name }.orEmpty()
+        val ownerId = screenId(owner)
+        val ownerSrc = srcName(resolved)
         bg(owner, { resolved.toc(bookId, name, author) }) { res ->
+            // 取目录要 3–15 秒。用户等不及按返回之后，晚到的结果不能把人从书架
+            // 硬拽回目录屏，失败分支更不能替用户多弹一层返回栈。
+            if (screenId(screen) != ownerId) return@bg
+            // 同名书换了源：当前屏已属于另一个源，旧回调直接丢弃。
+            if (srcName(sourceForBook(target)) != ownerSrc) return@bg
             res.onSuccess { showToc(it, resolved) }
-                .onFailure { toast("目录失败：${it.message}"); goBackToPrevious() }
+                .onFailure { toast("目录失败：${it.message}"); showShelf() }
         }
     }
 
@@ -1785,7 +1808,7 @@ class MainActivity : Activity() {
             setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, Md3.FS_MD)
             setTextColor(Md3.onSurface)
             setHintTextColor(Md3.onSurfaceVariant)
-            background = Md3.bg(Md3.surface4, Md3.dp(this@MainActivity, 8).toFloat())
+            background = Md3.bg(Md3.surfaceContainerHighest, Md3.R_GRID.toFloat())
             setPadding(Md3.dp(this@MainActivity, 10), 0,
                        Md3.dp(this@MainActivity, 10), 0)
             imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
@@ -1975,7 +1998,7 @@ class MainActivity : Activity() {
                 setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, Md3.FS_MD)
                 setHintTextColor(Md3.onSurfaceVariant)
                 setTextColor(Md3.onSurface)
-                background = Md3.bg(Md3.surface4, Md3.dp(this@MainActivity, 8).toFloat())
+                background = Md3.bg(Md3.surfaceContainerHighest, Md3.R_GRID.toFloat())
                 setPadding(Md3.dp(this@MainActivity, 10), 0, Md3.dp(this@MainActivity, 10), 0)
                 // 不再套一层带 padding 的 LinearLayout：md3Dialog 已给 16dp。
                 minimumHeight = Md3.dp(this@MainActivity, Md3.BTN + 4)

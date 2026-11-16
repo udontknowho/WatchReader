@@ -382,7 +382,7 @@ private fun MainActivity.shelfCard(row: ShelfRow): LinearLayout {
     // 受 `showTip` 控制（legado 那个开关管的就是这个类型标签）。
     if (ShelfUi.showTag) {
         val tag = Md3.text(this, row.sourceTag, 8f, Md3.onSurfaceVariant).apply {
-            background = Md3.bg(Md3.surface3, 3f)
+            background = Md3.bg(Md3.surfaceContainerHigh, 3f)
             setPadding(Md3.dp(this@shelfCard, 1), 0, Md3.dp(this@shelfCard, 1), 0)
             maxWidth = Md3.dp(this@shelfCard, coverW - 2)
             isSingleLine = true
@@ -612,12 +612,17 @@ internal fun MainActivity.readShelfBook(request: BookInfo) {
             } else {
                 com.watchdl.ui.reader.ReaderUi.fromShelf = true
                 tocSrc = src
-                val at = readProgress(info).coerceIn(0, info.chapters.lastIndex)
+                // 收藏的章表可能为空（刚收藏未取目录），空表上 lastIndex = -1，
+                // coerceIn(0, -1) 会直接抛 IllegalArgumentException。
+                val at = if (info.chapters.isEmpty()) 0
+                         else readProgress(info).coerceIn(0, info.chapters.lastIndex)
                 preview(info, at, src = src)
             }
         }.onFailure {
             toast("打开书籍失败：${it.message}")
-            showShelf()
+            // 失败回书架必须弹栈：返回栈里那层是点书架时压进去的，
+            // 直接 showShelf 会留着它，下次按返回“没反应”，得连按两次。
+            goBackToPrevious()
         }
     }
 }
@@ -693,7 +698,7 @@ internal fun MainActivity.showShelfLayoutSheet() {
             LinearLayout.LayoutParams(Md3.dp(this, 44), ViewGroup.LayoutParams.WRAP_CONTENT))
         val value = Md3.text(this, "", Md3.FS_SM, Md3.onSurface).apply {
             gravity = Gravity.CENTER
-            background = Md3.ripple(this@showShelfLayoutSheet, Md3.surface4,
+            background = Md3.ripple(this@showShelfLayoutSheet, Md3.surfaceContainerHighest,
                 Md3.dp(this@showShelfLayoutSheet, 13).toFloat(), Md3.outlineVariant)
             isClickable = true
             setOnClickListener {
@@ -740,6 +745,11 @@ internal fun MainActivity.showShelfLayoutSheet() {
 
 // ══════════════════ 更新目录 ══════════════════
 
+/** 「更新目录」一轮的结果。计数单独带出来，落盘必须回主线程。 */
+private data class RefreshTocResult(
+    val grew: Int, val added: Int, val failed: Int, val counts: List<Pair<String, Int>>,
+)
+
 /**
  * 「更新目录」：照 legado `RefreshTocUseCase` 逐本重取目录，但**只追加新章**。
  *
@@ -759,6 +769,10 @@ internal fun MainActivity.refreshShelfTocs() {
         var grew = 0
         var failed = 0
         var added = 0
+        // 新章计数不在工作线程写：要么经 SharedPreferences.apply 从守护线程落盘，
+        // 要么在主线程回写界面 —— 两边都没有 happens-before，圆点会显示成中间态。
+        // 这里只收集结果，统一在回调里落到主线程。
+        val counts = ArrayList<Pair<String, Int>>(rows.size)
         rows.forEachIndexed { i, row ->
             val info = row.favorite?.info ?: BookInfo(row.job.bookId, row.job.name, row.job.author, row.job.chapters)
             val src = sourceForBook(info)
@@ -775,11 +789,11 @@ internal fun MainActivity.refreshShelfTocs() {
                     if (matchingBookJob(info) != null) jobsStore().readJob(row.job.bookId).orEmpty() else "", got.chapters)
                 if (merged == null) {
                     // 没有新章：上一轮的计数作废，圆点要跟着灭。
-                    if (shelfNewCount(row.job.bookId) > 0) setShelfNewCount(row.job.bookId, 0)
+                    counts += row.job.bookId to 0
                 } else if (runCatching {
                         jobsStore().writeJob(row.job.bookId, merged.json)
                     }.isSuccess) {
-                    setShelfNewCount(row.job.bookId, merged.added)
+                    counts += row.job.bookId to merged.added
                     grew++
                     added += merged.added
                 } else {
@@ -788,14 +802,21 @@ internal fun MainActivity.refreshShelfTocs() {
             }
             ShelfUi.updating = "正在更新目录 ${i + 1}/${rows.size}"
         }
-        Triple(grew, added, failed)
+        // 计数与统计一起回传：bg 的回调已过屏守卫，被丢弃时不会写脏界面。
+        RefreshTocResult(grew, added, failed, counts)
     }) { res ->
         ShelfUi.updating = null
-        res.onSuccess { (grew, added, failed) ->
-            val tail = if (failed > 0) "，$failed 本失败" else ""
+        // 只有仍停在书架时才落盘计数。
+        if (screenId(curScreen) == screenId(Screen.Shelf)) {
+            res.getOrNull()?.counts?.forEach { (bookId, n) ->
+                if (n > 0 || shelfNewCount(bookId) > 0) setShelfNewCount(bookId, n)
+            }
+        }
+        res.onSuccess { r ->
+            val tail = if (r.failed > 0) "，${r.failed} 本失败" else ""
             toast(when {
-                grew > 0 -> "更新完成：$grew 本共新增 $added 章$tail"
-                failed > 0 -> "更新完成：没有新章$tail"
+                r.grew > 0 -> "更新完成：${r.grew} 本共新增 ${r.added} 章$tail"
+                r.failed > 0 -> "更新完成：没有新章$tail"
                 else -> "全部已是最新"
             })
         }.onFailure { toast("更新失败：${it.message}") }

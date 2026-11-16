@@ -32,6 +32,20 @@ class Palette(
     val outline: Int,
     val outlineVariant: Int,
     val error: Int,
+    // ── MD3 规范色角色补齐（默认值必与 `all` 里日/夜两套的显式值一致）──
+    // 带默认值：表外构造点（含 legacy）不用改。色调叠加色，组件表面 tints 用。
+    val surfaceTint: Int = primary,
+    /** 容器五档。日间由亮到暗、夜间由暗到亮，层级越低越靠近底色。 */
+    val surfaceContainerLowest: Int = surface,
+    val surfaceContainerLow: Int = surface1,
+    val surfaceContainer: Int = surface2,
+    val surfaceContainerHigh: Int = surface3,
+    val surfaceContainerHighest: Int = surface4,
+    /** 反色组：与底色互换，用于 Snackbar、反白标签。 */
+    val inverseSurface: Int = onSurface,
+    val inverseOnSurface: Int = surface,
+    /** 反色组里的主色。夜间取日间 primary，日间取夜间 primary。 */
+    val inversePrimary: Int = primary,
 ) {
     companion object {
 
@@ -186,15 +200,49 @@ class Palette(
             ),
         )
 
+        /**
+         * 可选主题。**唯一真源**：`Md3.applyPalette` 直接采用这里的值。
+         *
+         * 以前这两项从 `legacy` 派生（warmpaper / elink），而 `applyPalette` 另有一套
+         * 硬编码常量，两边早已漂移：设置页色点画的是派生值，屏上却是另一套。
+         * 现在改成显式写出与屏上一致的调校值，改这里的数就是改屏幕上的颜色。
+         * 顺序不可换：`all[0]` 是启动默认（`DEFAULT_ID` 也是 `day`）。
+         */
         val all: List<Palette> = listOf(
-            legacy.first { it.id == "warmpaper" }.mode("day", "日间"),
-            legacy.first { it.id == "elink" }.mode("night", "夜间"),
-        )
-
-        private fun Palette.mode(id: String, name: String) = Palette(
-            id, name, primary, onPrimary, primaryContainer, onPrimaryContainer,
-            secondaryContainer, onSecondaryContainer, surface, surface1, surface2,
-            surface3, surface4, onSurface, onSurfaceVariant, outline, outlineVariant, error,
+            Palette(
+                id = "day", name = "日间",
+                primary = 0xFF3D5942.toInt(), onPrimary = 0xFFFFFFFF.toInt(),
+                primaryContainer = 0xFFD6E3CF.toInt(), onPrimaryContainer = 0xFF1E3622.toInt(),
+                secondaryContainer = 0xFFD6E3CF.toInt(), onSecondaryContainer = 0xFF1E3622.toInt(),
+                surface = 0xFFF3F0E8.toInt(), surface1 = 0xFFE8E4D9.toInt(), surface2 = 0xFFE3DED2.toInt(),
+                surface3 = 0xFFDED8CA.toInt(), surface4 = 0xFFD4CDBE.toInt(),
+                onSurface = 0xFF282922.toInt(), onSurfaceVariant = 0xFF606156.toInt(),
+                outline = 0xFF737B6C.toInt(), outlineVariant = 0xFFB9BBAE.toInt(),
+                error = 0xFFB3261E.toInt(),
+                surfaceTint = 0xFF3D5942.toInt(),
+                surfaceContainerLowest = 0xFFF7F5EE.toInt(), surfaceContainerLow = 0xFFF1EEE5.toInt(),
+                surfaceContainer = 0xFFEBE8DE.toInt(), surfaceContainerHigh = 0xFFE5E1D6.toInt(),
+                surfaceContainerHighest = 0xFFDFDACE.toInt(),
+                inverseSurface = 0xFF2F312B.toInt(), inverseOnSurface = 0xFFF3F0E8.toInt(),
+                inversePrimary = 0xFFB6CFAD.toInt(),
+            ),
+            Palette(
+                id = "night", name = "夜间",
+                primary = 0xFFB6CFAD.toInt(), onPrimary = 0xFF20351F.toInt(),
+                primaryContainer = 0xFF32422F.toInt(), onPrimaryContainer = 0xFFD8EBCF.toInt(),
+                secondaryContainer = 0xFF32422F.toInt(), onSecondaryContainer = 0xFFD8EBCF.toInt(),
+                surface = 0xFF101113.toInt(), surface1 = 0xFF1C1E21.toInt(), surface2 = 0xFF222428.toInt(),
+                surface3 = 0xFF292C30.toInt(), surface4 = 0xFF34383D.toInt(),
+                onSurface = 0xFFE4E5DF.toInt(), onSurfaceVariant = 0xFFB2B7B0.toInt(),
+                outline = 0xFF90988C.toInt(), outlineVariant = 0xFF454B43.toInt(),
+                error = 0xFFFFB4AB.toInt(),
+                surfaceTint = 0xFFB6CFAD.toInt(),
+                surfaceContainerLowest = 0xFF15171A.toInt(), surfaceContainerLow = 0xFF1B1D21.toInt(),
+                surfaceContainer = 0xFF212328.toInt(), surfaceContainerHigh = 0xFF272A2F.toInt(),
+                surfaceContainerHighest = 0xFF2E3137.toInt(),
+                inverseSurface = 0xFFE4E5DF.toInt(), inverseOnSurface = 0xFF101113.toInt(),
+                inversePrimary = 0xFF3D5942.toInt(),
+            ),
         )
 
         /** 旧主题保持原深浅倾向，不触碰字号、排版与阅读进度。 */

@@ -186,7 +186,7 @@ private fun MainActivity.replaceRow(r: ReplaceRule): LinearLayout {
     // 左右边距比 listItem 各收一点：给 30 dp 勾与 28 dp ⋮ 腾位置，文字仍与分组标题对齐。
     row.setPadding(Md3.dp(this, Md3.PAD * 3 / 4), 0, Md3.dp(this, Md3.PAD / 2), 0)
     row.background = Md3.ripple(this,
-        if (picked) Md3.surface3 else Color.TRANSPARENT, Md3.R_ITEM.toFloat())
+        if (picked) Md3.surfaceContainerHigh else Color.TRANSPARENT, Md3.R_ITEM.toFloat())
 
     row.addView(replaceCheck(on, null), LinearLayout.LayoutParams(
         Md3.dp(this, 30), Md3.dp(this, Md3.ITEM_TALL)).apply { gravity = Gravity.CENTER_VERTICAL })
@@ -440,7 +440,7 @@ private fun MainActivity.replaceField(hintText: String, value: String): EditText
         setTextSize(TypedValue.COMPLEX_UNIT_SP, Md3.FS_MD)
         setHintTextColor(Md3.onSurfaceVariant)
         setTextColor(Md3.onSurface)
-        background = Md3.bg(Md3.surface4, Md3.dp(this@replaceField, 8).toFloat())
+        background = Md3.bg(Md3.surfaceContainerHighest, Md3.R_GRID.toFloat())
         setPadding(Md3.dp(this@replaceField, 10), 0, Md3.dp(this@replaceField, 10), 0)
         // 30 dp 比 M3 的 56 dp 输入框矮：248 dp 高的屏上三个 56 dp 输入框
         // 加按钮就超过一屏，第四行永远看不见。
@@ -502,7 +502,7 @@ private fun MainActivity.askReplaceRule(existing: ReplaceRule?) {
                 tv.setTextColor(if (on) Md3.primary else Md3.onSurfaceVariant)
                 tv.setTypeface(null, if (on) Typeface.BOLD else Typeface.NORMAL)
                 tv.background = Md3.ripple(this,
-                    if (on) Md3.surface3 else Color.TRANSPARENT, Md3.R_GRID.toFloat())
+                    if (on) Md3.surfaceContainerHigh else Color.TRANSPARENT, Md3.R_GRID.toFloat())
             }
         }
         val chipRow = Md3.row(this)

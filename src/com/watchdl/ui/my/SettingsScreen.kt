@@ -175,7 +175,7 @@ private fun MainActivity.askResetPalette() {
 
 /** 配色行首的色点：用该套的主色画一个小圆，比只写色名好认。 */
 private fun MainActivity.paletteDot(color: Int): android.view.View = android.view.View(this).apply {
-    background = Md3.bg(color, Md3.dp(this@paletteDot, 9).toFloat())
+    background = Md3.bg(color, 9f)
     minimumWidth = Md3.dp(this@paletteDot, 18)
     minimumHeight = Md3.dp(this@paletteDot, 18)
 }
@@ -200,7 +200,7 @@ private fun MainActivity.settingsRead(col: LinearLayout) {
         preview.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, readerSize)
         preview.setLineSpacing(Md3.dp(this, 1).toFloat(), readerSpacing)
         preview.setTextColor(Md3.onSurface)
-        preview.background = Md3.bg(Md3.surface, Md3.dp(this, 10).toFloat())
+        preview.background = Md3.bg(Md3.surface, 10f)
     }
 
     col.addView(Md3.text(this, "日夜主题与应用外观一致，亮度跟随系统",

@@ -48,8 +48,10 @@ density 2.0（320 dpi）→ 逻辑 **189 × 248 dp**。
 ## 安装
 
 ```sh
-adb install -r releases/v1.6.1.1/WatchDownloader-1.6.1.1-release.apk
+adb install -r WatchDownloader-1.6.1.5-release.apk
 ```
+
+包在发布页 https://github.com/udontknowho/WatchReader/releases 下载。
 
 也可以把 APK 传进手表后用文件管理器点开。minSdk 30（Android 11），targetSdk 34。
 
@@ -87,6 +89,18 @@ adb install -r releases/v1.6.1.1/WatchDownloader-1.6.1.1-release.apk
 > 且三章正文不重复、不含明显错误页。网络失败项复测仍未通过则不收录。
 > 通过仅代表本次抽检，不代表全部作品、章节或后续时段始终可用。
 > 书源可在“我的 → 书源管理”中管理，在线状态以实际访问结果为准。
+
+## v1.6.1.5 修复说明（code 46）
+
+- 修 6 个 1.6.1.4 上的回归：书架进正文后返回落空白页、进度尾巴停止更新、
+  晚到目录回调把人从书架拽回目录屏、阅读失败后返回栈残留、新章圆点中间态、
+  二次搜索同名不同书被上一轮过滤。
+- 日夜主题收敛到单一真源：`Md3.applyPalette` 不再用硬编码常量重建，
+  `Palette.all` 成为唯一真源，设置页色点与屏上渲染一致。
+- MD3 收尾：对话框形状与容器 token 落到调用点，`Md3.bg` / `Md3.ripple`
+  内部统一 dp→px，角标、底栏选中态、阅读胶囊改用 token 或几何半径。
+- 41 组回归全绿，正式包已装机并在虚拟屏实测；未做在线书源全量抽检。
+- 浅色主题对比度维持现状，本版不改配色。
 
 ## v1.6.1.1 修复说明（code 42）
 

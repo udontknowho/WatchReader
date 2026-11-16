@@ -40,7 +40,8 @@ object Widgets {
             val ib = Md3.iconButton(ctx, backGlyph, onBack)
             bar.addView(ib, LinearLayout.LayoutParams(Md3.dp(ctx, Md3.TAP), Md3.dp(ctx, Md3.TAP)))
         }
-        val t = Md3.ellipsize(Md3.text(ctx, title, Md3.FS_LG, Md3.onSurface, bold = true))
+        // 页面级大标题：M3 titleLarge（FS_XL = 22 sp）。
+        val t = Md3.ellipsize(Md3.text(ctx, title, Md3.FS_XL, Md3.onSurface, bold = true))
         t.setPadding(Md3.dp(ctx, Md3.PAD * 0.6), 0, 0, 0)
         if (subtitle.isNullOrBlank()) {
             bar.addView(t, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
@@ -67,7 +68,7 @@ object Widgets {
     /** 搜索框。34dp 高，圆角胶囊。传入 onTap 可点开输入。 */
     fun searchBar(ctx: Context, hint: CharSequence, onTap: (() -> Unit)? = null): LinearLayout {
         val bar = Md3.row(ctx)
-        bar.background = Md3.ripple(ctx, Md3.surface4, Md3.SEARCH / 2f)
+        bar.background = Md3.ripple(ctx, Md3.surfaceContainerHigh, Md3.SEARCH / 2f)
         bar.setPadding(Md3.dp(ctx, 12), 0, Md3.dp(ctx, 12), 0)
         // 不再放彩色 🔍 emoji：它与全局单色字形体系冲突，提示文字本身已说明用途。
         val ph = Md3.ellipsize(Md3.text(ctx, hint, Md3.FS_MD, Md3.onSurfaceVariant))
@@ -130,8 +131,9 @@ object Widgets {
         row.addView(head)
 
         val controls = Md3.row(ctx)
-        val minus = Md3.text(ctx, "−", Md3.FS_LG, Md3.primary)
-        val plus = Md3.text(ctx, "+", Md3.FS_LG, Md3.primary)
+        // 「−」「+」是滑杆的操作字形，不是标题，跟正文同级。
+        val minus = Md3.text(ctx, "−", Md3.FS_BODY_LARGE, Md3.primary)
+        val plus = Md3.text(ctx, "+", Md3.FS_BODY_LARGE, Md3.primary)
         val bar = android.widget.SeekBar(ctx).apply {
             this.max = ticks
             progress = indexOf(value)
@@ -185,7 +187,8 @@ object Widgets {
         })
         listOf(minus to -1, plus to 1).forEach { (button, offset) ->
             button.gravity = Gravity.CENTER
-            button.background = Md3.ripple(ctx, Md3.surface3, 16f)
+            // 加减钮 40×48 dp，圆角取 large 档令牌。
+            button.background = Md3.ripple(ctx, Md3.surfaceContainerHigh, Md3.R_LG)
             button.contentDescription = "$label，${if (offset < 0) "减少" else "增加"}"
             button.isClickable = true
             button.setOnClickListener { adjust(offset) }
@@ -224,7 +227,7 @@ object Widgets {
         }
         val card = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
-            background = Md3.bg(Md3.surface2, Md3.R_CARD.toFloat())
+            background = Md3.bg(Md3.surfaceContainerHigh, Md3.R_CARD.toFloat())
         }
         build(card)
         wrap.addView(card, LinearLayout.LayoutParams(
@@ -311,11 +314,11 @@ object Widgets {
         title: CharSequence?,
         items: List<Pair<CharSequence, () -> Unit>>,
     ): android.app.AlertDialog {
-        // 容器与对话框同一套：surface-container-high + 大圆角 + 一层内边距。
-        // 菜单在 M3 里是 4dp 圆角的 surface-container，但同一块屏上
-        // 4dp 和 28dp 两种弹层并存看着是两个应用，这里统一取 R_ITEM。
+        // 底色取 M3 菜单角色 surface-container，叠 4% 主色当浮起感；
+        // 圆角不跟 4dp 规范：同一块屏上 12 和 28 两种弹层并存才像两个应用，
+        // 这里与列表卡统一取 R_ITEM。
         val box = Md3.column(ctx).apply {
-            background = Md3.bg(Md3.surface3, Md3.R_ITEM.toFloat())
+            background = Md3.bg(Md3.tonal(Md3.surfaceContainer, 0.04f), Md3.R_ITEM.toFloat())
             setPadding(0, Md3.dp(ctx, 6), 0, Md3.dp(ctx, 6))
         }
         if (!title.isNullOrBlank()) {
@@ -371,7 +374,8 @@ object Widgets {
         val bar = Md3.row(ctx)
         bar.setPadding(Md3.dp(ctx, Md3.PAD), 0, 0, 0)
         bar.addView(
-            Md3.ellipsize(Md3.text(ctx, title ?: "", Md3.FS_LG, Md3.onSurface, bold = true))
+            // 整屏 Sheet 的顶栏标题，同页面级大标题（titleLarge）。
+            Md3.ellipsize(Md3.text(ctx, title ?: "", Md3.FS_XL, Md3.onSurface, bold = true))
                 .apply { gravity = Gravity.CENTER_VERTICAL },
             LinearLayout.LayoutParams(0, Md3.dp(ctx, Md3.TAB_H), 1f),
         )
@@ -464,10 +468,11 @@ object Widgets {
     ): android.app.AlertDialog {
         val pad = Md3.dp(ctx, DIALOG_PAD)
         val box = Md3.column(ctx).apply {
-            background = Md3.bg(Md3.surface3, 28f)
+            background = Md3.bg(Md3.tonal(Md3.surfaceContainerHigh, 0.03f), Md3.R_XL.toFloat())
             setPadding(pad, pad, pad, pad)
         }
-        box.addView(Md3.ellipsize(Md3.text(ctx, title, Md3.FS_LG, Md3.onSurface, bold = true)))
+        // M3 对话框规范：标题用 headlineSmall 压到本表，给出的是 FS_XL（22 sp）。
+        box.addView(Md3.ellipsize(Md3.text(ctx, title, Md3.FS_XL, Md3.onSurface, bold = true)))
         if (!body.isNullOrBlank()) {
             box.addView(Md3.text(ctx, body, Md3.FS_MD, Md3.onSurfaceVariant).apply {
                 setLineSpacing(Md3.dp(ctx, 3).toFloat(), 1f)
@@ -546,7 +551,7 @@ object Widgets {
         )
         // M3 lists：单行 56dp、双行 72dp，由最高的元素决定。
         item.minimumHeight = Md3.dp(ctx, if (twoLine) Md3.ITEM_TALL else Md3.ITEM)
-        val bgColor = if (highlight) Md3.surface3 else Color.TRANSPARENT
+        val bgColor = if (highlight) Md3.surfaceContainerHigh else Color.TRANSPARENT
         item.background = Md3.ripple(ctx, bgColor, Md3.R_ITEM.toFloat())
         if (onClick != null) {
             item.isClickable = true
@@ -687,7 +692,7 @@ object Widgets {
     fun card(ctx: Context, outlined: Boolean = false, padDp: Number = Md3.PAD * 0.9): LinearLayout {
         val c = Md3.column(ctx)
         c.background = if (outlined) Md3.bg(Color.TRANSPARENT, Md3.R_CARD.toFloat(), Md3.outlineVariant)
-                       else Md3.bg(Md3.surface3, Md3.R_CARD.toFloat())
+                       else Md3.bg(Md3.surfaceContainerHigh, Md3.R_CARD.toFloat())
         c.setPadding(Md3.dp(ctx, padDp), Md3.dp(ctx, padDp), Md3.dp(ctx, padDp), Md3.dp(ctx, padDp))
         c.layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -966,7 +971,7 @@ object Widgets {
         val nav = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            background = Md3.bg(Md3.surface2, 0)
+            background = Md3.bg(Md3.surfaceContainer, 0)
             // 高度 64dp 内只放得下 32dp 指示器 + 4dp + 标签，上下不再加固定内边距，
             // 交给格子的 gravity=CENTER 居中 —— 写 12/16 会把内容顶出容器。
         }
@@ -1201,7 +1206,9 @@ object Widgets {
             val cell = Md3.text(ctx, t, 14f,
                 if (on) Md3.onSecondaryContainer else Md3.onSurfaceVariant, bold = on).apply {
                 gravity = Gravity.CENTER
-                background = Md3.ripple(ctx, if (on) Md3.secondaryContainer else Color.TRANSPARENT, 20f)
+                // 页签是胶囊：半径取行高一半，不写死 20。
+                background = Md3.ripple(ctx, if (on) Md3.secondaryContainer else Color.TRANSPARENT,
+                    Md3.TAB_H / 2)
                 setPadding(Md3.dp(ctx, 10), 0, Md3.dp(ctx, 10), 0)
                 minimumHeight = Md3.dp(ctx, Md3.TAB_H)
                 isClickable = true
@@ -1232,7 +1239,7 @@ object Widgets {
     /** Snackbar。 */
     fun snackbar(ctx: Context, message: CharSequence, action: CharSequence? = null, onAction: (() -> Unit)? = null): LinearLayout {
         val bar = Md3.row(ctx)
-        bar.background = Md3.bg(Md3.surface4, 9f)
+        bar.background = Md3.bg(Md3.surfaceContainerHighest, 9f)
         bar.setPadding(Md3.dp(ctx, 10), Md3.dp(ctx, 9), Md3.dp(ctx, 10), Md3.dp(ctx, 9))
         bar.addView(Md3.text(ctx, message, Md3.FS_SM, Md3.onSurface),
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))

@@ -148,7 +148,7 @@ private fun MainActivity.recordsRow(r: RecordRow): LinearLayout {
     // 左右边距比分组标题各收一点：给 24 dp 勾与 28 dp ⋮ 腾位置。
     row.setPadding(Md3.dp(this, Md3.PAD * 3 / 4), 0, Md3.dp(this, Md3.PAD / 2), 0)
     row.background = Md3.ripple(this,
-        if (picked) Md3.surface3 else android.graphics.Color.TRANSPARENT, Md3.R_ITEM.toFloat())
+        if (picked) Md3.surfaceContainerHigh else android.graphics.Color.TRANSPARENT, Md3.R_ITEM.toFloat())
 
     if (RecordsUi.selecting) {
         row.addView(Icons.view(this, "check",

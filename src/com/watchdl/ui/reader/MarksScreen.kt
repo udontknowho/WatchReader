@@ -212,7 +212,7 @@ private fun MainActivity.marksRow(
 
     val card = Widgets.card(this)
     card.background = Md3.ripple(this,
-        if (picked) Md3.surface4 else Md3.surface3, Md3.R_CARD.toFloat())
+        if (picked) Md3.surfaceContainerHighest else Md3.surfaceContainerHigh, Md3.R_CARD.toFloat())
     card.setPadding(Md3.dp(this, Md3.PAD * 3 / 4), Md3.dp(this, 8),
         Md3.dp(this, Md3.PAD / 2), Md3.dp(this, 8))
 

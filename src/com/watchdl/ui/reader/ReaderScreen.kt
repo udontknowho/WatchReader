@@ -155,6 +155,15 @@ internal object ReaderUi {
     var nextView: TextView? = null
     var nextRaw = ""
 
+    /**
+     * 连续滚动追加进来的后续章节正文块（含标题），按追加顺序。
+     *
+     * 存到 [ReaderUi] 而不留在 `showReader` 的局部变量里：阅读设置里改字号、行距、
+     * 字重、缩进时要连同这些块一起重排，而 [restyleReader] 只拿得到 [ReaderUi]。
+     * 原始文本与控件成对保存，改字号时才能丢掉旧 span 重排。
+     */
+    val appended: MutableList<Pair<TextView, String>> = ArrayList()
+
     /** 换章前抓下的旧屏位图与滑动方向（1 顺读 / -1 回读）。 */
     var snap: Bitmap? = null
     var snapDir = 1
@@ -236,6 +245,8 @@ internal object ReaderMenu {
         ReaderUi.nextView = null
         ReaderUi.nextTitleView = null
         ReaderUi.nextRaw = ""
+        // 连续滚动追加的块同样是上一屏的控件，留着就是抓着已摘下的视图树。
+        ReaderUi.appended.clear()
         // 自动翻页的回调里握着上一屏的 ScrollView，不摘掉就会继续翻章。
         // 这里只取消待跑的回调，不动用户开关：换章重建后要接着翻（showReader 末尾重新排程）。
         ReaderAuto.cancel()
@@ -492,11 +503,16 @@ internal fun MainActivity.showReader(
     body.setPadding(pad, pad, pad, maxOf(pad, statusH))
     val col = Widgets.contentColumn(body)
 
-    // 标题：legado 把章节标题排正文之前（TypographyTitleTab 的「标题位置」）。
+    // ── 章节标题 ────────────────────────────────────────
+    // legado 把章节标题排正文之前（TypographyTitleTab 的「标题位置」）。
     // 先建好再交给 restyleTitle 上样式，设置里改字号/字重/位置都不必重建页面。
     val titleTv = Md3.text(this, info.chapters.getOrNull(index)?.title.orEmpty(),
         readerSize + ReaderUi.titleAdd, readerInk, bold = ReaderUi.titleBold)
-    col.addView(titleTv)
+
+    // 正文容器：连续滚动用的多章列。第一章（本章）先放进去，
+    // 滚到接近底部再把下一章追加到下面 —— 这样身体一直往下滑，不会闪现新屏。
+    val chapCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+    chapCol.addView(titleTv)
     ReaderUi.titleView = titleTv
 
     // 正文用专用字号（比正文 UI 大），行距 1.8 在手表上偏松，手机上刚好。
@@ -504,11 +520,65 @@ internal fun MainActivity.showReader(
     val tv = Md3.text(this, shown, readerSize, readerInk)
     tv.justificationMode = android.text.Layout.JUSTIFICATION_MODE_INTER_WORD
     tv.setPadding(Md3.dp(this, 3), Md3.dp(this, 2), Md3.dp(this, 3), Md3.dp(this, 24))
-    col.addView(tv)
+    chapCol.addView(tv)
+    col.addView(chapCol)
     ReaderUi.bodyView = tv
     // 字重/斜体/字距/行距/段距/缩进一次性套上：与设置面板改值走同一个函数，
     // 两边样式不会走形。
     restyleReader(text)
+
+    // ── 连续滚动：滚到底先把下一章追加进来，不换屏 ────────────
+    //
+    // 追加在下方，scrollY 天然不用修正，读者只看到文字接着往下。
+    // 去掉飞出动画的观感：不再重建整屏，也就没有那一瞬间的位移。
+    /** 已经追加到第几章（含）；等于当前章时表示还没追加。 */
+    var appendedThrough = index
+    /** 正在取正文，防重复追加：滚动事件很密，不拦就会同一章插两次。 */
+    var appendBusy = false
+    /** 已追加的正文视图，重置主题或回收时要用。 */
+    val appendedViews = ArrayList<TextView>()
+    /** 本屏已连续追加的章数上限：短章书（诗词、评论）不封顶会一路追加完。 */
+    val appendCap = 3
+
+    /**
+     * 取下一章正文并接到正文列后面。
+     *
+     * 失败不提示：章末再戳一下仍能走原来的换屏路径，行为不比以前差。
+     * 空正文也不追加 —— 追加一条空块只会把读者卡在一段空白里。
+     */
+    fun appendNext() {
+        if (appendBusy || appendedViews.size >= appendCap) return
+        val next = appendedThrough + 1
+        if (next >= info.chapters.size) return
+        val ch = info.chapters[next]
+        appendBusy = true
+        bg(curScreen, body = { loadOpening(info, ch, src) }) { r ->
+            appendBusy = false
+            val raw = r.getOrNull()
+            if (raw.isNullOrBlank()) return@bg
+            // 追加之前先确认这一屏还在：后台线程回来时用户可能已经去了别的章。
+            if (ReaderUi.bodyView !== tv) return@bg
+            if (next != appendedThrough + 1) return@bg
+            if (appendedViews.size >= appendCap) return@bg
+            val head = Md3.text(this, ch.title, readerSize + ReaderUi.titleAdd, readerInk,
+                bold = ReaderUi.titleBold)
+            head.setPadding(0, Md3.dp(this, 18), 0, Md3.dp(this, 2))
+            val nx = Md3.text(this, shownText(raw), readerSize, readerInk)
+            nx.justificationMode = android.text.Layout.JUSTIFICATION_MODE_INTER_WORD
+            nx.setPadding(Md3.dp(this, 3), Md3.dp(this, 2), Md3.dp(this, 3), Md3.dp(this, 24))
+            styleBody(nx, raw)
+            chapCol.addView(head)
+            chapCol.addView(nx)
+            appendedViews.add(nx)
+            ReaderUi.appended.add(nx to raw)
+            appendedThrough = next
+            // 埋点：连续滚动最容易出的错是同一章被追加两遍（预取与 appendNext 各挂一次）。
+            // 只在开发者日志开启时落盘，用来数「同一章追加了几次」。
+            com.watchdl.core.DevLog.log("Reader", "append idx=$next n=${appendedViews.size} chars=${raw.length} h=${scrollLimit(body)}")
+            // 本章不满一屏：追加完立刻再试一次，否则读者滑不动。
+            body.post { if (scrollLimit(body) <= body.height) appendNext() }
+        }
+    }
 
     // 当前布局只包含本章；预取不会增加滚动高度。
     val tvNext: TextView? = null
@@ -522,7 +592,16 @@ internal fun MainActivity.showReader(
      * （分母里含了下一章那几百字）。可滚上限仍用 [scrollLimit]。
      * 正文未排版时 tv.height 为 0，这里退回 0，调用方自己当「无进度」处理。
      */
-    fun mainLimit(): Int = scrollLimit(body)
+    fun mainLimit(): Int {
+        // 连续滚动后滚动内容含后续章节，分母必须只算到本章正文的底边，
+        // 否则进度条会把后面追加的几章也算进本章。
+        // 单位统一到 scrollLimit 的口径（含 paddingTop）：childTopIn 返回的是
+        // 「内容顶 + paddingTop」坐标，再减一个 paddingTop 就错位了。
+        val vp = body.height - body.paddingTop - body.paddingBottom
+        if (vp <= 0) return 0
+        val end = childTopIn(body, tv) + tv.height + tv.paddingBottom
+        return (end - vp).coerceIn(0, scrollLimit(body))
+    }
 
     /**
      * 拼接块读完处在那块正文里的**字符偏移**；下一章从这一处接着显示，不重读。
@@ -892,7 +971,7 @@ internal fun MainActivity.showReader(
         }
         b.minimumWidth = Md3.dp(this, 32)
     }
-    // 书名让位：topBar 建出的是 FS_LG（22 sp），一行装不下「书名 + 三枚动作」。
+    // 书名让位：topBar 建出的是 FS_LG（16 sp），一行装不下「书名 + 三枚动作」。
     // 收到 14 sp 单行，ellipsize 保留。有 subtitle 时 0 是书名、1 是副行 subTv。
     val barTitle = (bar.getChildAt(1) as? LinearLayout)?.getChildAt(0) as? TextView
         ?: (bar.getChildAt(1) as? TextView)
@@ -910,7 +989,7 @@ internal fun MainActivity.showReader(
     refreshBtn.minimumHeight = Md3.dp(this, Md3.TOP_BAR)
     refreshBtn.setPadding(Md3.dp(this, 5), 0, Md3.dp(this, 5), 0)
     refreshBtn.isClickable = true
-    refreshBtn.background = Md3.ripple(this, Color.TRANSPARENT, Md3.dp(this, 14).toFloat())
+    refreshBtn.background = Md3.ripple(this, Color.TRANSPARENT, 14f)
     refreshBtn.contentDescription = "刷新本章"
     refreshBtn.setOnClickListener { preview(info, index) }
     bar.addView(refreshBtn, LinearLayout.LayoutParams(
@@ -920,7 +999,7 @@ internal fun MainActivity.showReader(
     swapBtn.minimumHeight = Md3.dp(this, Md3.TOP_BAR)
     swapBtn.setPadding(Md3.dp(this, 5), 0, Md3.dp(this, 5), 0)
     swapBtn.isClickable = true
-    swapBtn.background = Md3.ripple(this, Color.TRANSPARENT, Md3.dp(this, 14).toFloat())
+    swapBtn.background = Md3.ripple(this, Color.TRANSPARENT, 14f)
     swapBtn.contentDescription = "换源"
     swapBtn.setOnClickListener {
         ReaderUi.swapReturnTitle = info.chapters.getOrNull(index)?.title.orEmpty()
@@ -937,7 +1016,7 @@ internal fun MainActivity.showReader(
     more.minimumHeight = Md3.dp(this, Md3.TOP_BAR)
     more.setPadding(Md3.dp(this, 6), 0, Md3.dp(this, 6), 0)
     more.isClickable = true
-    more.background = Md3.ripple(this, Color.TRANSPARENT, Md3.dp(this, 16).toFloat())
+    more.background = Md3.ripple(this, Color.TRANSPARENT, 16f)
     // 染色是视觉信号，听读器读不到颜色，所以描述里同步说一声。
     more.contentDescription = if (badged) "更多操作，本章有书签" else "更多操作"
     more.setOnClickListener { showReaderMenu(info, index, text, src) }
@@ -968,7 +1047,7 @@ internal fun MainActivity.showReader(
         cell.gravity = Gravity.CENTER
         cell.isClickable = true
         cell.contentDescription = label
-        cell.background = Md3.ripple(this, Color.TRANSPARENT, Md3.dp(this, 6).toFloat())
+        cell.background = Md3.ripple(this, Color.TRANSPARENT, 6f)
         cell.setOnClickListener { act() }
         // 40 dp 里放 16 dp 图标 + 一行 10 sp 标签，剩下的当上下热区。
         cell.addView(icon, Md3.lpDp(this, null, 16))
@@ -1056,7 +1135,7 @@ internal fun MainActivity.showReader(
         v.contentDescription = desc
         v.isClickable = true
         if (flip) v.rotation = 180f
-        v.background = Md3.ripple(this, Color.TRANSPARENT, Md3.dp(this, 14).toFloat())
+        v.background = Md3.ripple(this, Color.TRANSPARENT, 14f)
         v.setOnClickListener { act() }
         return v
     }
@@ -1150,8 +1229,9 @@ internal fun MainActivity.showReader(
         val cap = Md3.row(this)
         cap.gravity = Gravity.CENTER_VERTICAL
         cap.setPadding(Md3.dp(this, 10), 0, Md3.dp(this, 12), 0)
-        cap.minimumHeight = Md3.dp(this, 30)
-        cap.background = Md3.ripple(this, Md3.surface3, 20f)
+        val capHeight = 30
+        cap.minimumHeight = Md3.dp(this, capHeight)
+        cap.background = Md3.ripple(this, Md3.surfaceContainerHigh, capHeight / 2f)
         cap.contentDescription = label
         cap.isClickable = true
         cap.addView(Icons.view(this, glyph, readerAccent, 14),
@@ -1223,6 +1303,9 @@ internal fun MainActivity.showReader(
         }
         scrollSave = task
         body.postDelayed(task, 400)
+        // 距底不足一屏就把下一章追加进来：继续往下滑就是下一章，不再重建整屏。
+        val vp = body.height - body.paddingTop - body.paddingBottom
+        if (vp > 0 && scrollLimit(body) - y <= vp) appendNext()
     }
     // 恢复上次读到的地方。等布局完成再滚，否则拿不到 maxScroll。
     // 「返回刚才那章」胶囊回跳时位置是钉死的：落回当时那一屏，不是那一章上次读到的位置。
@@ -1259,11 +1342,16 @@ internal fun MainActivity.showReader(
     // ── 下一章开头：异步取，接到正文之后 ──────────────────────
     // 同步取会卡住这一帧（联网最多几秒），所以走与预览同一套后台任务。
     // 取不到或拿到空正文就什么都不加，行为与以前一样（章末需再戳一下）。
+    //
+    // 这里只做**预热**：把下一章拉进缓存，真正挂视图的是 appendNext。
+    // 两边各挂一次就会把同一章追加两遍 —— 预取回调不再自己 addView。
     val nextCh = info.chapters.getOrNull(index + 1)
     if (nextCh != null && !nextCh.locked) {
         bg(curScreen, body = { loadOpening(info, nextCh, src); Unit }) { _ -> }
         // 完成缓存只含数据，不再把全文挂在页面单槽，统一受条数和字符上限约束。
     }
+    // 本章不满一屏时先追加一章，否则滚动上限为零，往下滑什么也不会发生。
+    body.post { if (scrollLimit(body) <= body.height) appendNext() }
 
     // 护眼：整屏暖色半透明层盖在正文上，不消费触摸，滚动照常。
     // legado 是色温矩阵 + 强度滑杆 + 夜间自动；这里用同色遮罩 + 三档强度 + 时间窗自动。
@@ -1375,6 +1463,10 @@ internal fun MainActivity.restyleReader(raw: String) {
     styleBody(tv, raw)
     // 拼接块里的下一章正文用同一条样式：不同步就会在翻过去时字号突换一档。
     ReaderUi.nextView?.let { styleBody(it, ReaderUi.nextRaw) }
+    // 连续滚动追加的后续章节：不跟着重排，改完字号再往下滑就是两种版式。
+    for ((v, raw) in ReaderUi.appended) styleBody(v, raw)
+    // 埋点：改设置时重排了几个追加块。为 0 就说明 restyle 够不到它们。
+    com.watchdl.core.DevLog.log("Reader", "restyle size=$readerSize appended=${ReaderUi.appended.size}")
     restyleTitle(ink)
 }
 
@@ -1474,7 +1566,7 @@ private fun MainActivity.showReaderMenu(
     val bar = Md3.row(this)
     bar.setPadding(Md3.dp(this, Md3.PAD), 0, 0, 0)
     bar.addView(
-        Md3.ellipsize(Md3.text(this, "更多操作", Md3.FS_LG, Md3.onSurface, bold = true))
+        Md3.ellipsize(Md3.text(this, "更多操作", Md3.FS_XL, Md3.onSurface, bold = true))
             .apply { gravity = Gravity.CENTER_VERTICAL },
         LinearLayout.LayoutParams(0, Md3.dp(this, Md3.TAB_H), 1f),
     )
@@ -1786,7 +1878,7 @@ private fun childTopIn(body: ScrollView, v: View): Int {
  * 正文是自动折行的 TextView，没有“行号”：用 getLineForOffset(字符偏移) 取行顶，
  * 再加上正文在滚动内容里的顶边与自身 paddingTop，才是该滚到的 y。
  */
-private fun MainActivity.scrollToHit(hit: ReaderFind.Hit) {
+private fun MainActivity.scrollToHit(hit: ReaderFind.Hit, tries: Int = 0) {
     val body = readerBody ?: return
     // 直接拿正文控件：正文前面还排了标题，取「第一个子控件的第一个子控件」会拿到标题。
     val tv = ReaderUi.bodyView ?: return
@@ -1794,7 +1886,10 @@ private fun MainActivity.scrollToHit(hit: ReaderFind.Hit) {
     val layout = tv.layout
     if (layout == null) {
         // 刚换章时 Layout 还没生成，等一帧再来。
-        body.post { scrollToHit(hit) }
+        // 但 view 脱窗或找不到测量时机时 layout 会一直为 null，
+        // 无上限 post 就是把消息队列排满 —— 6 帧（约 100 ms）足够排版完成。
+        if (tries >= 6) return
+        body.post { scrollToHit(hit, tries + 1) }
         return
     }
     val line = layout.getLineForOffset(hit.start.coerceIn(0, layout.text.length))

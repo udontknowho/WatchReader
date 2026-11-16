@@ -50,6 +50,17 @@ object Md3 {
 
     var error = 0xFFF2B8B5.toInt(); private set
 
+    // MD3 色角色补齐：容器五档、色调叠加与反色组。
+    var surfaceTint = 0xFFD0BCFF.toInt(); private set
+    var surfaceContainerLowest = 0xFF0F0D13.toInt(); private set
+    var surfaceContainerLow = 0xFF1D1B20.toInt(); private set
+    var surfaceContainer = 0xFF211F26.toInt(); private set
+    var surfaceContainerHigh = 0xFF2B2930.toInt(); private set
+    var surfaceContainerHighest = 0xFF36343B.toInt(); private set
+    var inverseSurface = 0xFFE6E0E9.toInt(); private set
+    var inverseOnSurface = 0xFF322F35.toInt(); private set
+    var inversePrimary = 0xFF6750A4.toInt(); private set
+
     /** 成功/正常态的绿。语义色不跟主题走：换主题后「已下载」还是得是绿的。 */
     val ok: Int get() = if (palette.id == "night") 0xFF7BD88F.toInt() else 0xFF286838.toInt()
 
@@ -64,17 +75,10 @@ object Md3 {
 
     /** 灌一套配色。调用方负责落盘与重画。 */
     fun applyPalette(selected: Palette) {
-        val p = if (selected.id == "night") Palette(
-            "night", "夜间", 0xFFB6CFAD.toInt(), 0xFF20351F.toInt(),
-            0xFF32422F.toInt(), 0xFFD8EBCF.toInt(), 0xFF32422F.toInt(), 0xFFD8EBCF.toInt(),
-            0xFF101113.toInt(), 0xFF1C1E21.toInt(), 0xFF222428.toInt(), 0xFF292C30.toInt(), 0xFF34383D.toInt(),
-            0xFFE4E5DF.toInt(), 0xFFB2B7B0.toInt(), 0xFF90988C.toInt(), 0xFF454B43.toInt(), 0xFFFFB4AB.toInt(),
-        ) else Palette(
-            "day", "日间", 0xFF3D5942.toInt(), 0xFFFFFFFF.toInt(),
-            0xFFD6E3CF.toInt(), 0xFF1E3622.toInt(), 0xFFD6E3CF.toInt(), 0xFF1E3622.toInt(),
-            0xFFF3F0E8.toInt(), 0xFFE8E4D9.toInt(), 0xFFE3DED2.toInt(), 0xFFDED8CA.toInt(), 0xFFD4CDBE.toInt(),
-            0xFF282922.toInt(), 0xFF606156.toInt(), 0xFF737B6C.toInt(), 0xFFB9BBAE.toInt(), 0xFFB3261E.toInt(),
-        )
+        // 直接采用传入的配色。以前这里丢弃参数、按硬编码常量重建日/夜两套，
+        // 与 [Palette.all] 早已漂移：设置页色点画的是派生值，屏上是另一套，
+        // PaletteTest 验的对比度也不是真跑的那一套。真源只留 [Palette.all] 一处。
+        val p = selected
         palette = p
         primary = p.primary
         onPrimary = p.onPrimary
@@ -92,6 +96,15 @@ object Md3 {
         outline = p.outline
         outlineVariant = p.outlineVariant
         error = p.error
+        surfaceTint = p.surfaceTint
+        surfaceContainerLowest = p.surfaceContainerLowest
+        surfaceContainerLow = p.surfaceContainerLow
+        surfaceContainer = p.surfaceContainer
+        surfaceContainerHigh = p.surfaceContainerHigh
+        surfaceContainerHighest = p.surfaceContainerHighest
+        inverseSurface = p.inverseSurface
+        inverseOnSurface = p.inverseOnSurface
+        inversePrimary = p.inversePrimary
     }
 
     // ── 尺寸（dp）—— 两张表，启动时按屏宽选 ──────────
@@ -140,12 +153,15 @@ object Md3 {
      * 该拿的是当前可用宽度。
      */
     fun load(ctx: Context) {
+        // 圆角令牌按 dp 记，GradientDrawable 收 px。密度只在 [bg]/[ripple] 里换算一次，
+        // 调用点一律写 dp —— 以前令牌直接当 px 塞进去，2.0 密度下所有圆角只有标称值一半。
+        densityScale = ctx.resources.displayMetrics.density
         val w = ctx.resources.configuration.screenWidthDp
         if (w >= 320) {
             PAD = if (w >= 600) 24 else 16
             GAP = 8; TOP_BAR = 48; SEARCH = 44; BTN = 40
             ITEM = 48; ITEM_TALL = 60; TAP = 40; HIT = 40
-            FS_XL = 22f; FS_LG = 20f; FS_MD = 14f; FS_SM = 12f; FS_LABEL = 12f
+            FS_XL = 22f; FS_LG = 16f; FS_MD = 14f; FS_SM = 12f; FS_LABEL = 12f
             NAV = 80
             TAB_H = 48
             HEADER_H = 34
@@ -166,10 +182,13 @@ object Md3 {
         }
     }
 
-    // 圆角取 M3 shape scale：extra-small 4 / small 8 / medium 12。
+    // 圆角取 M3 shape scale：extra-small 4 / small 8 / medium 12 / large 16 / extra-large 28。
+    val R_XS = 4             // extraSmall：角标、小标签
+    val R_GRID = 8           // 网格项 / 角标标签（small）
     val R_CARD = 12          // 分组卡 / 大块容器（medium）
     val R_ITEM = 12          // 列表卡 / 菜单项（medium）
-    val R_GRID = 8           // 网格项 / 角标标签（small）
+    val R_LG = 16            // large：抽屉、侧栏容器
+    val R_XL = 28            // extraLarge：对话框、全屏 Sheet
 
     // 图标：M3 顶栏动作、导航项、列表前导都是 24dp。
     val ICON_ACTION = 24
@@ -183,11 +202,13 @@ object Md3 {
     //
     // 手表使用紧凑字阶，宽屏使用常规字阶；正文阅读字号保持独立。
     var FS_XL = 22f        // titleLarge：页面标题、进度大数
-    var FS_LG = 22f        // titleLarge
+    var FS_LG = 16f        // titleMedium：分组标题、顶栏标题、对话框标题
     var FS_MD = 14f        // bodyMedium
+    val FS_TITLE_SM = 14f  // titleSmall
     var FS_SM = 12f        // labelMedium
     var FS_LABEL = 12f     // labelMedium（导航标签）
     val FS_BODY_LARGE = 16f
+    val FS_BODY_SM = 12f   // bodySmall
 
     /** 正文阅读字号（阅读器专用，取 bodyLarge）。 */
     val FS_READ = 16f
@@ -200,25 +221,50 @@ object Md3 {
     @JvmStatic
     fun sp(v: Number): Float = v.toFloat()
 
-    /** 圆角实心背景。 */
+    /** 屏幕密度，由 [load] 灌入。[bg]/[ripple] 用它把 dp 圆角换成 px。 */
+    private var densityScale = 2f
+
+    /** 圆角实心背景。[radiusDp] 是 dp，内部换算成 px 再交给 GradientDrawable。 */
     @JvmStatic
-    fun bg(color: Int, radiusDp: Number, strokeColor: Int? = null, strokeDp: Number = 1): GradientDrawable {
+    fun bg(color: Int, radiusDp: Number, strokeColor: Int? = null, strokeDp: Number = 1): GradientDrawable =
+        bgPx(color, radiusDp.toFloat() * densityScale, strokeColor, strokeDp)
+
+    /** 已经是 px 的圆角背景。只给 [ripple] 复用，避免二次换算。 */
+    private fun bgPx(color: Int, radiusPx: Float, strokeColor: Int?, strokeDp: Number): GradientDrawable {
         val d = GradientDrawable()
         d.shape = GradientDrawable.RECTANGLE
         d.setColor(color)
-        d.cornerRadius = radiusDp.toFloat()
+        d.cornerRadius = radiusPx
         if (strokeColor != null) d.setStroke(strokeDp.toInt().coerceAtLeast(1), strokeColor)
         return d
+    }
+
+    /**
+     * 色调叠加：把 [surfaceTint] 按比例混进容器色，给浮层一层 elevation 观感。
+     *
+     * MD3 1.2 起优先用 surfaceContainer 各档代替叠加，这里只在真正浮起的
+     * 弹层上补很轻的一层（4–5%），两套机制同时存在也不至于发灰。
+     */
+    @JvmStatic
+    fun tonal(base: Int, alpha: Float): Int {
+        val a = alpha.coerceIn(0f, 1f)
+        fun mix(shift: Int): Int {
+            val b = (base shr shift) and 0xFF
+            val t = (surfaceTint shr shift) and 0xFF
+            return (b + (t - b) * a).toInt().coerceIn(0, 255)
+        }
+        return (0xFF shl 24) or (mix(16) shl 16) or (mix(8) shl 8) or mix(0)
     }
 
     /** 带水波纹的可点击背景（MD3 交互反馈）。 */
     @JvmStatic
     fun ripple(ctx: Context, color: Int, radiusDp: Number, strokeColor: Int? = null): RippleDrawable {
-        val content = bg(color, radiusDp, strokeColor)
+        val px = radiusDp.toFloat() * densityScale
+        val content = bgPx(color, px, strokeColor, 1)
         val mask = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
             setColor(Color.WHITE)
-            cornerRadius = radiusDp.toFloat()
+            cornerRadius = px
         }
         val rippleColor = ColorStateList.valueOf((onSurface and 0x00FFFFFF) or 0x22000000)
         return RippleDrawable(rippleColor, content, mask)

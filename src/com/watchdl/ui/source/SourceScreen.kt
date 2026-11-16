@@ -283,7 +283,7 @@ private fun MainActivity.sourceRow(r: SourceRow): LinearLayout {
     // 左右边距比 listItem 各收 4 dp：给两枚动作槽腾位置，文字仍与分组标题对齐。
     row.setPadding(Md3.dp(this, Md3.PAD * 3 / 4), 0, Md3.dp(this, Md3.PAD / 2), 0)
     row.background = Md3.ripple(this,
-        if (picked) Md3.surface3 else Color.TRANSPARENT, Md3.R_ITEM.toFloat())
+        if (picked) Md3.surfaceContainerHigh else Color.TRANSPARENT, Md3.R_ITEM.toFloat())
 
     row.addView(Icons.view(this, sourceMarkGlyph(r.mark), sourceMarkColor(r.mark), 16),
         LinearLayout.LayoutParams(Md3.dp(this, 18), Md3.dp(this, 18)).apply {
@@ -765,7 +765,7 @@ private fun MainActivity.showDiscoverLegacy(rankKey: String = "") {
             val row = Md3.row(this)
             pair.forEachIndexed { i, r ->
                 row.addView(rankChip(r), LinearLayout.LayoutParams(
-                    0, Md3.dp(this, 32), 1f).apply {
+                    0, Md3.dp(this, Md3.TAP), 1f).apply {
                     if (i > 0) leftMargin = Md3.dp(this@showDiscoverLegacy, 4)
                     topMargin = Md3.dp(this@showDiscoverLegacy, 4)
                 })
@@ -884,7 +884,7 @@ private fun MainActivity.rankChip(r: RankConfig.Rank): View =
         gravity = Gravity.CENTER
         maxLines = 1
         ellipsize = android.text.TextUtils.TruncateAt.END
-        background = Md3.ripple(this@rankChip, Md3.surface2, 10f)
+        background = Md3.ripple(this@rankChip, Md3.surfaceContainer, Md3.TAP / 2f)
         isClickable = true
         contentDescription = r.name
         setOnClickListener { showDiscover(r.key) }

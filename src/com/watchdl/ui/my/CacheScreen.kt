@@ -338,7 +338,7 @@ private fun MainActivity.cacheCard(u: CacheUsage): LinearLayout {
 /** `已缓存/总章` 小牌，对 legado 头行右侧那个 `TextCard`。 */
 private fun MainActivity.cacheCountChip(u: CacheUsage): android.widget.TextView =
     Md3.text(this, "${u.cached}/${u.total}", Md3.FS_SM, Md3.primary, bold = true).apply {
-        background = Md3.bg(Md3.surface4, Md3.R_GRID.toFloat())
+        background = Md3.bg(Md3.surfaceContainerHighest, Md3.R_GRID.toFloat())
         setPadding(Md3.dp(this@cacheCountChip, 6), Md3.dp(this@cacheCountChip, 2),
             Md3.dp(this@cacheCountChip, 6), Md3.dp(this@cacheCountChip, 2))
     }

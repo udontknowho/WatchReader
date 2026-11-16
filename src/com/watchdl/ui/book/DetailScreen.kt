@@ -113,7 +113,7 @@ internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
     val meta = Md3.column(this)
     meta.setPadding(Md3.dp(this, Md3.PAD), 0, 0, 0)
     meta.gravity = Gravity.CENTER_VERTICAL
-    val nameView = Md3.text(this, info.name, Md3.FS_LG, Md3.onSurface, bold = true)
+    val nameView = Md3.text(this, info.name, Md3.FS_XL, Md3.onSurface, bold = true)
     nameView.maxLines = 2
     nameView.ellipsize = android.text.TextUtils.TruncateAt.END
     meta.addView(nameView)
@@ -148,7 +148,7 @@ internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
         Md3.FS_SM, Md3.onSurfaceVariant).apply {
         setPadding(Md3.dp(this@showDetail, Md3.GAP), Md3.dp(this@showDetail, 1),
             Md3.dp(this@showDetail, Md3.GAP), Md3.dp(this@showDetail, 1))
-        background = Md3.bg(Md3.surface4, Md3.R_ITEM.toFloat())
+        background = Md3.bg(Md3.surfaceContainerHighest, Md3.R_ITEM.toFloat())
         contentDescription = "下载进度 ${detailDownloadTag(done, totalChapters)}"
     }, LinearLayout.LayoutParams(
         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -160,14 +160,15 @@ internal fun MainActivity.showDetail(info: BookInfo, src: BookSource? = null) {
     fun actionCard(glyph: String, label: String, desc: String, act: () -> Unit): LinearLayout {
         val cell = Md3.column(this)
         cell.gravity = Gravity.CENTER
-        cell.background = Md3.ripple(this, Md3.surface3, Md3.R_ITEM.toFloat())
+        cell.background = Md3.ripple(this, Md3.surfaceContainerHigh, Md3.R_ITEM.toFloat())
         cell.isClickable = true
         cell.contentDescription = desc
         cell.setOnClickListener { act() }
         val icon = Icons.name(glyph)
         cell.addView(
             if (icon != null) Icons.view(this, icon, Md3.primary, 18)
-            else Md3.text(this, glyph, Md3.FS_LG, Md3.primary).apply { gravity = Gravity.CENTER },
+            // 动作卡字形是装饰图形，按正文档给，不能跟着标题一起放大。
+            else Md3.text(this, glyph, Md3.FS_BODY_LARGE, Md3.primary).apply { gravity = Gravity.CENTER },
             Md3.lpDp(this, null, 18))
         cell.addView(Md3.ellipsize(Md3.text(this, label, Md3.FS_SM, Md3.onSurface)).apply {
             gravity = Gravity.CENTER

@@ -89,7 +89,7 @@ private fun MainActivity.aboutHeader(): LinearLayout {
     val box = Md3.column(this)
     box.gravity = Gravity.CENTER_HORIZONTAL
     box.setPadding(Md3.dp(this, Md3.PAD), Md3.dp(this, Md3.GAP), Md3.dp(this, Md3.PAD), 0)
-    box.addView(Md3.text(this, "WatchReader", Md3.FS_LG, Md3.onSurface, bold = true)
+    box.addView(Md3.text(this, "WatchReader", Md3.FS_XL, Md3.onSurface, bold = true)
         .apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
     val info = runCatching { packageManager.getPackageInfo(packageName, 0) }.getOrNull()
@@ -97,7 +97,7 @@ private fun MainActivity.aboutHeader(): LinearLayout {
         else (info?.versionCode ?: 0).toLong()
     box.addView(Md3.text(this, "${info?.versionName ?: "未知"}（$code）", Md3.FS_SM, Md3.onSurfaceVariant).apply {
         gravity = Gravity.CENTER
-        background = Md3.bg(Md3.surface3, Md3.R_GRID.toFloat())
+        background = Md3.bg(Md3.surfaceContainerHigh, Md3.R_GRID.toFloat())
         setPadding(Md3.dp(this@aboutHeader, 8), Md3.dp(this@aboutHeader, 2),
             Md3.dp(this@aboutHeader, 8), Md3.dp(this@aboutHeader, 2))
     }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)

@@ -195,7 +195,7 @@ private fun MainActivity.renderLogs(col: LinearLayout, tail: LogTail?, failed: B
 /**
  * 日志正文：等宽字体装在一枚圆角容器里。
  *
- * 形态照 legado `CrashReportScreen` 的正文区（`surfaceContainerLow` + 12dp 圆角 +
+ * 形态照 legado `CrashReportScreen` 的正文区（`surfaceContainerHigh` + 12dp 圆角 +
  * `FontFamily.Monospace` + bodySmall）。等宽不是怀旧：时间戳与屏名对齐之后，
  * 一眼能扫出「连续掉帧」还是「一条一条零散」，变宽字体下这个信息就没了。
  *
@@ -204,7 +204,7 @@ private fun MainActivity.renderLogs(col: LinearLayout, tail: LogTail?, failed: B
  */
 private fun MainActivity.logBlock(lines: List<String>): LinearLayout {
     val card = Md3.column(this)
-    card.background = Md3.bg(Md3.surface2, Md3.R_CARD.toFloat())
+    card.background = Md3.bg(Md3.surfaceContainerHigh, Md3.R_CARD.toFloat())
     val pad = Md3.dp(this, Md3.PAD * 0.6)
     card.setPadding(pad, pad, pad, pad)
     card.addView(
