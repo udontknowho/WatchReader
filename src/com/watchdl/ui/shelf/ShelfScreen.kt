@@ -829,7 +829,7 @@ internal fun MainActivity.refreshShelfTocs() {
 /**
  * 这本书该用哪个源取目录。
  *
- * 与 `DownloadService.resolveSource` 同一判据：链接以源主机开头就算这本归它。
+ * 与 `DownloadService.resolveNamed` 同一判据：链接以源主机开头就算这本归它。
  * 走 [multi] 而不是重读书源目录，是因为 `multi` 里已经把 `DeviceRegister` 起好，
  * 番茄源的构造依赖它。
  */

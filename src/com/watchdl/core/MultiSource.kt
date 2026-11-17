@@ -312,7 +312,15 @@ class MultiSource(
      * 以前只按显示名 `firstOrNull`，于是选 B 站的书交给 A 站引擎取目录 →
      * 空目录 → 报「取不到目录」。去掉装饰符后还会再撞。
      */
-    fun pickFor(hit: BookHit): BookSource? {
+    fun pickFor(hit: BookHit): BookSource? = namedFor(hit)?.source
+
+    /**
+     * 按来源名找出能处理这本书的具体源（带名字）。找不到返回 null。
+     *
+     * 补章要拿源名做日志与「跳过本书源」，所以除了源本体还得拿到登记名 ——
+     * 以前只有 [pickFor]，调用方拿回一个裸 [BookSource]，名字只能再从 hit 里猜。
+     */
+    fun namedFor(hit: BookHit): NamedSource? {
         // 一条结果只对应一个源（不再拼 `甲/乙`），仍保留按 `/` 拆分的兼容：
         // 旧作业或外部传入的拼接名还能用。
         val names = hit.sourceName.split('/').map { it.trim() }.filter { it.isNotEmpty() }
@@ -326,12 +334,12 @@ class MultiSource(
                 fun bareHost(u: String) =
                     u.removePrefix("https://").removePrefix("http://").trimEnd('/')
                 // 只看 host：显示名带了 `@host` 后缀，拿它和裸名比必然不等。
-                pool.firstOrNull { bareHost(it.host) == h }?.let { return it.source }
+                pool.firstOrNull { bareHost(it.host) == h }?.let { return it }
                 // 后缀对不上（源库更新过 host）时按裸名字再找一次
-                pool.firstOrNull { matchesName(it, bare) }?.let { return it.source }
+                pool.firstOrNull { matchesName(it, bare) }?.let { return it }
                 continue
             }
-            pool.firstOrNull { matchesName(it, n) }?.let { return it.source }
+            pool.firstOrNull { matchesName(it, n) }?.let { return it }
         }
         return null
     }

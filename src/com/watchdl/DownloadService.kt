@@ -42,6 +42,9 @@ class DownloadService : Service() {
          */
         const val DEFAULT_LANES = 3
 
+        /** 番茄的源名。补章要跳过本书源时靠它认出番茄。 */
+        const val FANQIE = "番茄"
+
         /**
          * 正在下载的 bookId，没有则为 null。
          *
@@ -259,11 +262,10 @@ class DownloadService : Service() {
      * 就是那本书在该站的 URL，逐个源比对 `rule.host` 与链接前缀即可定位。
      * 对不上（或本来就是番茄）就退回番茄 —— 与以前行为一致。
      */
-    private fun resolveSource(bookId: String): BookSource {
-        if (bookId.isBlank()) return fanqieSource()
+    private fun resolveNamed(bookId: String): Pair<String, BookSource> {
+        if (bookId.isBlank()) return FANQIE to fanqieSource()
         val dir = File(filesDir, "sources").apply { mkdirs() }
-        val files = dir.listFiles()?.filter { it.extension == "json" } ?: return fanqieSource()
-        for (f in files) {
+        for (f in SourceRegistry.sourceFiles(dir)) {
             val rules = runCatching {
                 val text = f.readText()
                 if (text.contains("bookSourceName")) LegadoImport.importAll(text).mapNotNull { it.rule }
@@ -273,11 +275,11 @@ class DownloadService : Service() {
                 val host = rule.host.trimEnd('/')
                 // 链接以该源的主机开头，就认为这本书属于这个源。
                 if (host.isNotBlank() && bookId.startsWith(host, ignoreCase = true)) {
-                    return LegadoSource.of(rule)
+                    return MultiSource.tidyName(rule.name) to LegadoSource.of(rule)
                 }
             }
         }
-        return fanqieSource()
+        return FANQIE to fanqieSource()
     }
 
     private fun fanqieSource(): BookSource {
@@ -361,9 +363,7 @@ class DownloadService : Service() {
     private fun runJob(info: BookInfo, freeOnly: Boolean, explicit: List<Int>? = null) {
         val store = JobStore(File(filesDir, "books"))
         val startedAt = System.currentTimeMillis()
-        // APP 接口给完整正文（网页端只给 185 字试读片段）。
-        // 第三方书源不初始化番茄设备，避免无用注册。
-        val source: BookSource = resolveSource(info.bookId)
+        val (sourceName, source) = resolveNamed(info.bookId)
 
         val existing = Downloader.restore(store, info.bookId)
         val job = if (existing == null || existing.chapters.isEmpty()) {
@@ -400,6 +400,22 @@ class DownloadService : Service() {
         try {
             val lanesNow = lanes()
             DevLog.log("DL", "开始：${info.name.ifBlank { "未命名" }} ${job.chapters.size} 章，并发 $lanesNow，间隔 ${if (source is FanqieApp) FANQIE_GAP_MS else Backoff.GAP_MS}ms")
+            // 补章池：**懒建**。建池要读一遍书源目录（几十个 JSON），
+            // 而没有失败章的时候这笔开销一次都用不上。
+            // 这里的并发只影响补章那一次全源搜索，与下载并发无关。
+            val fallbackPool by lazy {
+                val dir = File(filesDir, "sources").apply { mkdirs() }
+                val named = SourceRegistry.load(dir) { DevLog.log("WatchDL", it) }
+                val pool = listOf(MultiSource.NamedSource(FANQIE, fanqieSource())) + named
+                ChapterFallback(
+                    multi = MultiSource(pool, concurrency = 4),
+                    bookName = job.name,
+                    author = job.author,
+                    skipSourceName = sourceName,
+                    log = { com.watchdl.core.DevLog.log("DL", it) },
+                    isCancelled = { cancelFlag.get() },
+                )
+            }
             val dl = Downloader(
                 store = store,
                 fetchChapter = { ch -> source.content(ch.itemId, info.bookId) },
@@ -413,6 +429,8 @@ class DownloadService : Service() {
                 concurrency = lanesNow,
                 // 取消要走到落盘那一步：Downloader 自己把最终状态写成 CANCELLED。
                 isCancelled = { cancelFlag.get() },
+                // 本书源拿不到的章，去别的源取同名章补上（懒建，只在真失败时触发）。
+                fallback = { ch -> fallbackPool.fetch(ch.title) },
             )
             dl.onChapter = { _, status, title ->
                 when (status) {

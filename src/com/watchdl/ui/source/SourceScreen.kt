@@ -1351,12 +1351,7 @@ private fun MainActivity.buildLocalSourceRows(): SourceData {
  *
  * 备份一律带 `.bak` 后缀，天然被 extension 过滤掉。
  */
-internal fun MainActivity.sourceFiles(dir: File): List<File> =
-    dir.listFiles()
-        ?.filter { it.isFile && it.extension == "json" }
-        ?.filter { !it.name.startsWith(".") }
-        ?.sortedBy { it.name }
-        ?: emptyList()
+internal fun MainActivity.sourceFiles(dir: File): List<File> = SourceRegistry.sourceFiles(dir)
 
 /** 书源目录。本地书源与市场导入的都放这里。 */
 internal fun MainActivity.sourcesDir(): File = File(filesDir, "sources").apply { mkdirs() }

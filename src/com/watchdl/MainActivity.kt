@@ -74,38 +74,11 @@ class MainActivity : Activity() {
         val list = mutableListOf<MultiSource.NamedSource>()
         runCatching { list += MultiSource.NamedSource("番茄", FanqieApp(DeviceRegister.get())) }
         val dir = File(filesDir, "sources").apply { mkdirs() }
-        // 按文件名排序：`listFiles()` 的顺序由文件系统决定，不保证稳定。
-        // 下面 `take(MAX_SOURCES)` 取的是列表前几个，所以**文件顺序就是优先级**，
-        // 不排序的话每次安装跑的可能都不是同一批源。
-        // 先收集规则，再统一分配显示名：重名要加 host 后缀，
-        // 否则 pickFor 只按名字找第一条，选 B 站的书会交给 A 站引擎取目录（N7，源库 88 组重名）。
-        // 书源管理屏的启用/移除名单（core/SourcePrefsStore）。源 JSON 不动，
-        // 生效点就在这里：被禁用或移除的源不进搜索池。
-        val prefs = SourcePrefsStore.load(dir)
-        val pending = mutableListOf<Triple<String, com.watchdl.core.BookSourceRule, String>>()
-        sourceFiles(dir).forEach { f ->
-            runCatching {
-                val text = f.readText()
-                if (text.contains("bookSourceName")) {
-                    LegadoImport.importAll(text).forEach { im ->
-                        if (im.name in prefs.disabled || im.name in prefs.removed) return@forEach
-                        im.rule?.let { pending += Triple(im.name, it, it.host) }
-                    }
-                }
-            }.onFailure { DevLog.log("WatchDL", "载入书源 ${f.name} 失败：${it.message}") }
-        }
-        val nameCount = pending.groupingBy { MultiSource.tidyName(it.first) }.eachCount()
-        val seen = mutableSetOf<String>()
-        for ((name, rule, host) in pending) {
-            val bare = MultiSource.tidyName(name)
-            val disambiguate = (nameCount[bare] ?: 0) > 1
-            val shown = if (disambiguate) {
-                val shortHost = host.removePrefix("https://").removePrefix("http://").trimEnd('/')
-                "$name @$shortHost"
-            } else name
-            if (!seen.add(MultiSource.tidyName(shown))) continue   // 同一 host 重复注册，留第一条
-            list += MultiSource.NamedSource(shown, LegadoSource.of(rule), host)
-        }
+        // 读书源文件的规则收在 core/SourceRegistry：下载服务的补章池要读同一份清单，
+        // 两处各写一份必然漂移 —— 屏幕上显示的源名和真正取数的源对不上。
+        // 「按文件名排序（顺序即优先级）」「重名加 @host 后缀」「启用/移除名单」
+        // 这三条都在那里，这里只管加番茄、截前 MAX_SOURCES、留全池。
+        list += SourceRegistry.load(dir) { DevLog.log("WatchDL", it) }
         // 只搜前 MAX_SOURCES 个源。
         //
         // 以前把 80+ 个源全发出去，并发 5、总超时 15 秒 —— 排在后面的源根本

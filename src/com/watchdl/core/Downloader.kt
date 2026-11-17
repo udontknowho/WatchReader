@@ -46,6 +46,14 @@ class Downloader(
      * 用户只能以为卡死了。到点就当作本章失败，让下载继续往下走。
      */
     private val chapterTimeoutMs: Long = 60_000,
+
+    /**
+     * 补章：本书源这一章确实拿不到时，去别的源取同名章，返回正文片段；取不到返回 null。
+     *
+     * 传 null 表示没有补章能力（单源下载）。返回 null 不影响主流程 —— 这一章照旧记失败。
+     * 补章是尽力而为的慢路径，所以放在重试全部耗尽**之后**，不占正常重试的名额。
+     */
+    private val fallback: ((ChapterRef) -> String?)? = null,
 ) {
 
     private val interrupted = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -158,6 +166,37 @@ class Downloader(
                             log("第 ${i + 1} 章 ${ch.title.take(12)} 失败 ${System.currentTimeMillis() - t0}ms " +
                                 errKind(lastThrown ?: RuntimeException(lastError)))
                         }
+                        // 补章：主源这一章确实拿不到，去别的源取同名章。
+                        // 取到合格正文就照正常章落盘记 DONE，不算失败 ——
+                        // 用户要的是这本书，不是「每一章都必须从同一个站来」。
+                        if (!success && !cancelled()) {
+                            val fb = fallback
+                            if (fb != null) {
+                                // fb 返回 String?；withChapterTimeout 的块签名要非空，
+                                // 用空串过渡，null 语义由下面的 isNullOrBlank 接住。
+                                val alt = try {
+                                    withChapterTimeout(chapterTimeoutMs) { fb(ch).orEmpty() }
+                                } catch (e: Exception) {
+                                    null
+                                }
+                                if (!alt.isNullOrBlank()) {
+                                    try {
+                                        val chars = checkBody(alt, ch.title)
+                                        synchronized(lock) { writeChapter(job, ch, alt) }
+                                        synchronized(lock) {
+                                            statuses[i] = ChapterStatus.DONE
+                                            ok++
+                                            consecFail = 0
+                                        }
+                                        onChapter?.invoke(i, ChapterStatus.DONE, ch.title)
+                                        log("第 ${i + 1} 章 ${ch.title.take(12)} 补章 ${chars} 字")
+                                        success = true
+                                    } catch (e: Exception) {
+                                        // 补来的正文也不合格：当没补到，走下面的失败分支。
+                                    }
+                                }
+                            }
+                        }
                         if (!success && !cancelled()) {
                             synchronized(lock) {
                                 statuses[i] = ChapterStatus.FAILED
@@ -195,17 +234,46 @@ class Downloader(
                     log("批内有失败，批大小收到 $size，重试 ${retry.size} 章")
                     for (i in retry) {
                         if (cancelled()) break
+                        val ch = job.chapters[i]
+                        var lastError: String? = null
+                        var got: String? = null
                         try {
-                            val html = withChapterTimeout(chapterTimeoutMs) { fetchChapter(job.chapters[i]) }
-                            checkBody(html, job.chapters[i].title)
-                            writeChapter(job, job.chapters[i], html)
+                            val html = withChapterTimeout(chapterTimeoutMs) { fetchChapter(ch) }
+                            checkBody(html, ch.title)
+                            got = html
+                        } catch (e: Exception) {
+                            if (e is InterruptedException) interrupted.set(true)
+                            lastError = e.message
+                        }
+                        // 缩批重跑仍失败，再试补章：这一章已经挂了两轮，
+                        // 说明本书源对它是真没办法了。
+                        val fb = fallback
+                        if (got == null && !cancelled() && fb != null) {
+                            try {
+                                // 同上：空串会被 checkBody 判成「正文为空」，等于没补到。
+                                val alt = withChapterTimeout(chapterTimeoutMs) { fb(ch).orEmpty() }
+                                checkBody(alt, ch.title)
+                                got = alt
+                            } catch (e: Exception) {
+                                // 补章也不成，下面照失败记
+                            }
+                        }
+                        var wrote = false
+                        if (got != null) {
+                            try {
+                                writeChapter(job, ch, got)
+                                wrote = true
+                            } catch (e: Exception) {
+                                lastError = e.message
+                            }
+                        }
+                        if (wrote) {
                             statuses[i] = ChapterStatus.DONE
                             ok++; fail--
                             consecFail = 0
-                            onChapter?.invoke(i, ChapterStatus.DONE, job.chapters[i].title)
-                        } catch (e: Exception) {
-                            if (e is InterruptedException) interrupted.set(true)
-                            log("重试仍失败：第 ${i + 1} 章 ${e.message}")
+                            onChapter?.invoke(i, ChapterStatus.DONE, ch.title)
+                        } else if (!cancelled()) {
+                            log("重试仍失败：第 ${i + 1} 章 $lastError")
                         }
                         persist(job, statuses)
                     }
