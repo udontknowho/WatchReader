@@ -55,16 +55,25 @@ fun main() {
     // 少一个说明分类表写漏了。
     // 2026-10-25：番茄「新书」榜（rankType=1）已按用户要求移除，所以不再是 52。
     val fq = RankConfig.BUILTIN.filter { it.kind == RankConfig.Kind.FANQIE_RANK }
-    check("番茄分类榜 26 个", fq.size == 26, "实际 ${fq.size}")
+    // 2026-11-17：番茄女频从 7 类补到 18 类（对齐官网 37 条元数据里的 female 分组），
+    // 男频 19 + 女频 18 = 37。少一个说明分类表写漏了。
+    check("番茄分类榜 37 个", fq.size == 37, "实际 ${fq.size}")
     check("男频 19 类", fq.count { it.gender == RankConfig.Gender.MALE } == 19,
         "实际 ${fq.count { it.gender == RankConfig.Gender.MALE }}")
-    check("女频 7 类", fq.count { it.gender == RankConfig.Gender.FEMALE } == 7,
+    check("女频 18 类", fq.count { it.gender == RankConfig.Gender.FEMALE } == 18,
         "实际 ${fq.count { it.gender == RankConfig.Gender.FEMALE }}")
-    // 2026-11-03：起点 5 个 board 各建男女两条（`qd:<board>` / `qd:female:<board>`），
-    // 共 10 条。男频老键名不变 —— 存档与云端 ranks.json 里已经有它们。
-    check("起点男女频各 9 个榜",
-        RankConfig.BUILTIN.count { it.site == RankConfig.Site.QIDIAN } == 18,
+    // 2026-11-17：起点榜表按频道拆分 —— 男频九榜，女频八榜
+    // （加收藏/免费，去签约/新书/新人，依据官网 rankDetail.js 的 only 字段）。
+    check("起点男女频共 17 个榜",
+        RankConfig.BUILTIN.count { it.site == RankConfig.Site.QIDIAN } == 17,
         "实际 ${RankConfig.BUILTIN.count { it.site == RankConfig.Site.QIDIAN }}")
+    check("起点女频八榜", RankConfig.select(RankConfig.BUILTIN, RankConfig.Site.QIDIAN,
+        RankConfig.Gender.FEMALE).size == 8,
+        "实际 ${RankConfig.select(RankConfig.BUILTIN, RankConfig.Site.QIDIAN, RankConfig.Gender.FEMALE).size}")
+    check("女频有收藏与免费榜", RankConfig.BUILTIN.any { it.key == "qd:female:collect" } &&
+        RankConfig.BUILTIN.any { it.key == "qd:female:free" })
+    check("女频不再有签约新书新人", listOf("sign", "newbook", "newauthor").none { b ->
+        RankConfig.BUILTIN.any { it.key == "qd:female:$b" } })
     check("起点男频沿用老键",
         RankConfig.BUILTIN.any { it.key == "qd:yuepiao" && it.gender == RankConfig.Gender.MALE })
     check("起点女频另立键",
@@ -112,7 +121,7 @@ fun main() {
         check("过期缓存退回内置表", stale.size == RankConfig.BUILTIN.size,
             "实际 ${stale.size} 条")
         check("分类榜又回来了",
-            stale.count { it.kind == RankConfig.Kind.FANQIE_RANK } == 26,
+            stale.count { it.kind == RankConfig.Kind.FANQIE_RANK } == 37,
             "实际 ${stale.count { it.kind == RankConfig.Kind.FANQIE_RANK }} 个")
         emptyDir.deleteRecursively()
     }

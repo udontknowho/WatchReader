@@ -12,7 +12,8 @@ fun main(args: Array<String>) {
     }
     val read = rank("readindex")
     val fans = rank("newfans")
-    verify("九榜且无收藏榜", C.QIDIAN_BOARDS.size == 9 && C.qidianBoard("collectlist") == null)
+    verify("男频九榜且女频八榜", C.QIDIAN_BOARDS.size == 9 && C.QIDIAN_FEMALE_BOARDS.size == 8 &&
+        C.qidianBoard("collectlist") == "collect")
     verify("全站加十四分类", C.qidianCategories(read).size == 15)
     verify("书友分类相同", C.qidianCategories(fans) == C.qidianCategories(read))
     verify("书友周月", C.qidianPeriods(fans).map { it.path } == listOf("3", "2"))
@@ -29,8 +30,11 @@ fun main(args: Array<String>) {
     rejects("未确认榜分类拒绝") { S.qidianUrl(rank("newbook"), C.QidianFilter(21)) }
     rejects("不伪造分页") { S.fetch(read, "male", 2) }
     verify("男频九榜", C.select(C.BUILTIN, C.Site.QIDIAN, C.Gender.MALE).size == 9)
-    verify("女频九榜", C.select(C.BUILTIN, C.Site.QIDIAN, C.Gender.FEMALE).size == 9)
+    verify("女频八榜", C.select(C.BUILTIN, C.Site.QIDIAN, C.Gender.FEMALE).size == 8)
+    verify("女频有收藏榜", C.select(C.BUILTIN, C.Site.QIDIAN, C.Gender.FEMALE).any { it.board == "collect" })
+    verify("女频无签约榜", C.select(C.BUILTIN, C.Site.QIDIAN, C.Gender.FEMALE).none { it.board == "sign" })
     verify("番茄男频十九类", C.select(C.BUILTIN, C.Site.FANQIE, C.Gender.MALE).size == 19)
+    verify("番茄女频十八类", C.select(C.BUILTIN, C.Site.FANQIE, C.Gender.FEMALE).size == 18)
     verify("所有起点禁分页", C.BUILTIN.filter { it.site == C.Site.QIDIAN }.all { it.pages == 0 })
     fun html(records: String, extra: String = "") = """<html><script id="vite-plugin-ssr_pageContext" type="application/json">{"pageContext":{"pageProps":{"pageData":{"total":510,"isLast":0,"records":$records$extra}}}}</script></html>"""
     val parsed = S.parseQidianPage(html("""[{"bid":"1","bName":"甲","desc":"第一本"},{"bid":"2","bName":"乙","bAuth":"作者乙","cat":"玄幻"}]"""))
@@ -44,7 +48,8 @@ fun main(args: Array<String>) {
     rejects("坏记录不吞掉") { S.parseQidianPage(html("""[{"bid":"1"}]""")) }
     rejects("records不能是对象") { S.parseQidianPage(html("{}")) }
     verify("旧配置归一且禁分页", C.parse("""{"ranks":[{"key":"old","kind":"qidian","board":"yuepiaolist","pages":10}]}""").single().let { it.board == "yuepiao" && it.pages == 0 })
-    verify("无效旧收藏榜剔除", C.parse("""{"ranks":[{"key":"old","kind":"qidian","board":"collectlist"}]}""").isEmpty())
+    verify("旧收藏榜归一为 collect", C.parse("""{"ranks":[{"key":"old","kind":"qidian","board":"collectlist"}]}""").single().let { it.board == "collect" && it.pages == 0 })
+    verify("未知榜仍被剔除", C.parse("""{"ranks":[{"key":"old","kind":"qidian","board":"nosuchboard"}]}""").isEmpty())
     args.firstOrNull { !it.startsWith("--") }?.let { dir ->
         for ((file, total) in listOf("read.html" to 510, "fans.html" to 500)) {
             val page = S.parseQidianPage(File(dir, file).readText())

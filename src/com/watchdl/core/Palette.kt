@@ -243,6 +243,30 @@ class Palette(
                 inverseSurface = 0xFFE4E5DF.toInt(), inverseOnSurface = 0xFF101113.toInt(),
                 inversePrimary = 0xFF3D5942.toInt(),
             ),
+            /*
+             * MIUIX / HyperOS 观感：近白底 + 中性灰层级 + 蓝色主色，层级比日间密。
+             *
+             * 不改任何几何（圆角、间距仍走 Md3 的那套），只换色：
+             * 底色从暖纸变成冷白，容器五档压得更紧，主色换成蓝色。
+             * 浅色系，所以与 `id == "night"` 相关的分支一律按日间走。
+             */
+            Palette(
+                id = "miuix", name = "米",
+                primary = 0xFF0B6BCB.toInt(), onPrimary = 0xFFFFFFFF.toInt(),
+                primaryContainer = 0xFFD6E3FF.toInt(), onPrimaryContainer = 0xFF001B3E.toInt(),
+                secondaryContainer = 0xFFDCE4EE.toInt(), onSecondaryContainer = 0xFF131C26.toInt(),
+                surface = 0xFFF7F7F9.toInt(), surface1 = 0xFFEFEFF2.toInt(), surface2 = 0xFFE8E8EC.toInt(),
+                surface3 = 0xFFE1E1E6.toInt(), surface4 = 0xFFD9D9DF.toInt(),
+                onSurface = 0xFF1B1B1F.toInt(), onSurfaceVariant = 0xFF55555E.toInt(),
+                outline = 0xFF6E6E78.toInt(), outlineVariant = 0xFFC3C3CB.toInt(),
+                error = 0xFFB3261E.toInt(),
+                surfaceTint = 0xFF0B6BCB.toInt(),
+                surfaceContainerLowest = 0xFFFFFFFF.toInt(), surfaceContainerLow = 0xFFF5F5F8.toInt(),
+                surfaceContainer = 0xFFEFEFF2.toInt(), surfaceContainerHigh = 0xFFE9E9EE.toInt(),
+                surfaceContainerHighest = 0xFFE3E3E9.toInt(),
+                inverseSurface = 0xFF2F3033.toInt(), inverseOnSurface = 0xFFF1F1F4.toInt(),
+                inversePrimary = 0xFFA8C8FF.toInt(),
+            ),
         )
 
         /** 旧主题保持原深浅倾向，不触碰字号、排版与阅读进度。 */

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    冷启动首帧。
+
+    系统在进程起来之前先按 manifest 里的主题画一个「预览窗」，颜色取的就是
+    `android:windowBackground`。values 里 AppTheme 挂在 Day（#f3f0e8），
+    系统处于深色时用户先看到一片浅色再跳成深色，就是那一下白闪。
+
+    这里只覆盖 AppTheme 一个条目：系统深色时让它挂 Night，预览窗就是 #101113。
+    其余样式仍在 values/styles.xml，按限定符合并，不重复定义。
+
+    应用自己的配色表（Palette）与 activity 内 setTheme 都不动 —— 这一层只影响
+    进程起来之前那一帧，进程起来后 OnCreate 里照常按用户选的配色定主题。
+-->
+<resources>
+    <style name="AppTheme" parent="AppTheme.Night" />
+</resources>

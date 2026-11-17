@@ -1,7 +1,7 @@
 /**
  * 主题配色表自检。
  *
- * 仅保留日夜主题，并校验旧主题迁移方向。
+ * 色表为日 / 夜 / 米三套，校验旧主题迁移方向。
  * 深色层级逐级变亮，浅色层级逐级变暗。
  * 正文、次要文字、按钮及容器分别校验对比度。
  */
@@ -65,10 +65,11 @@ fun main() {
     val previewThemes = listOf(
         Triple("day", "日间", 0xFFF3F0E8.toInt()),
         Triple("night", "夜间", 0xFF101113.toInt()),
+        Triple("miuix", "米", 0xFFF7F7F9.toInt()),
     )
-    val newIds = setOf("day", "night")
-    val lightIds = setOf("day")
-    check("仅保留日夜主题", Palette.all.map { it.id } == listOf("day", "night"))
+    val newIds = setOf("day", "night", "miuix")
+    val lightIds = setOf("day", "miuix")
+    check("色表为日 / 夜 / 米", Palette.all.map { it.id } == listOf("day", "night", "miuix"))
     check("七套旧深色主题迁移夜间", legacyIds.all { Palette.find(it).id == "night" })
     check("旧浅色主题迁移日间", listOf("warmpaper", "seasalt").all { Palette.find(it).id == "day" })
     check("旧新增深色主题迁移夜间", listOf("duskblue", "amberblack", "violetmist", "terracotta").all { Palette.find(it).id == "night" })
@@ -85,7 +86,7 @@ fun main() {
     check("默认解析为日间", Palette.find(null).id == "day")
     check("认不出 id 回默认", Palette.find("no-such-id").id == Palette.DEFAULT_ID)
     check("null 回默认", Palette.find(null).id == Palette.DEFAULT_ID)
-    check("日夜原样返回", listOf("day", "night").all { Palette.find(it).id == it })
+    check("日夜米原样返回", listOf("day", "night", "miuix").all { Palette.find(it).id == it })
 
     println("[Palette] 层级与对比度")
     for (p in Palette.all) {

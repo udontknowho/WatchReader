@@ -143,11 +143,12 @@ internal fun MainActivity.showReaderSettings(
 
         // ── 外观 ───────────────────────────────────────────
         card("外观") { g ->
-            chips(g, "主题", listOf("日" to false as Any, "夜" to true),
-                { Md3.palette.id == "night" }, rebuildsScreen = true) { night ->
+            chips(g, "主题", listOf("日" to "day" as Any, "夜" to "night", "米" to "miuix"),
+                { Md3.palette.id }, rebuildsScreen = true) { sel ->
                 // 底色一换，整套前景色都要跟着换，只能重建整屏；这也是本页唯一离开此屏的项。
-                val bg = if (night as Boolean) ReaderStyle.BG_FANQIE_NIGHT else ReaderStyle.BG_FANQIE_DAY
-                saveReaderPrefs(readerSize, readerSpacing, bg)
+                val id = sel as String
+                val bg = if (id == "night") ReaderStyle.BG_FANQIE_NIGHT else ReaderStyle.BG_FANQIE_DAY
+                saveReaderPrefs(readerSize, readerSpacing, bg, themeId = id)
                 saveReaderExtras()
                 showReaderSettings(info, index, text, src)
             }

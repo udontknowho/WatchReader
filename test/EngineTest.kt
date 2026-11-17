@@ -785,8 +785,10 @@ fun linkCheck() {
             aliases.keys.joinToString(",") { """{"key":"$it","kind":"qidian","board":"$it"}""" } +
             """,{"key":"collect","kind":"qidian","board":"collectlist"}]}"""
         val ranks = RankConfig.parseVersioned(cfg).second
-        check("无对应官网榜的 collectlist 被过滤", ranks.none { it.key == "collect" }, ranks.toString())
-        check("过滤收藏榜不影响其它合法榜", ranks.map { it.key }.toSet() == aliases.keys,
+        // 2026-11-17：收藏榜已按官网 rankDetail.js 确认（only:"female"），旧代号 collectlist 归一为 collect。
+        check("collectlist 归一为 collect",
+            ranks.firstOrNull { it.key == "collect" }?.board == "collect", ranks.toString())
+        check("收藏榜不影响其它合法榜", ranks.map { it.key }.toSet() == aliases.keys + "collect",
             ranks.map { it.key }.toString())
         for ((alias, board) in aliases) {
             val rank = ranks.firstOrNull { it.key == alias }
@@ -801,8 +803,13 @@ fun linkCheck() {
 
         val boards = setOf("yuepiao", "hotsales", "readindex", "newfans", "rec", "update",
             "sign", "newbook", "newauthor")
+        val femaleBoards = setOf("yuepiao", "hotsales", "readindex", "newfans", "rec", "update",
+            "collect", "free")
         check("起点官网九榜完整", RankConfig.QIDIAN_BOARDS.map { it.first }.toSet() == boards,
             RankConfig.QIDIAN_BOARDS.toString())
+        check("起点女频八榜完整",
+            RankConfig.QIDIAN_FEMALE_BOARDS.map { it.first }.toSet() == femaleBoards,
+            RankConfig.QIDIAN_FEMALE_BOARDS.toString())
         val canonicalCfg = """{"ranks":[""" + boards.joinToString(",") {
             """{"key":"qd:$it","kind":"qidian","board":"$it","pages":10}"""
         } + "]}"
@@ -812,10 +819,12 @@ fun linkCheck() {
                 it.board in boards && it.name.isNotBlank() && it.pages == 0 }, canonical.toString())
         val builtin = RankConfig.BUILTIN.filter { it.kind == RankConfig.Kind.QIDIAN }
         check("内置起点榜键唯一", builtin.map { it.key }.distinct().size == builtin.size)
-        for (gender in RankConfig.Gender.values()) {
+        val expect = mapOf(RankConfig.Gender.MALE to boards,
+            RankConfig.Gender.FEMALE to femaleBoards)
+        for ((gender, want) in expect) {
             val channel = builtin.filter { it.gender == gender }
-            check("$gender 内置九榜完整且不可翻页", channel.size == boards.size &&
-                channel.map { it.board }.toSet() == boards && channel.all {
+            check("$gender 内置榜完整且不可翻页", channel.size == want.size &&
+                channel.map { it.board }.toSet() == want && channel.all {
                     it.site == RankConfig.Site.QIDIAN && it.gendered && it.pages == 0
                 }, channel.toString())
         }

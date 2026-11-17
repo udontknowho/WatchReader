@@ -189,6 +189,7 @@ class MainActivity : Activity() {
             readerBody?.let { body -> scrollSave?.let { body.removeCallbacks(it) } }
             readerBody = null
             scrollSave = null
+            readerPos = null
             readerBookId = ""
             readerIndex = -1
         }
@@ -457,6 +458,15 @@ class MainActivity : Activity() {
     internal var scrollSave: Runnable? = null
 
     /**
+     * 当前阅读位置的取法：章号 + 章内偏移。
+     *
+     * 连续滚动把后面几章接在同一屏里，整屏 `scrollY` 不再是「这一章的位移」。
+     * onPause 落盘与换章前保存都问它要位置，否则回到书里会落到别的章 ——
+     * 显示第 3 章、实际停在第 5 章那种不一致。
+     */
+    internal var readerPos: (() -> Pair<Int, Int>)? = null
+
+    /**
      * 表冠灵敏度：每格位移（px）。表冠一格系统只给 1 个单位，必须放大才看得出。
      *
      * 默认每格 8 px，最大 10 px；旧存档在读取时统一夹取。
@@ -686,20 +696,26 @@ class MainActivity : Activity() {
         val body = readerBody ?: return
         if (readerBookId.isBlank() || readerIndex < 0) return
         scrollSave?.let { body.removeCallbacks(it) }
-        // 章号也再写一次：翻开后原地滚动的会话不会触发 saveProgress，
-        // 而首页按 last_ 排序，不刷新就一直显示旧时间。
-        saveProgress(readerBookId, readerIndex)
+        // 章号与偏移同一次取值：分开取会碰到「章号已换、偏移还是上一章」的错配。
+        // 拼接区里必须用章内偏移，整屏 scrollY 会被 mainLimit 限幅成「读完」。
+        val pos = readerPos?.invoke()
+        val index = pos?.first ?: readerIndex
+        // 翻开后原地滚动的会话不会触发 saveProgress，这里补一次写章号（先写 oidx_，
+        // 否则下面的 saveOffset 会因为章号对不上而丢）。
+        saveProgress(readerBookId, index)
         // 记住的是「屏幕上那行」的位置，不是上次防抖触发的旧值。
-        saveOffset(readerBookId, readerIndex, body.scrollY, sync = true)
+        saveOffset(readerBookId, index, pos?.second ?: body.scrollY, sync = true)
     }
 
-    internal fun saveReaderPrefs(size: Float, spacing: Float, bg: Int) {
+    internal fun saveReaderPrefs(size: Float, spacing: Float, bg: Int, themeId: String? = null) {
         readerSize = size
         readerSpacing = spacing
         // 阅读设置仍传旧日夜底色；排版滑杆传当前 surface，不应误切主题。
-        val palette = when (bg) {
-            ReaderStyle.BG_FANQIE_DAY -> Palette.find("day")
-            ReaderStyle.BG_FANQIE_NIGHT -> Palette.find("night")
+        // 主题芯片直传 id（[themeId]）：色表不只日夜两套，靠底色反推会丢米色。
+        val palette = when {
+            themeId != null -> Palette.find(themeId)
+            bg == ReaderStyle.BG_FANQIE_DAY -> Palette.find("day")
+            bg == ReaderStyle.BG_FANQIE_NIGHT -> Palette.find("night")
             else -> Md3.palette
         }
         applyAppTheme(palette)

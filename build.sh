@@ -20,8 +20,8 @@ KOTLIN_LIB="${KOTLIN_LIB:-$PREFIX/opt/kotlin/lib}"
 OUT="$ROOT/build"
 MIN_SDK=30
 TARGET_SDK=34
-APP_VERSION="${APP_VERSION:-1.6.1.6}"
-APP_VERSION_CODE="${APP_VERSION_CODE:-47}"
+APP_VERSION="${APP_VERSION:-1.6.1.7}"
+APP_VERSION_CODE="${APP_VERSION_CODE:-48}"
 
 # kotlinc 读 JAVA_OPTS（$PREFIX/bin/kotlinc 只在未设置时用默认 -Xmx512M）。
 # 本机内存被系统压到只剩几百兆，编译峰值必须自己封顶：串行 GC 不占并发 GC 线程池，

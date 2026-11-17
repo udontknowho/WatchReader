@@ -61,7 +61,8 @@ object RankConfig {
      *
      * **拉不到云端时用这个**，也是新装第一次进发现页的默认内容。
      *
-     * 番茄保留 26 个阅读分类。起点使用官网九榜，首批之外的分页尚未确认。
+     * 番茄保留 34 个阅读分类（男频 19 + 女频 18，其中科幻末世与游戏体育男女共用 ID）。
+     * 起点男频九榜、女频八榜，首批之外的分页尚未确认。
      */
     /**
      * 番茄男频分类。顺序按番茄官网的展示顺序，改顺序等于改发现页里的排列。
@@ -75,29 +76,61 @@ object RankConfig {
         746 to "游戏体育", 718 to "动漫衍生", 1016 to "男频衍生",
     )
 
-    /** 番茄女频分类。 */
+    /**
+     * 番茄女频分类，共 18 类，与官网同一份接口对齐。
+     * 早先只抄了 10 类，少了快穿、豪门总裁、青春甜宠等八类，发现页里直接看不到。
+     */
     val FEMALE_CATS = listOf(
-        1139 to "古风世情", 248 to "玄幻言情", 23 to "种田", 79 to "年代",
-        267 to "现言脑洞", 246 to "宫斗宅斗", 1015 to "女频衍生",
+        1139 to "古风世情", 8 to "科幻末世", 746 to "游戏体育", 1015 to "女频衍生",
+        248 to "玄幻言情", 23 to "种田", 79 to "年代", 267 to "现言脑洞",
+        246 to "宫斗宅斗", 539 to "悬疑脑洞", 253 to "古言脑洞", 24 to "快穿",
+        749 to "青春甜宠", 745 to "星光璀璨", 747 to "女频悬疑", 750 to "职场婚恋",
+        748 to "豪门总裁", 1017 to "民国言情",
     )
 
-    /** 官网首页实际给出的九榜路径。尾段是筛选值，不是页码。 */
+    /**
+     * 男频九榜。尾段是筛选值，不是页码。
+     *
+     * 依据是起点自己的 `rankDetail.js`（`const P={...}`），不是页面导航猜出来的：
+     * 签约 / 新书 / 新人三个榜在该配置里标着 `only:"male"`，女频站没有。
+     */
     val QIDIAN_BOARDS = listOf(
         "yuepiao" to "月票榜", "hotsales" to "畅销榜", "readindex" to "阅读榜",
         "newfans" to "书友榜", "rec" to "推荐榜", "update" to "更新榜",
         "sign" to "签约榜", "newbook" to "新书榜", "newauthor" to "新人榜",
     )
 
-    /** 兼容旧接口代号。收藏榜没有对应官网九榜，不做错误映射。 */
+    /**
+     * 女频八榜：与男频共有的六个，加上只给女频的收藏榜与免费榜。
+     *
+     * 以前按男频九榜照抄给女频，多出来的三个男频专属榜点进去是空页。
+     */
+    val QIDIAN_FEMALE_BOARDS = listOf(
+        "yuepiao" to "月票榜", "hotsales" to "畅销榜", "readindex" to "阅读榜",
+        "newfans" to "书友榜", "rec" to "推荐榜", "update" to "更新榜",
+        "collect" to "收藏榜", "free" to "免费榜",
+    )
+
+    /** 兼容旧接口代号。`collectlist` 旧库里没有对应页面，按新榜名归一到收藏榜。 */
     fun qidianBoard(board: String): String? {
         val canonical = when (board) {
             "yuepiaolist" -> "yuepiao"
             "hotsaleslist" -> "hotsales"
             "newbooklist" -> "newbook"
             "updatelist" -> "update"
+            "collectlist" -> "collect"
             else -> board
         }
-        return canonical.takeIf { key -> QIDIAN_BOARDS.any { it.first == key } }
+        return canonical.takeIf { key ->
+            QIDIAN_BOARDS.any { it.first == key } || QIDIAN_FEMALE_BOARDS.any { it.first == key }
+        }
+    }
+
+    /** 该榜是否只属于某一个频道。云端下发不区分频道时按男女各建一条。 */
+    fun qidianBoardGender(board: String): Gender? = when (board) {
+        "sign", "newbook", "newauthor" -> Gender.MALE
+        "collect", "free" -> Gender.FEMALE
+        else -> null
     }
 
     data class QidianCategory(val id: Int, val name: String)
@@ -150,10 +183,13 @@ object RankConfig {
         // 点进去多数取不到正文 —— 用户要求去掉。要恢复就把它加回这两个数组。
         for ((cat, name) in MALE_CATS) fq(cat, name, Gender.MALE, 2)
         for ((cat, name) in FEMALE_CATS) fq(cat, name, Gender.FEMALE, 2)
-        // 官网男女入口分别使用 m.qidian.com、m.qdmm.com。女频不沿用男频分类。
+        // 官网男女入口分别使用 m.qidian.com、m.qdmm.com，榜表也各是各的：
+        // 男频九榜、女频八榜（多收藏与免费，少签约/新书/新人）。
         for ((board, name) in QIDIAN_BOARDS) {
             add(Rank("qd:$board", "起点$name", Kind.QIDIAN, board = board, pages = 0,
                 gendered = true, site = Site.QIDIAN))
+        }
+        for ((board, name) in QIDIAN_FEMALE_BOARDS) {
             add(Rank("qd:female:$board", "起点女频$name", Kind.QIDIAN, board = board, pages = 0,
                 gendered = true, gender = Gender.FEMALE, site = Site.QIDIAN))
         }
@@ -177,9 +213,10 @@ object RankConfig {
      * 加内置 19+7 个分类榜、改过一次内容就要把这个数往上加。
      *
      * v4：起点改为官网九榜与真实页面筛选。v3 的旧五榜缓存不可覆盖新清单。
-     * 云端配置也应同步升到 v4，旧 board 别名可归一，收藏榜旧项会被跳过。
+     * v5：番茄女频补齐到 18 类；起点女频改八榜（加收藏/免费，去签约/新书/新人）。
+     * v4 的设备缓存里女频还是男频榜表，必须被内置表顶掉。
      */
-    const val BUILTIN_VERSION = 4
+    const val BUILTIN_VERSION = 5
 
     /**
      * 取配置的候选地址。与 [CloudSource.MIRRORS] 同一套 —— 镜像顺序只维护一处。

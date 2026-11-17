@@ -164,25 +164,20 @@ internal object ReaderUi {
      */
     val appended: MutableList<Pair<TextView, String>> = ArrayList()
 
-    /** 换章前抓下的旧屏位图与滑动方向（1 顺读 / -1 回读）。 */
-    var snap: Bitmap? = null
-    var snapDir = 1
-    /** 抓旧屏的闭包，由当前阅读页挂上；换章、上一章、下一章三处先调它。 */
-    var capture: ((Int) -> Unit)? = null
+    /**
+     * 屏上已经有一页占位页（书架点击进来的「正在打开书籍…」）。
+     *
+     * [preview] 建临时页前先看它：已经有一页等着，再建一页就是白做一屏重活。
+     */
+    var holdPlaceholder = false
 
-    /** 存下旧屏位图，顺手回收上一张没用上的。 */
-    fun setSnap(b: Bitmap, dir: Int) {
-        if (snap !== b) snap?.recycle()
-        snap = b
-        snapDir = dir
-    }
-
-    /** 取走旧屏位图，取完清空：下一次换章不该拿到上一张。 */
-    fun takeSnap(): Bitmap? {
-        val b = snap
-        snap = null
-        return b
-    }
+    /**
+     * 换章不叠旧屏位图。
+     *
+     * 旧做法是换章前 `frame.draw(Canvas)` 拓一张整屏位图，新页就位后整层向上滑出。
+     * 拓帧与整章排版挤在同一帧，掉帧就是那一下「卡」；位图上滑就是那一下「上跳」。
+     * 只保留章内翻屏的覆盖动画（`pageAnim`），跨章直接硬切。
+     */
     /**
      * 拼接块的世代号。
      *
@@ -233,8 +228,6 @@ internal object ReaderMenu {
 
     /** 收起并断开与页面的连接。换章、回目录、离屏时调。 */
     fun reset() {
-        // 抓屏闭包属于上一页：离开阅读页就断开，下次换页不能拿这张屏去过渡。
-        ReaderUi.capture = null
         open = false
         onClose = null
         badgeRefresh = null
@@ -575,35 +568,8 @@ internal fun MainActivity.showReader(
         chapBounds.addAll(list)
     }
 
-    /** 第 [at] 章在本屏内容坐标里的块顶；不在表里返回 0。 */
-    fun chapTopOf(at: Int): Int = chapBounds.firstOrNull { it.first == at }?.second ?: 0
-
-    /**
-     * [at] 章在本屏里的**章内**偏移，滚过块顶为正。
-     *
-     * 存盘用的就是这个值：`off_` 恢复时按章内限幅读（`placeBeforeDraw(coerceIn(0, mainLimit))`），
-     * 存整屏 `scrollY` 会把后面几章的偏移算成一大串，回读时直接落到别的章。
-     */
-    fun chapOffset(at: Int): Int =
-        (body.scrollY + body.paddingTop - chapTopOf(at)).coerceAtLeast(0)
-
-    /** [at] 章的块高；末块用剩余可滚量兜底，表里没有时退到全屏可滚量。 */
-    fun chapSpan(at: Int): Int {
-        val i = chapBounds.indexOfFirst { it.first == at }
-        if (i < 0) return scrollLimit(body).coerceAtLeast(1)
-        val top = chapBounds[i].second
-        val next = chapBounds.getOrNull(i + 1)?.second ?: (top + scrollLimit(body))
-        return (next - top).coerceAtLeast(1)
-    }
-
     /** 视口顶落在哪章；表空或视口还没进首章时返回首章。 */
-    fun cursorAt(): Int {
-        if (chapBounds.isEmpty()) return index
-        val top = body.scrollY + body.paddingTop
-        var at = chapBounds.first().first
-        for ((ch, y) in chapBounds) if (y <= top) at = ch else break
-        return at
-    }
+    fun cursorAt(): Int = ReaderPaging.cursorAt(chapBounds, body.scrollY + body.paddingTop, index)
 
     /** 游标变动后的显示回调，底栏建好后绑上（局部函数看不到后面声明的视图）。 */
     var onCursor: ((Int) -> Unit)? = null
@@ -689,6 +655,16 @@ internal fun MainActivity.showReader(
         val end = childTopIn(body, tv) + tv.height + tv.paddingBottom
         return (end - vp).coerceIn(0, scrollLimit(body))
     }
+
+    /**
+     * 现在该落盘的章内偏移。
+     *
+     * 防抖存盘、换章前保存、onPause 落盘三处共用一条口径，不再各算各的：
+     * 拼接区里整屏 `scrollY` 会被限幅成「读完」，回读就落到后一章
+     * （表现的却是「显示第 3 章、实际停在第 5 章」）。
+     */
+    fun savedOffset(at: Int): Int = ReaderPaging.savedOffset(
+        chapBounds, at, body.scrollY, body.paddingTop, mainLimit())
 
     /**
      * 拼接块读完处在那块正文里的**字符偏移**；下一章从这一处接着显示，不重读。
@@ -857,7 +833,6 @@ internal fun MainActivity.showReader(
         if (next == null) { ReaderAuto.stop(); toast("已是最后一章"); return }
         cancelMotion()
         ReaderUi.anchor = null
-        ReaderUi.capture?.invoke(1)
         preview(info, next)
     }
     fun toPrevious() {
@@ -1035,10 +1010,12 @@ internal fun MainActivity.showReader(
     // 顶栏：返回 + 书名 / 「章名 · 书源名」+ 刷新 / 换源 / ⋮ 三枚动作。
     // BookSource 接口不带名字（规则源才有 displayName），没名字就只显章名。
     val srcName = (src as? LegadoSource)?.displayName
-    val subLine = listOfNotNull(
-        info.chapters.getOrNull(index)?.title?.takeIf { it.isNotBlank() },
+    // 副行按章号取：连续滚动进了下一章时顶栏要跟着改，否则菜单里写着上一章的章名。
+    fun subLineFor(at: Int): String = listOfNotNull(
+        info.chapters.getOrNull(at)?.title?.takeIf { it.isNotBlank() },
         srcName?.takeIf { it.isNotBlank() },
     ).joinToString(" · ")
+    val subLine = subLineFor(index)
     // 顶栏三枚动作（刷新 / 换源 / ⋮）：legado 默认顶栏是「下载 / 刷新 / 换源 / 更多」四枚，
     // 手表 189 dp 宽只够三枚，下载归入「更多操作」Sheet。
     // 宽度预算：顶栏可用 189−8=181 dp（Widgets.topBar 自带 PAD/2 两侧内边距）
@@ -1254,7 +1231,9 @@ internal fun MainActivity.showReader(
         // 松手才跳章：拖的过程中每动一格就取一次正文，等于把整本书拉一遍。
         override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {
             draggingSeek = false
-            subTv?.text = subLine
+            // 恢复当前真正在读的那章：拼接区里 cursor 已经进到追加章，
+            // 退回 subLine（首章）会跟正文对不上。
+            subTv?.text = subLineFor(cursor)
             var target = ((sb?.progress ?: atStart) / 100).coerceIn(0, total - 1)
             if (info.chapters.getOrNull(target)?.locked == true) {
                 // 付费章取不到正文：前后各找一章免费的，找不到就退回原处。
@@ -1288,6 +1267,9 @@ internal fun MainActivity.showReader(
     onCursor = { at ->
         val pct = if (mainLimit() > 0) (body.scrollY * 100 / mainLimit()).coerceIn(0, 100) else 0
         seek.progress = (at * 100 + pct).coerceIn(0, 100 * total)
+        // 顶栏副行也跟游标走：不然滚进追加的下一章后，菜单里还写着首章章名，
+        // 与屏上正在读的那章对不上。
+        subTv?.text = subLineFor(at)
         prev.alpha = 1f
         prev.isClickable = true
         next.alpha = 1f
@@ -1392,6 +1374,9 @@ internal fun MainActivity.showReader(
     readerBody = body
     readerBookId = readingId(info)
     readerIndex = index
+    // 生命周期落盘 / 换章前保存都问这里要位置：章号跟游标走，偏移是章内值。
+    // 给整屏 scrollY 就会在拼接区存下一大串数字，回读时被限幅到章末、跳进后一章。
+    readerPos = { cursor to savedOffset(cursor) }
     body.setOnScrollChangeListener { _, _, y, _, _ ->
         readerOffset = y
         // 游标跟着滚动走：进追加块就把章号、标题、进度切到那一章。
@@ -1410,9 +1395,7 @@ internal fun MainActivity.showReader(
             // 章内偏移，不是整屏 scrollY：`off_` 是按章内限幅恢复的。
             // 在拼接区读第 N 章时，整屏值会远超首章可读高度，被限幅成「读完」，
             // 下次打开就从那一章的末尾甚至后一章开始，看着像跳到别处。
-            val off = if (chapBounds.isEmpty()) y.coerceIn(0, mainLimit())
-            else chapOffset(cursor).coerceIn(0, chapSpan(cursor))
-            saveOffset(info, cursor, off)
+            saveOffset(info, cursor, savedOffset(cursor))
         }
         scrollSave = task
         body.postDelayed(task, 400)
@@ -1490,48 +1473,10 @@ internal fun MainActivity.showReader(
         placeBeforeDraw(f)
     }
 
-    // ── 换章过渡：旧屏盖在新页上滑出 ──────────────────────
-    // 章内翻屏有 240 ms 的动画，换章却是整页瞬间替换，观感断档。旧屏位图是换页前抓的
-    // （[ReaderUi.capture] 由本页挂上，换章 / 上一章 / 下一章 三处先调它）。
-    // 与章内覆盖翻页同一套做法：新页先就位，旧屏整层滑出去。
-    val shift = ReaderUi.takeSnap()
-    if (shift != null) {
-        val dir = ReaderUi.snapDir
-        val vh = if (shift.height > 0) shift.height else body.height
-        val iv = ImageView(this).apply {
-            setImageBitmap(shift)
-            scaleType = ImageView.ScaleType.FIT_XY
-            isClickable = false
-        }
-        // 插在 body 之后（index 1）：压住新页，又不盖住后面建的菜单浮层。
-        frame.addView(iv, 1, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, vh, Gravity.TOP))
-        val cleanup = {
-            iv.animate().cancel()
-            (iv.parent as? ViewGroup)?.removeView(iv)
-            if (!shift.isRecycled) shift.recycle()
-            clearCover = null
-        }
-        clearCover = cleanup
-        // 换章一律向下读：旧屏向上滑出，新内容从下往上顶进来。
-        // 回读上一章也走同一方向，不再出现「旧屏往下掉」那种一反一正的上跳。
-        iv.animate().translationY(-vh.toFloat())
-            .setDuration(ReaderUi.pageBaseMs)
-            .setInterpolator(android.view.animation.LinearInterpolator())
-            .withEndAction {
-                // 连点或换页可能已经把它摘了：判空再摘，不重复回收位图。
-                cleanup()
-            }.start()
-    }
-    // 本页的抓屏闭包：三个换页调用点在替换页面前调它，抓到的就是“这一屏”。
-    ReaderUi.capture = { dir ->
-        cancelMotion()
-        if (frame.width > 0 && frame.height > 0) {
-            val b = Bitmap.createBitmap(frame.width, frame.height, Bitmap.Config.ARGB_8888)
-            frame.draw(Canvas(b))
-            ReaderUi.setSnap(b, dir)
-        }
-    }
+    // ── 换章过渡：硬切 ──────────────────────
+    // 以前这里挂一张换章前抓的整屏位图，再把旧屏整层向上滑出。拿来好看的代价是：
+    // 抓帧（`frame.draw`）与整章排版挤在同一帧，掉帧就是「卡一下」，位图上滑就是「上跳」。
+    // 现在跨章直接切，不留过渡；章内翻屏的覆盖动画（`pageAnim == 1`）照旧。
 
     // ① 阅读锚点：从目录 / 进度滑条 / 章内查找跳到了别的章，底出一条「返回刚才那章」。
     val anchor = ReaderUi.anchor
@@ -2019,8 +1964,7 @@ private fun MainActivity.prevChapter(info: BookInfo, index: Int, atEnd: Boolean 
     ReaderUi.anchor = null
     val prev = index - 1
     if (prev < 0) { toast("已是第一章"); return }
-    // 回读：方向跟顺读一致，旧屏同样向上滑出。
-    ReaderUi.capture?.invoke(-1)
+    // 回读：跟顺读同一个落点规则，只是方向相反。
     if (info.chapters[prev].locked) {
         val free = (prev downTo 0).firstOrNull { !info.chapters[it].locked }
         if (free == null) { toast("前面都是付费章"); return }
@@ -2046,7 +1990,11 @@ internal fun MainActivity.preview(
     // `feature/reader/ReaderCanvasSurface.kt:607-636` 的 pendingPageWindow）：
     // 已在阅读页时旧正文继续显着，正文取到后同帧交给 showReader 替换。
     // 先铺一页「正在取正文…」再整屏重建，就是每换一章闪两下的根源。
-    if (curScreen !is Screen.Reader) {
+    // 书架进来的那一跳，屏上已经有「正在打开书籍…」占位页（[readShelfBook] 刚建好），
+    // 这里再建一页就是白丢一屏重活；[ReaderUi.holdPlaceholder] 由那边置位。
+    val held = ReaderUi.holdPlaceholder
+    ReaderUi.holdPlaceholder = false
+    if (curScreen !is Screen.Reader && !held) {
         root.removeAllViews()
         root.addView(Widgets.topBar(this, ch.title, onBack = { showToc(info, src) }))
         val body = Widgets.scrollBody(this, crownStep, crownGlide)
@@ -2062,14 +2010,17 @@ internal fun MainActivity.preview(
     val previous = owner as? Screen.Reader
     val previousOffset = readerBody?.scrollY ?: 0
     scrollSave?.let { readerBody?.removeCallbacks(it) }
-    if (previous != null) saveOffset(previous.info, previous.index, previousOffset)
+    if (previous != null) {
+        // 章号跟游标走：拼接区里 previous.index 还是首章，拿它配整屏 scrollY 会存到错章。
+        val pos = readerPos?.invoke()
+        saveOffset(previous.info, pos?.first ?: previous.index, pos?.second ?: previousOffset)
+    }
 
     fun clearRequest() {
         if (ReaderUi.pendingToken == token) ReaderUi.pendingToken = null
     }
     fun failed(error: Throwable) {
         clearRequest()
-        ReaderUi.takeSnap()?.recycle()
         ReaderUi.restoreKey = ""
         ReaderUi.restoreAt = -1
         ReaderUi.restoreChars = -1
@@ -2092,8 +2043,6 @@ internal fun MainActivity.preview(
         } catch (e: Exception) {
             postAlive(owner) {
                 if (token != ReaderUi.pageToken) return@postAlive
-                // 这一页没建成：抓下的旧屏位图没用了，不回收就泄一张整屏。
-                ReaderUi.takeSnap()?.recycle()
                 failed(e)
             }
         }
@@ -2105,8 +2054,7 @@ private fun MainActivity.nextChapter(info: BookInfo, index: Int) {
     ReaderUi.anchor = null
     val next = index + 1
     if (next >= info.chapters.size) { toast("已是最后一章"); return }
-    // 顺读：旧屏向上滑出去。
-    ReaderUi.capture?.invoke(1)
+    // 顺读：直接换页，不叠旧屏。
     if (info.chapters[next].locked) {
         // 跳过连续的锁定章
         val free = (next until info.chapters.size).firstOrNull { !info.chapters[it].locked }

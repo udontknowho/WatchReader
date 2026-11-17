@@ -616,6 +616,8 @@ internal fun MainActivity.readShelfBook(request: BookInfo) {
                 // coerceIn(0, -1) 会直接抛 IllegalArgumentException。
                 val at = if (info.chapters.isEmpty()) 0
                          else readProgress(info).coerceIn(0, info.chapters.lastIndex)
+                // 上面那页占位页已经建好了，preview 不必再建一页空的。
+                com.watchdl.ui.reader.ReaderUi.holdPlaceholder = true
                 preview(info, at, src = src)
             }
         }.onFailure {
