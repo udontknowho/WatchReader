@@ -51,18 +51,51 @@ object YioveSource {
     /**
      * 拉一条完整规则（legado 格式的 JSON 对象原文）。
      *
-     * 注意：**不要在这里 unescape**。`origin_json` 的值是「JSON 文本」，
-     * `TinyJson.path` 读它时已经解掉了一层转义，拿到手就是合法 JSON。
-     * 再 unescape 一次会把内层脚本里的 `\"` 解成裸双引号，
-     * 导致内层 JSON 在第一个引号处断掉（实测八叉书库的 searchUrl 被截成 `@js:\nurl=`）。
+     * 端点说明：早期用 `/shuyuan/book-source/{id}`，它现在整条被 Cloudflare 拦成 520，
+     * 且响应是 `origin_json` 包一层。现行可用端点是 `/import/book-source/{id}`，
+     * 直接返回**数组**，元素就是规则对象本身，没有再包一层。
+     *
+     * 注意：**这里不做反序列化再序列化**。规则里的 `searchUrl`、`exploreUrl` 常常是
+     * 多行 JS 字符串，经过一次解析再拼回去，转义与换行都会变样。
+     * 所以直接按括号配对从响应文本里切出第一段对象原文。
      */
     fun fetchRule(id: String, timeoutMs: Int = 20_000): String {
         val body = Http.fetch(
-            "$HOST/shuyuan/book-source/$id",
+            "$HOST/import/book-source/$id",
             "GET", null, mapOf("User-Agent" to UA), null, timeoutMs,
         ).body
-        return TinyJson.path(body, "origin_json")
-            ?: error("响应里没有 origin_json（id=$id）")
+        // 老端点的响应形状仍然认一下，站点回滚时不用再改代码。
+        TinyJson.path(body, "origin_json")?.let { if (it.isNotBlank()) return it }
+        return firstObject(body)
+            ?: error("响应里没有规则对象（id=$id）")
+    }
+
+    /**
+     * 从 JSON 文本里切出第一段 `{...}` 原文，按括号配对，跳过字符串内的括号与转义。
+     *
+     * 只做切片，不解析：保留原始字节，JS 字符串里的换行和转义一个都不动。
+     */
+    private fun firstObject(text: String): String? {
+        val start = text.indexOf('{')
+        if (start < 0) return null
+        var depth = 0
+        var inStr = false
+        var esc = false
+        for (i in start until text.length) {
+            val c = text[i]
+            when {
+                esc -> esc = false
+                c == '\\' && inStr -> esc = true
+                c == '"' -> inStr = !inStr
+                inStr -> {}
+                c == '{' -> depth++
+                c == '}' -> {
+                    depth--
+                    if (depth == 0) return text.substring(start, i + 1)
+                }
+            }
+        }
+        return null
     }
 
     /**

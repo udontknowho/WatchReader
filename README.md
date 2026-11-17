@@ -48,7 +48,7 @@ density 2.0（320 dpi）→ 逻辑 **189 × 248 dp**。
 ## 安装
 
 ```sh
-adb install -r WatchDownloader-1.6.1.5-release.apk
+adb install -r WatchDownloader-1.6.1.6-release.apk
 ```
 
 包在发布页 https://github.com/udontknowho/WatchReader/releases 下载。
@@ -89,6 +89,18 @@ adb install -r WatchDownloader-1.6.1.5-release.apk
 > 且三章正文不重复、不含明显错误页。网络失败项复测仍未通过则不收录。
 > 通过仅代表本次抽检，不代表全部作品、章节或后续时段始终可用。
 > 书源可在“我的 → 书源管理”中管理，在线状态以实际访问结果为准。
+
+## v1.6.1.6 修复说明（code 47）
+
+- 修跨章回读跳位：滚动落盘存的是整屏 `scrollY`，恢复端按章内偏移限幅用，
+  在拼接区读第 N 章时会被限成「本章读完」，下次打开落到那一章末尾甚至后一章。
+  改为按章内偏移与块高存（`chapOffset` / `chapSpan`）。
+- 换章动画统一向下推进：旧屏一律向上滑出，不再出现反向那一套。
+- 阅读记录按书聚合：每本只留最新一条，升级前堆下的旧行读取时一并折叠。
+- 修 yiove 书源市场导入：`/shuyuan/book-source/` 已 520，改指 `/import/book-source/`，
+  响应是数组且字段平铺，解析改为按括号配对切原文。
+- 新增书海阁书源：旧站 `m.shuhaige.net` 搜索被 WAF 全拒，换 `book.washai.net` 重写为纯选择器。
+  内置源库 33 → 34 条。
 
 ## v1.6.1.5 修复说明（code 46）
 

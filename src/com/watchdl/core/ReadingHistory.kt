@@ -13,6 +13,19 @@ object ReadingHistory {
 
     @Synchronized
     fun list(dir: File): List<ReadingEvent> {
+        val all = read(dir)
+        // 旧档每换一章一条：读的时候按书折叠，只留每本最新那条。
+        // 不靠写入时的去重 —— 升级前已经堆下的行不会自己消失。
+        val latest = LinkedHashMap<String, ReadingEvent>()
+        for (e in all) {
+            val k = readingKey(e.bookId, e.readingId)
+            val old = latest[k]
+            if (old == null || e.at > old.at) latest[k] = e
+        }
+        return latest.values.sortedBy { it.id }
+    }
+
+    private fun read(dir: File): List<ReadingEvent> {
         val f = File(dir, NAME)
         if (!f.isFile) return emptyList()
         return f.bufferedReader().useLines { lines ->
@@ -31,17 +44,32 @@ object ReadingHistory {
         }
     }
 
-    /** 连续同书同章五分钟内合并，设置重画或生命周期重复保存不刷屏。 */
+    /**
+     * 记一次阅读位置。
+     *
+     * 一本书只留一条：同书（同阅读身份）旧行直接替换，不再追加事件。
+     * 以前每换一章就多一行，记录屏滚起来全是同一本书，看不出哪本是最近读的。
+     */
     @Synchronized
     fun record(dir: File, bookId: String, index: Int, at: Long = System.currentTimeMillis(), readingId: String? = null) {
         if (bookId.isBlank() || index < 0 || at <= 0) return
         val rows = list(dir).toMutableList()
-        val last = rows.lastOrNull()
-        if (last != null && last.bookId == bookId && last.readingId == readingId && last.index == index && at - last.at in 0..300_000) return
+        val key = readingKey(bookId, readingId)
+        val same = rows.indexOfFirst { readingKey(it.bookId, it.readingId) == key }
+        // 同一本书同一章、五分钟内的重复保存不算新事件（设置重画、生命周期都会触发）。
+        if (same >= 0) {
+            val old = rows[same]
+            if (old.index == index && at - old.at in 0..300_000) return
+        }
         val id = maxOf(at, (rows.maxOfOrNull { it.id } ?: 0L) + 1L)
-        rows += ReadingEvent(id, bookId, index, at, readingId)
-        save(dir, rows.takeLast(CAP))
+        val event = ReadingEvent(id, bookId, index, at, readingId)
+        if (same >= 0) rows[same] = event else rows += event
+        save(dir, rows.sortedBy { it.at }.takeLast(CAP))
     }
+
+    /** 同一本书的判定键：有阅读身份就认身份，没有就退到书号。 */
+    private fun readingKey(bookId: String, readingId: String?): String =
+        readingId?.takeIf { it.isNotBlank() } ?: bookId
 
     fun record(dir: File, info: BookInfo, index: Int, at: Long = System.currentTimeMillis()) =
         record(dir, info.bookId, index, at, readingId(info))

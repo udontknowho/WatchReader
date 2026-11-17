@@ -9,8 +9,9 @@ fun main() {
         ReadingHistory.record(dir, "book\t中文", 2, 1000)
         ReadingHistory.record(dir, "book\t中文", 2, 2000)
         check(ReadingHistory.list(dir).size == 1)
+        // 按书聚合：同一本换章只更新那一条，不再新增行。
         ReadingHistory.record(dir, "book\t中文", 3, 3000)
-        check(ReadingHistory.list(dir).map { it.index } == listOf(2, 3))
+        check(ReadingHistory.list(dir).map { it.index } == listOf(3))
         check(ReadingHistory.list(dir).first().bookId == "book\t中文")
         check(ReadingHistory.list(dir).all { it.readingId == null }) // 旧四列仍可读。
         val one = BookInfo("shared", "甲书", "作者", emptyList())
@@ -24,10 +25,11 @@ fun main() {
         ReadingHistory.removeBooks(dir, setOf("shared"))
         ReadingHistory.remove(dir, setOf(1000L))
         check(ReadingHistory.list(dir).single().index == 3)
-        repeat(510) { ReadingHistory.record(dir, "book", it, 4000L + it) }
+        repeat(510) { ReadingHistory.record(dir, "book-$it", it, 4000L + it) }
         check(ReadingHistory.list(dir).size == 500)
-        ReadingHistory.removeBooks(dir, setOf("book"))
-        check(ReadingHistory.list(dir).isEmpty())
+        // 上限裁剪按时间：最后 500 条里已经不含那条 index=3 的书。
+        ReadingHistory.removeBooks(dir, setOf("book\t中文"))
+        check(ReadingHistory.list(dir).none { it.bookId == "book\t中文" })
 
         val normal = "11-09 12:01:02.123 [main] UI 页面打开"
         val error = "11-09 12:01:02.123 [worker 1] WatchDL 目录失败"

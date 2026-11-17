@@ -533,12 +533,97 @@ internal fun MainActivity.showReader(
     // 去掉飞出动画的观感：不再重建整屏，也就没有那一瞬间的位移。
     /** 已经追加到第几章（含）；等于当前章时表示还没追加。 */
     var appendedThrough = index
+    /**
+     * 追加块边界：章号 / 块顶在滚动内容里的 y。首章（本章）由排版后补一条。
+     *
+     * 连续滚动会把下一章接在本章正文下面，读者往下滑就进了下一章，
+     * 但 [index] 是建屏时定死的，**这一屏推不动自己的章号**（`:390` 起）。
+     * 没有这张表，滚过追加区再前进仍按 `index + 1` 重建，就是重来一遍刚读完的章。
+     * 表里按章号升序，[cursorAt] 用视口顶反查当前读到哪章。
+     */
+    val chapBounds = ArrayList<Pair<Int, Int>>()
+    /** 当前游标章号：滚到哪里算哪里，标题 / 进度 / 章钮都跟它走。 */
+    var cursor = index
     /** 正在取正文，防重复追加：滚动事件很密，不拦就会同一章插两次。 */
     var appendBusy = false
     /** 已追加的正文视图，重置主题或回收时要用。 */
     val appendedViews = ArrayList<TextView>()
     /** 本屏已连续追加的章数上限：短章书（诗词、评论）不封顶会一路追加完。 */
     val appendCap = 3
+
+    /**
+     * 重建 [chapBounds]：首章按正文顶边，追加块按各自标题的顶边。
+     *
+     * 高度只在排版后才准，所以每次滚动与每次追加后都重算一遍，不缓存像素值。
+     * 空表意味着排版还没落地，此时 [cursorAt] 不切游标，避免刚建屏就误判。
+     */
+    fun syncChapBounds() {
+        if (body.height <= 0) return
+        val list = ArrayList<Pair<Int, Int>>(appendedViews.size + 1)
+        val mainTop = childTopIn(body, tv) - tv.paddingTop
+        list.add(index to mainTop)
+        for ((i, v) in appendedViews.withIndex()) {
+            val ch = index + 1 + i
+            if (ch > appendedThrough) break
+            // 标题在正文上一条：直接用正文顶边减标题高不可靠，取父列里的前一个 child。
+            val colView = v.parent as? android.view.ViewGroup ?: continue
+            val pos = colView.indexOfChild(v)
+            val head = if (pos > 0) colView.getChildAt(pos - 1) else v
+            list.add(ch to (childTopIn(body, head) - head.paddingTop))
+        }
+        chapBounds.clear()
+        chapBounds.addAll(list)
+    }
+
+    /** 第 [at] 章在本屏内容坐标里的块顶；不在表里返回 0。 */
+    fun chapTopOf(at: Int): Int = chapBounds.firstOrNull { it.first == at }?.second ?: 0
+
+    /**
+     * [at] 章在本屏里的**章内**偏移，滚过块顶为正。
+     *
+     * 存盘用的就是这个值：`off_` 恢复时按章内限幅读（`placeBeforeDraw(coerceIn(0, mainLimit))`），
+     * 存整屏 `scrollY` 会把后面几章的偏移算成一大串，回读时直接落到别的章。
+     */
+    fun chapOffset(at: Int): Int =
+        (body.scrollY + body.paddingTop - chapTopOf(at)).coerceAtLeast(0)
+
+    /** [at] 章的块高；末块用剩余可滚量兜底，表里没有时退到全屏可滚量。 */
+    fun chapSpan(at: Int): Int {
+        val i = chapBounds.indexOfFirst { it.first == at }
+        if (i < 0) return scrollLimit(body).coerceAtLeast(1)
+        val top = chapBounds[i].second
+        val next = chapBounds.getOrNull(i + 1)?.second ?: (top + scrollLimit(body))
+        return (next - top).coerceAtLeast(1)
+    }
+
+    /** 视口顶落在哪章；表空或视口还没进首章时返回首章。 */
+    fun cursorAt(): Int {
+        if (chapBounds.isEmpty()) return index
+        val top = body.scrollY + body.paddingTop
+        var at = chapBounds.first().first
+        for ((ch, y) in chapBounds) if (y <= top) at = ch else break
+        return at
+    }
+
+    /** 游标变动后的显示回调，底栏建好后绑上（局部函数看不到后面声明的视图）。 */
+    var onCursor: ((Int) -> Unit)? = null
+
+    /**
+     * 游标切到 [at]：标题、进度滑条、章钮状态、落盘一起跟。
+     *
+     * 只改显示与落盘目标，不重建视图 —— 正文已经在屏上，重建就是当前这个 bug 的成因。
+     */
+    fun applyCursor(at: Int) {
+        if (at == cursor) return
+        cursor = at
+        readerIndex = at
+        readerOffset = body.scrollY
+        info.chapters.getOrNull(at)?.title?.let { t ->
+            if (t.isNotBlank()) titleTv.text = t
+        }
+        onCursor?.invoke(at)
+        saveProgress(info, at, rememberBook = false)
+    }
 
     /**
      * 取下一章正文并接到正文列后面。
@@ -572,6 +657,8 @@ internal fun MainActivity.showReader(
             appendedViews.add(nx)
             ReaderUi.appended.add(nx to raw)
             appendedThrough = next
+            // 块顶要等这一帧排完才有真实高度：先 post，拿不到就下次滚动再算。
+            body.post { syncChapBounds() }
             // 埋点：连续滚动最容易出的错是同一章被追加两遍（预取与 appendNext 各挂一次）。
             // 只在开发者日志开启时落盘，用来数「同一章追加了几次」。
             com.watchdl.core.DevLog.log("Reader", "append idx=$next n=${appendedViews.size} chars=${raw.length} h=${scrollLimit(body)}")
@@ -764,7 +851,9 @@ internal fun MainActivity.showReader(
     /** 往下滚到章末：有拼接块就把「读完处」当偏移带过去，没有就整章换。 */
     fun toNext() {
         if (chapterPending()) return
-        val next = (index + 1 until info.chapters.size).firstOrNull { !info.chapters[it].locked }
+        // 从游标往后找：追加区里的章已经读过，不能按建屏时的 index 重来。
+        val from = maxOf(cursor, appendedThrough) + 1
+        val next = (from until info.chapters.size).firstOrNull { !info.chapters[it].locked }
         if (next == null) { ReaderAuto.stop(); toast("已是最后一章"); return }
         cancelMotion()
         ReaderUi.anchor = null
@@ -1140,7 +1229,7 @@ internal fun MainActivity.showReader(
         return v
     }
 
-    val prev = chapterArrow("上一章", false) { prevChapter(info, index) }
+    val prev = chapterArrow("上一章", false) { prevChapter(info, cursor) }
     // 第一章时置灰并真的禁用：以前只调 alpha，点了还能按，弹一句「已是第一章」。
     if (index <= 0) { prev.alpha = 0.35f; prev.isClickable = false }
     foot.addView(prev, LinearLayout.LayoutParams(Md3.dp(this, 28), Md3.dp(this, 28)))
@@ -1187,10 +1276,25 @@ internal fun MainActivity.showReader(
     })
     foot.addView(seek, LinearLayout.LayoutParams(0, Md3.dp(this, 32), 1f))
 
-    val next = chapterArrow("下一章", true) { nextChapter(info, index) }
+    val next = chapterArrow("下一章", true) {
+        // 已读进追加区的章不能再跳一遍：底栏从「已追加到的章」往后取。
+        nextChapter(info, maxOf(cursor, appendedThrough))
+    }
     if (index >= total - 1) { next.alpha = 0.35f; next.isClickable = false }
     foot.addView(next, LinearLayout.LayoutParams(Md3.dp(this, 28), Md3.dp(this, 28)))
     foot.layoutParams = Md3.lpDp(this, null, 36)
+
+    // 游标一变就同步进度与章钮：正文不重建，只有这两样要跟。
+    onCursor = { at ->
+        val pct = if (mainLimit() > 0) (body.scrollY * 100 / mainLimit()).coerceIn(0, 100) else 0
+        seek.progress = (at * 100 + pct).coerceIn(0, 100 * total)
+        prev.alpha = 1f
+        prev.isClickable = true
+        next.alpha = 1f
+        next.isClickable = true
+        if (at <= 0) { prev.alpha = 0.35f; prev.isClickable = false }
+        if (at >= total - 1) { next.alpha = 0.35f; next.isClickable = false }
+    }
 
     // 亮度始终交还系统，底栏仅保留进度和工具格。
 
@@ -1290,16 +1394,25 @@ internal fun MainActivity.showReader(
     readerIndex = index
     body.setOnScrollChangeListener { _, _, y, _, _ ->
         readerOffset = y
+        // 游标跟着滚动走：进追加块就把章号、标题、进度切到那一章。
+        if (appendedViews.isNotEmpty()) {
+            syncChapBounds()
+            applyCursor(cursorAt())
+        }
         // 进度滑条跟着正文走（不触发跳章：回调里只认 fromUser）。
         if (!draggingSeek) {
             val limit = mainLimit()
             val pct = if (limit > 0) (y * 100 / limit).coerceIn(0, 100) else 0
-            seek.progress = index * 100 + pct
+            seek.progress = cursor * 100 + pct
         }
         scrollSave?.let { body.removeCallbacks(it) }
         val task = Runnable {
-            // 偏移只记到「本章读完」为止：存进拼接块，下次进这一章会落在下一章的字里。
-            saveOffset(info, index, y.coerceIn(0, mainLimit()))
+            // 章内偏移，不是整屏 scrollY：`off_` 是按章内限幅恢复的。
+            // 在拼接区读第 N 章时，整屏值会远超首章可读高度，被限幅成「读完」，
+            // 下次打开就从那一章的末尾甚至后一章开始，看着像跳到别处。
+            val off = if (chapBounds.isEmpty()) y.coerceIn(0, mainLimit())
+            else chapOffset(cursor).coerceIn(0, chapSpan(cursor))
+            saveOffset(info, cursor, off)
         }
         scrollSave = task
         body.postDelayed(task, 400)
@@ -1400,7 +1513,9 @@ internal fun MainActivity.showReader(
             clearCover = null
         }
         clearCover = cleanup
-        iv.animate().translationY((if (dir >= 0) -vh else vh).toFloat())
+        // 换章一律向下读：旧屏向上滑出，新内容从下往上顶进来。
+        // 回读上一章也走同一方向，不再出现「旧屏往下掉」那种一反一正的上跳。
+        iv.animate().translationY(-vh.toFloat())
             .setDuration(ReaderUi.pageBaseMs)
             .setInterpolator(android.view.animation.LinearInterpolator())
             .withEndAction {
@@ -1904,7 +2019,7 @@ private fun MainActivity.prevChapter(info: BookInfo, index: Int, atEnd: Boolean 
     ReaderUi.anchor = null
     val prev = index - 1
     if (prev < 0) { toast("已是第一章"); return }
-    // 回读：旧屏向下滑出去。
+    // 回读：方向跟顺读一致，旧屏同样向上滑出。
     ReaderUi.capture?.invoke(-1)
     if (info.chapters[prev].locked) {
         val free = (prev downTo 0).firstOrNull { !info.chapters[it].locked }

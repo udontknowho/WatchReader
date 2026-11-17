@@ -1627,5 +1627,46 @@
     },
     "searchUrl": "/plus/search.php?q={{key}}",
     "weight": 0
+  },
+  {
+    "bookSourceName": "书海阁",
+    "bookSourceType": 0,
+    "bookSourceUrl": "https://book.washai.net/",
+    "bookUrlPattern": "https://book\\.washai\\.net/book/\\d+\\.html",
+    "enabled": true,
+    "enabledExplore": false,
+    "enabledCookieJar": false,
+    "customOrder": 0,
+    "weight": 0,
+    "header": "{\"User-Agent\":\"Mozilla/5.0 (Linux; Android 9) Mobile Safari/537.36\"}",
+    "searchUrl": "/book/bookclass.html?k={{key}}&page={{page}}",
+    "ruleSearch": {
+      "bookList": "@css:#bookList>article",
+      "name": "@css:h3.classBookTitle>a@text",
+      "author": "@css:p.classBookAuthor>a@text",
+      "bookUrl": "@css:h3.classBookTitle>a@href",
+      "coverUrl": "@css:span.classBookCover img@src",
+      "intro": "@css:p.classBookDesc@text",
+      "kind": "@css:a.classCoverCat@text",
+      "lastChapter": "@css:p.classBookChapter>a@text"
+    },
+    "ruleBookInfo": {
+      "name": "@css:h1#bookName@text",
+      "author": "@css:a#bookAuthor@text",
+      "coverUrl": "@css:img#bookCoverImg@src",
+      "intro": "@css:meta[name=description]@content",
+      "lastChapter": "@css:a#lastIndexLink@text",
+      "tocUrl": "@css:a#allIndexLink@href",
+      "wordCount": "@css:em#bookWordCount@text"
+    },
+    "ruleToc": {
+      "chapterList": "@css:ul#bookIndexList>li>a",
+      "chapterName": "text",
+      "chapterUrl": "href",
+      "nextTocUrl": "@css:a.pgBtn@href"
+    },
+    "ruleContent": {
+      "content": "@css:div.readChapterAppendBody@html"
+    }
   }
 ]
