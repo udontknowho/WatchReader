@@ -528,6 +528,12 @@ internal fun MainActivity.showReader(
     // 两边样式不会走形。
     restyleReader(text)
 
+    // 后台预排命中：换成预排件，首帧只剩断行与布局，不再做字形测量。
+    // 断行一致性在后台排两遍逐行比过（ReaderPrecompute），这里只比参数与正文内容；
+    // 不命中就走原来的排版路径，行为与 1.6.1.8 一样。
+    ReaderPrecompute.take(preKey(info, index), shown, preSpec(tv))
+        ?.let { tv.setText(it, TextView.BufferType.SPANNABLE) }
+
     // ── 连续滚动：滚到底先把下一章追加进来，不换屏 ────────────
     //
     // 追加在下方，scrollY 天然不用修正，读者只看到文字接着往下。
@@ -622,10 +628,14 @@ internal fun MainActivity.showReader(
             val head = Md3.text(this, ch.title, readerSize + ReaderUi.titleAdd, readerInk,
                 bold = ReaderUi.titleBold)
             head.setPadding(0, Md3.dp(this, 18), 0, Md3.dp(this, 2))
-            val nx = Md3.text(this, shownText(raw), readerSize, readerInk)
+            val nxShown = shownText(raw)
+            val nx = Md3.text(this, nxShown, readerSize, readerInk)
             nx.justificationMode = android.text.Layout.JUSTIFICATION_MODE_INTER_WORD
             nx.setPadding(Md3.dp(this, 3), Md3.dp(this, 2), Md3.dp(this, 3), Md3.dp(this, 24))
             styleBody(nx, raw)
+            // 追加块也吃预排件：往下滑到下一章时不必在滚动中重排一整章。
+            ReaderPrecompute.take(preKey(info, next), nxShown, preSpec(nx))
+                ?.let { nx.setText(it, TextView.BufferType.SPANNABLE) }
             chapCol.addView(head)
             chapCol.addView(nx)
             appendedViews.add(nx)
@@ -1453,6 +1463,20 @@ internal fun MainActivity.showReader(
     if (nextCh != null && !nextCh.locked) {
         bg(curScreen, body = { loadOpening(info, nextCh, src); Unit }) { _ -> }
         // 完成缓存只含数据，不再把全文挂在页面单槽，统一受条数和字符上限约束。
+        //
+        // 后台预排：把下一章的 shaping 挪到这条线程上，换章首帧只剩断行与布局。
+        // 宽度要等这一帧布局完才知道，所以先 post 到下一帧取参数再起线程 ——
+        // 控件宽度为 0 时排出来的东西验不出断行，[ReaderPrecompute.build] 会直接拒排。
+        val pKey = preKey(info, index + 1)
+        val pFp = preFp()
+        body.post {
+            val spec = preSpec(tv)
+            bg(curScreen, body = {
+                val rawNext = loadOpening(info, nextCh, src)
+                ReaderPrecompute.build(pKey, pFp, shownText(rawNext), spec)
+                Unit
+            }) { _ -> }
+        }
     }
     // 本章不满一屏时先追加一章，否则滚动上限为零，往下滑什么也不会发生。
     body.post { if (scrollLimit(body) <= body.height) appendNext() }
@@ -1625,30 +1649,40 @@ private fun MainActivity.restyleTitle(ink: Int) {
  * legado 是滑杆，手表三档（无 / 半行 / 一行）已经能分辨。
  */
 private fun MainActivity.applyParaSpacing(tv: TextView, text: CharSequence) {
-    val metrics = resources.displayMetrics
-    val sizeSp = tv.textSize / metrics.scaledDensity
-    val extra = ReaderStyle.paraExtraPx(ReaderUi.paraLevel, sizeSp, readerSpacing, metrics.density)
-    if (extra <= 0 || text.isEmpty()) return
-    val sp = android.text.SpannableString(text)
-    for (i in ReaderStyle.paraEnds(sp)) {
-        sp.setSpan(ParaSpan(extra), i, i + 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-    }
-    tv.setText(sp, TextView.BufferType.SPANNABLE)
+    if (text.isEmpty()) return
+    val extra = paraExtraPx(tv)
+    if (extra <= 0) return
+    tv.setText(ReaderPrecompute.paraSpanned(text, extra), TextView.BufferType.SPANNABLE)
 }
 
-/** 段末行高。chooseHeight 每行会被调两次，加一次就够。 */
-private class ParaSpan(private val extraPx: Int) : android.text.style.LineHeightSpan {
-    private var done = false
-    override fun chooseHeight(
-        text: CharSequence, start: Int, end: Int, spanStartV: Int, lineHeight: Int,
-        fm: android.graphics.Paint.FontMetricsInt,
-    ) {
-        if (done) return
-        fm.bottom += extraPx
-        fm.descent += extraPx
-        done = true
-    }
+/**
+ * 段距额外像素。
+ *
+ * 与后台预排共用一条公式：两处算出来的值差 1 px，预排件的行高就与真控件不同，
+ * 段距会从「设置生效」变成「时有时无」。
+ */
+private fun MainActivity.paraExtraPx(tv: TextView): Int {
+    val metrics = resources.displayMetrics
+    val sizeSp = tv.textSize / metrics.scaledDensity
+    return ReaderStyle.paraExtraPx(ReaderUi.paraLevel, sizeSp, readerSpacing, metrics.density)
 }
+
+/**
+ * 预排件缓存键：一本书的一章。
+ *
+ * 带 itemId：换源或重拉目录后同一个章号指向的可能是另一章，光靠章号会命中错件。
+ */
+private fun preKey(info: BookInfo, index: Int): String =
+    "${info.bookId}#$index#${info.chapters.getOrNull(index)?.itemId ?: ""}"
+
+/** 后台预排的输入：控件上的样式已是最终值，档位取当前设置。 */
+private fun MainActivity.preSpec(tv: TextView): ReaderPrecompute.Spec =
+    ReaderPrecompute.capture(tv, Md3.dp(this, 2), readerSpacing, paraExtraPx(tv), ReaderUi.justify)
+
+/** 参数指纹。段距与对齐不在 [android.text.PrecomputedText.Params] 里，单独进串。 */
+private fun MainActivity.preFp(): String = PrecomputeKey.of(
+    readerSize, readerSpacing, ReaderUi.letterEm, ReaderUi.weightLevel,
+    ReaderUi.italic, ReaderUi.indentLevel, ReaderUi.paraLevel, ReaderUi.justify)
 
 /**
  * 阅读页「更多操作」整屏 Sheet（legado 的 `ReaderMoreActionsSheet`，手表子集）。
