@@ -172,12 +172,16 @@ internal object ReaderUi {
     var holdPlaceholder = false
 
     /**
-     * 换章不叠旧屏位图。
+     * 跨章入场方向：[ReaderTransition.FORWARD] 顺读 / [ReaderTransition.BACKWARD] 回读 / 0 不动画。
      *
-     * 旧做法是换章前 `frame.draw(Canvas)` 拓一张整屏位图，新页就位后整层向上滑出。
-     * 拓帧与整章排版挤在同一帧，掉帧就是那一下「卡」；位图上滑就是那一下「上跳」。
-     * 只保留章内翻屏的覆盖动画（`pageAnim`），跨章直接硬切。
+     * 由 [preview] 在派发换章时置位，[showReader] 读走并立刻清零 —— 只在跨章那一次
+     * 重建上生效。改字号、切主题同样走 showReader，但它们不经 preview，读到的永远是 0。
+     *
+     * 1.6.1.6 及以前这里是另一套：换章前 `frame.draw(Canvas)` 拓整屏位图，新页就位后
+     * 整层向上滑出。拓帧与整章排版挤同一帧，掉帧是「卡」，位图上滑是「跳」，所以 1.6.1.7
+     * 连着删了。现在换成对新页本身做 translationY 位移，位图不参与。
      */
+    var enterDir = ReaderTransition.NONE
     /**
      * 拼接块的世代号。
      *
@@ -451,6 +455,10 @@ internal fun MainActivity.showReader(
     /** 直接把正文落在章末（从上一屏退上来的跨章）。 */
     atEnd: Boolean = false,
 ) {
+    // 跨章入场方向：读走即清零，改字号 / 切主题也走这个函数，不留残余。
+    val enterDir = ReaderUi.enterDir.also { ReaderUi.enterDir = ReaderTransition.NONE }
+    // 首帧耗时从这个点算起：换章到上屏的真实代价，用它判断还要不要做后台预排。
+    val enterNs = System.nanoTime()
     ReaderUi.pendingToken = null
     setScreen(Screen.Reader(info, index, text, src))
     // setScreen 只切状态、撤后台任务，**不碰视图树**。preview() 先铺了顶栏 +「正在取正文…」，
@@ -1473,10 +1481,43 @@ internal fun MainActivity.showReader(
         placeBeforeDraw(f)
     }
 
-    // ── 换章过渡：硬切 ──────────────────────
-    // 以前这里挂一张换章前抓的整屏位图，再把旧屏整层向上滑出。拿来好看的代价是：
-    // 抓帧（`frame.draw`）与整章排版挤在同一帧，掉帧就是「卡一下」，位图上滑就是「上跳」。
-    // 现在跨章直接切，不留过渡；章内翻屏的覆盖动画（`pageAnim == 1`）照旧。
+    // ── 跨章入场 ──────────────────────
+    // 新页整层从行进方向滑到位，只改 translationY：不抓位图、不触发 measure，
+    // 不会把「卡一下再跳上去」那套搬回来。位移与方向由 [ReaderTransition] 给出。
+    val liftCap = Md3.dp(this, ReaderTransition.MAX_LIFT_DP)
+    fun slideIn() {
+        if (enterDir == ReaderTransition.NONE) return
+        // 高度未定时用整屏高：宁可幅度小一点，也不能不动。
+        val vp = if (body.height > 0) body.height else frame.height
+        val lift = ReaderTransition.liftPx(vp, liftCap).toFloat()
+        frame.translationY = enterDir * lift
+        frame.animate().translationY(0f)
+            .setDuration(ReaderTransition.DURATION_MS)
+            .setInterpolator(android.view.animation.DecelerateInterpolator(1.6f))
+            .start()
+    }
+    // 首帧耗时与入场共用一次 PreDraw：动画时钟对齐首帧（排得慢时不会首帧已经滑掉半），
+    // 同时把耗时记进 DevLog。
+    fun onFirstFrame() {
+        com.watchdl.core.DevLog.log("Reader",
+            "idx=$index chars=${text.length} dir=$enterDir " +
+                "firstFrame=${(System.nanoTime() - enterNs) / 1_000_000}ms")
+        slideIn()
+    }
+    // 脱离窗口时 ViewTreeObserver 是浮动对象，注册上去等于没注册：退回 post。
+    if (frame.isAttachedToWindow) {
+        val vto = frame.viewTreeObserver
+        val once = object : android.view.ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                if (vto.isAlive) vto.removeOnPreDrawListener(this)
+                onFirstFrame()
+                return true
+            }
+        }
+        vto.addOnPreDrawListener(once)
+    } else {
+        frame.post { onFirstFrame() }
+    }
 
     // ① 阅读锚点：从目录 / 进度滑条 / 章内查找跳到了别的章，底出一条「返回刚才那章」。
     val anchor = ReaderUi.anchor
@@ -2008,6 +2049,10 @@ internal fun MainActivity.preview(
     val token = ++ReaderUi.pageToken
     ReaderUi.pendingToken = token
     val previous = owner as? Screen.Reader
+    // 只有同一本书、章号真的变了才给入场动画。首次进阅读、从目录跳章时
+    // previous 为 null，没有「从哪儿读过来」的空间关系，硬加位移只是闪。
+    ReaderUi.enterDir = ReaderTransition.dirFor(
+        prevIndex = previous?.takeIf { it.info == info }?.index, index = index)
     val previousOffset = readerBody?.scrollY ?: 0
     scrollSave?.let { readerBody?.removeCallbacks(it) }
     if (previous != null) {
@@ -2021,6 +2066,7 @@ internal fun MainActivity.preview(
     }
     fun failed(error: Throwable) {
         clearRequest()
+        ReaderUi.enterDir = ReaderTransition.NONE
         ReaderUi.restoreKey = ""
         ReaderUi.restoreAt = -1
         ReaderUi.restoreChars = -1
