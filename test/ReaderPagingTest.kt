@@ -65,5 +65,33 @@ fun main() {
     // 还没追加：退回整屏值并按 limit 限幅，与旧行为一致。
     eq(ReaderPaging.savedOffset(emptyList(), 3, 700, 16, 400), 400)
     eq(ReaderPaging.savedOffset(emptyList(), 3, 120, 16, 400), 120)
+    // ── 三块窗口：前 1 / 当前 / 后 1 ──────────────────────
+    eq(ReaderPaging.windowAround(0, 10), listOf(0, 1))
+    eq(ReaderPaging.windowAround(5, 10), listOf(4, 5, 6))
+    eq(ReaderPaging.windowAround(9, 10), listOf(8, 9))
+    eq(ReaderPaging.windowAround(0, 1), listOf(0))
+    eq(ReaderPaging.windowAround(3, 0), emptyList<Int>())
+    // 离窗的块要摘；主块永不摘（它是屏的锚，不随游标平移）。
+    eq(ReaderPaging.dropOutside(listOf(2, 3, 4), 3, 10, null), emptyList<Int>())
+    eq(ReaderPaging.dropOutside(listOf(1, 2, 3), 3, 10, null), listOf(1))
+    eq(ReaderPaging.dropOutside(listOf(1, 2, 3), 3, 10, 1), emptyList<Int>())
+    eq(ReaderPaging.dropOutside(listOf(0, 1, 2, 3), 2, 10, 0), emptyList<Int>())
+    eq(ReaderPaging.dropOutside(listOf(5, 6, 7), 2, 10, 0), listOf(5, 6, 7))
+    // 连续下滚 20 章：窗口始终盖住游标前后一章，总块数不超过 4（主块 + 三块）。
+    run {
+        var blocks = listOf(0)
+        var maxSize = 1
+        for (cur in 0 until 20) {
+            blocks = (blocks + ReaderPaging.windowAround(cur, 20)).distinct().sorted()
+            blocks = blocks - ReaderPaging.dropOutside(blocks, cur, 20, 0)
+            // 游标后面只留一块：窗口不无限长。
+            if (blocks.max() <= cur && cur + 1 < 20) blocks = (blocks + (cur + 1)).sorted()
+            maxSize = maxOf(maxSize, blocks.size)
+            eq(cur - 1 < 0 || cur - 1 in blocks, true)
+            eq(cur + 1 > 19 || cur + 1 in blocks, true)
+            eq(0 in blocks, true)
+        }
+        eq(maxSize <= 4, true)
+    }
     println("ReaderPagingTest: $checks checks passed")
 }

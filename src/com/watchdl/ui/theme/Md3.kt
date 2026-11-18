@@ -61,8 +61,12 @@ object Md3 {
     var inverseOnSurface = 0xFF322F35.toInt(); private set
     var inversePrimary = 0xFF6750A4.toInt(); private set
 
-    /** 成功/正常态的绿。语义色不跟主题走：换主题后「已下载」还是得是绿的。 */
-    val ok: Int get() = if (palette.id == "night") 0xFF7BD88F.toInt() else 0xFF286838.toInt()
+    /**
+     * 成功/正常态的绿。语义色不跟主题走：换主题后「已下载」还是得是绿的，
+     * 只是深底要浅绿、浅底要深绿才看得清。判据取 [Palette.dark] 而不是 id：
+     * 深色配色现在有两套（夜、米·夜），写 id 必漏一套。
+     */
+    val ok: Int get() = if (palette.dark) 0xFF7BD88F.toInt() else 0xFF286838.toInt()
 
     /** 占位封面色：按书名哈希固定选一个容器色。同一本书颜色稳定。 */
     fun nameColor(name: String): Int {

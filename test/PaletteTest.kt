@@ -1,7 +1,7 @@
 /**
  * 主题配色表自检。
  *
- * 色表为日 / 夜 / 米三套，校验旧主题迁移方向。
+ * 色表为日 / 夜 / 米 / 米·夜四套，校验旧主题迁移方向与「亮度 × 配色」两维组合。
  * 深色层级逐级变亮，浅色层级逐级变暗。
  * 正文、次要文字、按钮及容器分别校验对比度。
  */
@@ -66,10 +66,13 @@ fun main() {
         Triple("day", "日间", 0xFFF3F0E8.toInt()),
         Triple("night", "夜间", 0xFF101113.toInt()),
         Triple("miuix", "米", 0xFFF7F7F9.toInt()),
+        Triple("miuixnight", "米·夜", 0xFF121316.toInt()),
     )
-    val newIds = setOf("day", "night", "miuix")
+    val newIds = setOf("day", "night", "miuix", "miuixnight")
+    // 浅色只看实际亮度、不看名字：米·夜是深色，混进来会让层级单调方向反过来。
     val lightIds = setOf("day", "miuix")
-    check("色表为日 / 夜 / 米", Palette.all.map { it.id } == listOf("day", "night", "miuix"))
+    check("色表为日 / 夜 / 米 / 米·夜",
+        Palette.all.map { it.id } == listOf("day", "night", "miuix", "miuixnight"))
     check("七套旧深色主题迁移夜间", legacyIds.all { Palette.find(it).id == "night" })
     check("旧浅色主题迁移日间", listOf("warmpaper", "seasalt").all { Palette.find(it).id == "day" })
     check("旧新增深色主题迁移夜间", listOf("duskblue", "amberblack", "violetmist", "terracotta").all { Palette.find(it).id == "night" })
@@ -86,7 +89,40 @@ fun main() {
     check("默认解析为日间", Palette.find(null).id == "day")
     check("认不出 id 回默认", Palette.find("no-such-id").id == Palette.DEFAULT_ID)
     check("null 回默认", Palette.find(null).id == Palette.DEFAULT_ID)
-    check("日夜米原样返回", listOf("day", "night", "miuix").all { Palette.find(it).id == it })
+    check("日夜米原样返回",
+        listOf("day", "night", "miuix", "miuixnight").all { Palette.find(it).id == it })
+
+    // 深浅标记是「判夜」的唯一依据（状态栏字色、平台主题样式、ok 绿都用它），
+    // 写错一处就把深色当浅色用，而且编译不报错。
+    check("day 为浅色", Palette.find("day").dark == false)
+    check("miuix 为浅色", Palette.find("miuix").dark == false)
+    check("night 为深色", Palette.find("night").dark == true)
+    check("miuixnight 为深色", Palette.find("miuixnight").dark == true)
+    check("深色恰为两套", Palette.all.count { it.dark } == 2,
+        Palette.all.joinToString { "${it.id}=${it.dark}" })
+
+    // 「亮度 × 配色」两维组合：设置页两条段式条靠 combine 拼 id，靠 family 回显。
+    check("两维组合四套",
+        Palette.combine(false, Palette.FAMILY_DEFAULT) == "day" &&
+            Palette.combine(true, Palette.FAMILY_DEFAULT) == "night" &&
+            Palette.combine(false, Palette.FAMILY_MIUIX) == "miuix" &&
+            Palette.combine(true, Palette.FAMILY_MIUIX) == "miuixnight")
+    check("组合出的 id 都在表内",
+        listOf(false, true).all { d ->
+            listOf(Palette.FAMILY_DEFAULT, Palette.FAMILY_MIUIX)
+                .all { fam -> Palette.all.any { p -> p.id == Palette.combine(d, fam) } }
+        })
+    check("反查配色族",
+        Palette.family("day") == Palette.FAMILY_DEFAULT &&
+            Palette.family("night") == Palette.FAMILY_DEFAULT &&
+            Palette.family("miuix") == Palette.FAMILY_MIUIX &&
+            Palette.family("miuixnight") == Palette.FAMILY_MIUIX)
+    check("旧主题也能反查到配色族",
+        Palette.family("inkgreen") == Palette.FAMILY_DEFAULT &&
+            Palette.family("warmpaper") == Palette.FAMILY_DEFAULT &&
+            Palette.family(null) == Palette.FAMILY_DEFAULT)
+    check("族与亮度的组合能覆盖全部四套",
+        Palette.all.all { p -> Palette.combine(p.dark, Palette.family(p.id)) == p.id })
 
     println("[Palette] 层级与对比度")
     for (p in Palette.all) {

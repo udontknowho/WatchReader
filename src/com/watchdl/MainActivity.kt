@@ -477,7 +477,7 @@ class MainActivity : Activity() {
     /** 更新平台主题、窗口及常驻根布局；调用方随后重建当前页。 */
     private fun applyAppTheme(palette: Palette) {
         Md3.applyPalette(palette)
-        val night = Md3.palette.id == "night"
+        val night = palette.dark
         val style = appThemeStyle(palette)
         // 重建 Theme 对象，避免从深色切浅色时残留父主题属性。
         theme.setTo(resources.newTheme().apply { applyStyle(style, true) })
@@ -493,7 +493,8 @@ class MainActivity : Activity() {
     }
 
     private fun appThemeStyle(palette: Palette): Int {
-        val name = if (palette.id == "night") "AppTheme.Night" else "AppTheme.Day"
+        // 深浅看 [Palette.dark]：深色配色不只「夜间」一套（还有米·夜）。
+        val name = if (palette.dark) "AppTheme.Night" else "AppTheme.Day"
         return resources.getIdentifier(name, "style", packageName).also {
             check(it != 0) { "日夜主题资源缺失" }
         }
@@ -684,11 +685,14 @@ class MainActivity : Activity() {
         readerSize = size
         readerSpacing = spacing
         // 阅读设置仍传旧日夜底色；排版滑杆传当前 surface，不应误切主题。
-        // 主题芯片直传 id（[themeId]）：色表不只日夜两套，靠底色反推会丢米色。
+        // 主题段式条直传 id（[themeId]）：色表不只日夜两套，靠底色反推会丢米色。
+        // 四个底色常量都要认：只写番茄那两档，米色夜里会被反推成 `night`。
         val palette = when {
             themeId != null -> Palette.find(themeId)
             bg == ReaderStyle.BG_FANQIE_DAY -> Palette.find("day")
             bg == ReaderStyle.BG_FANQIE_NIGHT -> Palette.find("night")
+            bg == ReaderStyle.BG_MIUIX_DAY -> Palette.find("miuix")
+            bg == ReaderStyle.BG_MIUIX_NIGHT -> Palette.find("miuixnight")
             else -> Md3.palette
         }
         applyAppTheme(palette)
@@ -936,18 +940,41 @@ class MainActivity : Activity() {
     private fun syncSourcesOnStart() {
         // 已有源在跑就不用等它；同步完成后再刷新 multi。
         thread {
-            val r = runCatching { CloudSource.update(sourcesDir()) }.getOrNull() ?: return@thread
-            if (!r.ok) {
-                DevLog.log("WatchDL", "启动同步书源未更新：${r.message}")
+            val r = runCatching { CloudSource.update(sourcesDir()) }.getOrNull()
+            if (r == null || !r.ok) {
+                if (r != null) DevLog.log("WatchDL", "启动同步书源未更新：${r.message}")
+                // 云端没更新（离线、版本相同）也要把池建好。留在第一次点书时建，
+                // 用户看到的就是「点下去先等几十到几百毫秒」。
+                warmSources()
                 return@thread
             }
-            // 库变了，multi 是 lazy 且已经缓存了旧列表 —— 必须作废重建成新的。
+            // 库变了，multi 缓存的是旧列表 —— 作废重建成新的。
+            // 重建必须留在这条后台线程：以前走 runOnUiThread，启动那几秒要解析
+            // 34 个源文件、还可能联网注册设备，主线程被按住就是整屏卡死。
+            warmSources(rebuild = true)
             runOnUiThread {
                 // 不在书架就不弹：启动那几秒同步常落在「发现」屏上，一句 toast
                 // 盖在空白列表上，看着就是「点进去没东西」的一部分。
-                rebuildSources { if (screen is Screen.Shelf) toast(r.message) }
+                if (screen is Screen.Shelf) toast(r.message)
             }
         }
+    }
+
+    /**
+     * 在后台线程把源池建好（[rebuild] 为真时按最新源库重建），返回耗时毫秒。
+     *
+     * [buildMulti] 里是 34 个源文件的解析加设备注册，摊在点击路径上用户就是
+     * 「点了没反应」。启动时先建好，点书只查缓存。失败不抛：池子拿不到时
+     * 调用方本来就有兜底（[resolveBookSource] 返回 null）。
+     */
+    internal fun warmSources(rebuild: Boolean = false): Long {
+        val t0 = System.currentTimeMillis()
+        val pool = runCatching {
+            if (rebuild) synchronized(multiLock) { buildMulti().also { multiCache = it } } else multi
+        }.getOrNull()
+        val cost = System.currentTimeMillis() - t0
+        DevLog.log("WatchDL", "源池${if (rebuild) "重建" else "预热"} $cost ms（${pool?.allNamed()?.size ?: 0} 个源）")
+        return cost
     }
 
     /** 把 multi 缓存作废并重读源目录。必须先重建才能拿到新库。 */

@@ -256,6 +256,77 @@ object Widgets {
         background = Md3.ripple(ctx, Color.TRANSPARENT, Md3.R_ITEM.toFloat())
     }
 
+    /**
+     * 段式条里的一个档位。
+     *
+     * @param id 档位代号，回调原样回传（不用下标：调用处拿 `"day"` 比拿 `0` 好读）
+     * @param text 档上显示的字
+     * @param dot 档前的色点颜色（ARGB）；null 不画点。配色档用它预告该族的主色
+     */
+    class SegOption(val id: String, val text: String, val dot: Int? = null)
+
+    /**
+     * 段式条：一行「标签 + 若干等分档」，每档可选配一个色点。
+     *
+     * 外观页与阅读设置页共用这一条，两处形态才一致（以前各写一份，圆角与行高已经
+     * 快对不上了）。选中态 = 填充 [Md3.primary] + [Md3.onPrimary] 文字 + 加粗，
+     * 与设置页其他段式控件同源。
+     *
+     * 自己只画不存：选中态由 [selected] 传入、点击只回 [onPick] 的 id。
+     * 换主题会重画整页，所以这里不留内部状态，也就不会出现「点了没变、其实变了」。
+     *
+     * 左右内边距照 [Md3.PAD]，与卡片里的 [groupItem] 文字左缘对齐；不想要内边距
+     * （例如已经包在带内边距的容器里）就传 0。
+     *
+     * @param label 行首标签；传空串就不占标签列
+     * @param selected 当前选中档的 id
+     */
+    fun segBar(
+        ctx: Context,
+        label: String,
+        options: List<SegOption>,
+        selected: String,
+        onPick: (String) -> Unit,
+        padX: Int = Md3.dp(ctx, Md3.PAD),
+        padY: Int = Md3.dp(ctx, 3),
+        labelWidthDp: Number = 40,
+    ): LinearLayout {
+        val row = Md3.row(ctx).apply { setPadding(padX, padY, padX, padY) }
+        if (label.isNotEmpty()) {
+            row.addView(Md3.text(ctx, label, Md3.FS_SM, Md3.onSurfaceVariant),
+                LinearLayout.LayoutParams(
+                    Md3.dp(ctx, labelWidthDp), ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+        options.forEachIndexed { i, opt ->
+            val on = opt.id == selected
+            val chip = Md3.text(ctx, opt.text, Md3.FS_SM,
+                if (on) Md3.onPrimary else Md3.onSurfaceVariant).apply {
+                gravity = Gravity.CENTER
+                isClickable = true
+                setTypeface(null, if (on) android.graphics.Typeface.BOLD
+                    else android.graphics.Typeface.NORMAL)
+                background = Md3.ripple(ctx,
+                    if (on) Md3.primary else Color.TRANSPARENT,
+                    Md3.dp(ctx, 13).toFloat(),
+                    if (on) null else Md3.outlineVariant)
+                // 色点画在文字左边：能看见该族的主色，比只写色名好认。
+                // 尺寸不随选中态变（点太小，换色已经看得出来），否则整条会宽度跳一下。
+                opt.dot?.let { c ->
+                    val d = Md3.bg(c, 4f)
+                    val s = Md3.dp(ctx, 8)
+                    d.setSize(s, s)
+                    setCompoundDrawables(d, null, null, null)
+                    compoundDrawablePadding = Md3.dp(ctx, 4)
+                }
+                setOnClickListener { onPick(opt.id) }
+            }
+            row.addView(chip, LinearLayout.LayoutParams(0, Md3.dp(ctx, 26), 1f).apply {
+                leftMargin = if (i == 0) 0 else Md3.dp(ctx, 4)
+            })
+        }
+        return row
+    }
+
     /** 按钮。转发到 [Md3.button]，让调用处只认 Widgets 一个入口。 */
     /**
      * 按钮。宽度按变体定，页面不再各自写 LayoutParams：

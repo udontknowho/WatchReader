@@ -119,42 +119,53 @@ private fun MainActivity.settingsMain(col: LinearLayout) {
 }
 
 /**
- * 外观（legado `ThemeConfigScreen` 里我们能做到的部分）：一组配色 + 一行恢复默认。
+ * 外观（legado `ThemeConfigScreen` 里我们能做到的部分）：亮度与配色两条 + 一行恢复默认。
  *
- * 每套配色一行，行首画该套的主色点 —— legado 的配色是一排色卡，看一眼颜色就能选；
- * 189 dp 宽放不下六张 64 dp 卡，改成行首色点，信息不丢，高度还能接受。
- * 当前那行照 legado 的 `option` 位写「当前」，用主色。
+ * 原来一张卡逐行列三套配色。加第四套（米·夜）后列表会变成四行，其中两组其实是
+ * 同一个配色族的两种亮度 —— 用户要的是「先挑明暗，再挑配色」，拆成两条段式条正好：
+ * 一行两格，选中态一眼可辨，也省下两行高度。
  *
  * legado 这页还有主题模式（跟随/浅/深）、纯黑、字体、切图标、字体缩放、背景图、模糊：
  * 本应用仅提供共享日夜主题，不提供字体与背景图开关。
  */
 private fun MainActivity.settingsTheme(col: LinearLayout) {
+    val cur = Md3.palette
+    val family = Palette.family(cur.id)
+    // 色点要预告「切到这一档会变成什么颜色」，所以按**当前亮度**取对应那套的主色：
+    // 日间看到的米色点是浅蓝，夜间看到的是深色版的浅蓝，与真切过去的结果一致。
+    val defDot = Palette.find(Palette.combine(cur.dark, Palette.FAMILY_DEFAULT)).primary
+    val miuixDot = Palette.find(Palette.combine(cur.dark, Palette.FAMILY_MIUIX)).primary
+
+    col.addView(Widgets.groupCard(this, "亮度") { g ->
+        g.addView(Widgets.segBar(this, "", listOf(
+            Widgets.SegOption("day", "日"), Widgets.SegOption("night", "夜")),
+            selected = if (cur.dark) "night" else "day",
+            onPick = {
+                // 换完主题要重画本页：配色是单例上的值，只影响之后新建的视图。
+                pickTheme(Palette.combine(it == "night", family))
+                showSettings(PAGE_THEME)
+            }))
+    })
+
     col.addView(Widgets.groupCard(this, "配色") { g ->
-        Palette.all.forEach { p ->
-            val on = p.id == Md3.palette.id
-            g.addView(Widgets.listItem(
-                ctx = this,
-                title = p.name,
-                leading = paletteDot(p.primary),
-                // legado 的 option 用主色显示当前值；这里就是「当前」两个字。
-                trailing = if (on) "当前" else null,
-                onClick = {
-                    // pickTheme 存盘后会把设置首屏重画（配色是单例，只影响新建视图），
-                    // 这里紧接着回到配色列表：换一套还能接着比下一套。
-                    pickTheme(p.id)
-                    showSettings(PAGE_THEME)
-                },
-            ))
-        }
+        g.addView(Widgets.segBar(this, "", listOf(
+            Widgets.SegOption(Palette.FAMILY_DEFAULT, "默认", defDot),
+            Widgets.SegOption(Palette.FAMILY_MIUIX, "米", miuixDot)),
+            selected = family,
+            onPick = {
+                pickTheme(Palette.combine(cur.dark, it))
+                showSettings(PAGE_THEME)
+            }))
     })
 
     // legado 这页末尾是一行「恢复默认」+ 确认框（`AppAlertDialog`）。
-    // 我们可恢复的只有配色，描述里就写清只动配色，别让人以为阅读设置也被抹了。
+    // 行尾挂 chevron：它点下去会弹框，不挂箭头看着像直接生效的开关。
     col.addView(Widgets.groupCard(this, null) { g ->
         g.addView(Widgets.groupItem(
             ctx = this,
             title = "恢复默认",
-            subtitle = "恢复日间主题。保留阅读设置与书架排序。",
+            subtitle = "（日间 · 默认）",
+            trailing = "chevron",
             onClick = { askResetPalette() },
         ))
     })
@@ -173,12 +184,9 @@ private fun MainActivity.askResetPalette() {
     ).show()
 }
 
-/** 配色行首的色点：用该套的主色画一个小圆，比只写色名好认。 */
-private fun MainActivity.paletteDot(color: Int): android.view.View = android.view.View(this).apply {
-    background = Md3.bg(color, 9f)
-    minimumWidth = Md3.dp(this@paletteDot, 18)
-    minimumHeight = Md3.dp(this@paletteDot, 18)
-}
+/* 配色行首的色点定位函数已随旧配色列表一并移除：
+ * 现在色点由 `Widgets.segBar` 的 `SegOption.dot` 直接画在段内文字左边，
+ * 不再需要单独造一个 View（少了两次 dp 换算，也不会与段式条圆角打架）。 */
 
 /**
  * 阅读界面：共享主题预览与正文排版。亮度始终交还系统。

@@ -193,6 +193,28 @@ object ReaderStyle {
     const val BG_FANQIE_NIGHT = 0xFF0E0E0E.toInt()
 
     /**
+     * 米色主题的底色。日间取米色那套的近白（同族于 `Palette.miuix` 的浅灰），
+     * 夜间取米色夜间的近黑底（与 `Palette.miuixnight.surface` 同值）。
+     *
+     * 不进 [inkOverride]：这两档没有番茄那种显式标定的字色，背景深、字色浅，
+     * 由深浅反推得到的对比度已经够（浅底黑字 12:1、深底白字 14:1），
+     * 硬塞两行固定值反而把主题切换卡死。
+     */
+    const val BG_MIUIX_DAY = 0xFFF5F5F8.toInt()
+    const val BG_MIUIX_NIGHT = 0xFF121316.toInt()
+
+    /**
+     * 阅读底色由「亮度 + 配色族」两维决定，对应 `Palette.combine` 的四套。
+     *
+     * 原来只有日/夜两支，靠调用处写 `if (id == "night")`；米色夜间一旦加进来，
+     * 那种写法会把它当浅底、反推出黑字。接在这里就只剩一处判断。
+     */
+    fun bgOf(dark: Boolean, family: String): Int = when {
+        family == Palette.FAMILY_MIUIX -> if (dark) BG_MIUIX_NIGHT else BG_MIUIX_DAY
+        else -> if (dark) BG_FANQIE_NIGHT else BG_FANQIE_DAY
+    }
+
+    /**
      * 底色带显式前景色时返回它，否则 null（交回「由深浅反推」）。
      *
      * 用位运算拼色，不调 android.graphics.Color：自检要能在纯 JVM 上跑。

@@ -156,13 +156,21 @@ internal object ReaderUi {
     var nextRaw = ""
 
     /**
-     * 连续滚动追加进来的后续章节正文块（含标题），按追加顺序。
+     * 窗口里除主块以外的正文块（前 1 / 后 1），按章号升序。
      *
      * 存到 [ReaderUi] 而不留在 `showReader` 的局部变量里：阅读设置里改字号、行距、
      * 字重、缩进时要连同这些块一起重排，而 [restyleReader] 只拿得到 [ReaderUi]。
      * 原始文本与控件成对保存，改字号时才能丢掉旧 span 重排。
      */
     val appended: MutableList<Pair<TextView, String>> = ArrayList()
+
+    /**
+     * 上面那些块的章节标题控件，与 [appended] 逐块对齐。
+     *
+     * 单独存一份是因为标题的上下留白与主标题不同（块间要留 18 dp），
+     * 不能跟 [titleView] 共用 [restyleTitle]。
+     */
+    val heads: MutableList<TextView> = ArrayList()
 
     /**
      * 屏上已经有一页占位页（书架点击进来的「正在打开书籍…」）。
@@ -242,8 +250,9 @@ internal object ReaderMenu {
         ReaderUi.nextView = null
         ReaderUi.nextTitleView = null
         ReaderUi.nextRaw = ""
-        // 连续滚动追加的块同样是上一屏的控件，留着就是抓着已摘下的视图树。
+        // 窗口里追加进来的块同样是上一屏的控件，留着就是抓着已摘下的视图树。
         ReaderUi.appended.clear()
+        ReaderUi.heads.clear()
         // 自动翻页的回调里握着上一屏的 ScrollView，不摘掉就会继续翻章。
         // 这里只取消待跑的回调，不动用户开关：换章重建后要接着翻（showReader 末尾重新排程）。
         ReaderAuto.cancel()
@@ -534,125 +543,319 @@ internal fun MainActivity.showReader(
     ReaderPrecompute.take(preKey(info, index), shown, preSpec(tv))
         ?.let { tv.setText(it, TextView.BufferType.SPANNABLE) }
 
-    // ── 连续滚动：滚到底先把下一章追加进来，不换屏 ────────────
+    // ── 三块窗口：前 1 / 当前 / 后 1 ────────────────────────
     //
-    // 追加在下方，scrollY 天然不用修正，读者只看到文字接着往下。
-    // 去掉飞出动画的观感：不再重建整屏，也就没有那一瞬间的位移。
-    /** 已经追加到第几章（含）；等于当前章时表示还没追加。 */
-    var appendedThrough = index
+    // 抄 legado 的固定三章窗口（`ReadBook.kt:184-186` 的 prev / cur / next 三个字段）：
+    // 屏上最多留「前 1 / 当前 / 后 1」三章，游标一动就指针平移，第 4 章永不加载。
+    // 以前只往后 append，往上一滑就到头，往上读完一章非得跳屏。
+    //
     /**
-     * 追加块边界：章号 / 块顶在滚动内容里的 y。首章（本章）由排版后补一条。
+     * 窗口块：章号 / 章节标题 / 正文 / 原始正文。
      *
-     * 连续滚动会把下一章接在本章正文下面，读者往下滑就进了下一章，
-     * 但 [index] 是建屏时定死的，**这一屏推不动自己的章号**（`:390` 起）。
-     * 没有这张表，滚过追加区再前进仍按 `index + 1` 重建，就是重来一遍刚读完的章。
+     * 首块恒为**主块**（`b.body === tv`，就是建屏那一章的正文）。主块不参与摘除：
+     * [mainLimit]、[ReaderUi.bodyView]、章内查找、`off_` 存档口径都指着它，摘掉它
+     * 整屏就没有锚了。它只会在游标平移到后面时留在窗口里让位（多占一块正文，不上屏）。
+     * 表按章号升序，同一章只在表里出现一次 —— 异步回调先查这张表，就不会插两遍。
+     */
+    class WinBlock(val ch: Int, val head: TextView, val body: TextView, val raw: String)
+    val win = ArrayList<WinBlock>()
+    /** 窗口块数上限：主块 + 前 1 + 当前 + 后 1，再多就是无限追下去。 */
+    val winCap = 4
+    /** 正在后台取的章号。滚动事件很密，不拦就会同一章叠出两条链。 */
+    val loading = HashSet<Int>()
+    /** 前插的 scrollY 补偿还没落地：这期间不再前插，否则两次位移会叠算两遍。 */
+    var prependBusy = false
+    /** 窗口第一块就是建屏那一章，先登记，后面所有块按章号往里插。 */
+    win.add(WinBlock(index, titleTv, tv, text))
+
+    /**
+     * 追加/前插块的标题控件：字号、字重、位置跟主标题一起变，上下留白走块间距。
+     *
+     * 与 [restyleTitle] 分开：块与块之间要留 18 dp，主标题顶上是页边距，两者不能共用一个内边距。
+     */
+    fun blockHead(title: String): TextView {
+        val v = Md3.text(this, title, readerSize, readerInk)
+        styleBlockHead(v)
+        return v
+    }
+
+    /** 追加/前插块的正文控件：与主正文同一套版式，改字号时才不会有两种行高。 */
+    fun blockBody(ch: Int, raw: String): TextView {
+        val shown = shownText(raw)
+        val v = Md3.text(this, shown, readerSize, readerInk)
+        v.justificationMode = android.text.Layout.JUSTIFICATION_MODE_INTER_WORD
+        v.setPadding(Md3.dp(this, 3), Md3.dp(this, 2), Md3.dp(this, 3), Md3.dp(this, 24))
+        styleBody(v, raw)
+        // 预排件：换块时不必在滚动中重排一整章。
+        ReaderPrecompute.take(preKey(info, ch), shown, preSpec(v))
+            ?.let { v.setText(it, TextView.BufferType.SPANNABLE) }
+        return v
+    }
+
+    /** 窗口块边界：章号 / 块顶在滚动内容里的 y。
+     *
+     * 连续滚动会把邻章接在本章上下，读者滑过去就是下一章，但 [index] 是建屏时定死的，
+     * **这一屏推不动自己的章号**（`:390` 起）。没有这张表，滚过追加区再前进仍按
+     * `index + 1` 重建，就是重来一遍刚读完的章。
      * 表里按章号升序，[cursorAt] 用视口顶反查当前读到哪章。
      */
     val chapBounds = ArrayList<Pair<Int, Int>>()
     /** 当前游标章号：滚到哪里算哪里，标题 / 进度 / 章钮都跟它走。 */
     var cursor = index
-    /** 正在取正文，防重复追加：滚动事件很密，不拦就会同一章插两次。 */
-    var appendBusy = false
-    /** 已追加的正文视图，重置主题或回收时要用。 */
-    val appendedViews = ArrayList<TextView>()
-    /** 本屏已连续追加的章数上限：短章书（诗词、评论）不封顶会一路追加完。 */
-    val appendCap = 3
+
+    /** 这一章在窗口里的块；不在窗口里返回 null。 */
+    fun blockOf(ch: Int): WinBlock? = win.firstOrNull { it.ch == ch }
 
     /**
-     * 重建 [chapBounds]：首章按正文顶边，追加块按各自标题的顶边。
+     * 重建 [chapBounds]：主块按正文顶边，其余块按各自标题的顶边。
      *
-     * 高度只在排版后才准，所以每次滚动与每次追加后都重算一遍，不缓存像素值。
+     * 高度只在排版后才准，所以每次滚动与每次增删块后都重算一遍，不缓存像素值。
+     * 刚插进来的块在这一次布局之前 `.top` 还是 0，算出来的表不是升序 ——
+     * 那种表会让 [cursorAt] 把游标算到后一章去，所以整表不提交，等下次滚动再算。
      * 空表意味着排版还没落地，此时 [cursorAt] 不切游标，避免刚建屏就误判。
      */
     fun syncChapBounds() {
         if (body.height <= 0) return
-        val list = ArrayList<Pair<Int, Int>>(appendedViews.size + 1)
-        val mainTop = childTopIn(body, tv) - tv.paddingTop
-        list.add(index to mainTop)
-        for ((i, v) in appendedViews.withIndex()) {
-            val ch = index + 1 + i
-            if (ch > appendedThrough) break
-            // 标题在正文上一条：直接用正文顶边减标题高不可靠，取父列里的前一个 child。
-            val colView = v.parent as? android.view.ViewGroup ?: continue
-            val pos = colView.indexOfChild(v)
-            val head = if (pos > 0) colView.getChildAt(pos - 1) else v
-            list.add(ch to (childTopIn(body, head) - head.paddingTop))
+        val list = ArrayList<Pair<Int, Int>>(win.size)
+        var lastTop = Int.MIN_VALUE
+        for (b in win) {
+            val top = if (b.body === tv) childTopIn(body, tv) - tv.paddingTop
+                      else childTopIn(body, b.head) - b.head.paddingTop
+            if (top <= lastTop) return
+            lastTop = top
+            list.add(b.ch to top)
         }
         chapBounds.clear()
         chapBounds.addAll(list)
     }
 
-    /** 视口顶落在哪章；表空或视口还没进首章时返回首章。 */
-    fun cursorAt(): Int = ReaderPaging.cursorAt(chapBounds, body.scrollY + body.paddingTop, index)
+    /** 视口顶落在哪章；表空时退回窗口首块（而不是建屏章：前面可能已经前插了一块）。 */
+    fun cursorAt(): Int = ReaderPaging.cursorAt(
+        chapBounds, body.scrollY + body.paddingTop, win.firstOrNull()?.ch ?: index)
+
+    /** 把窗口块同步给 [ReaderUi]：改字号要能重排所有块，[ReaderMenu.reset] 要能清干净。 */
+    fun publishWindow() {
+        ReaderUi.appended.clear()
+        ReaderUi.heads.clear()
+        for (b in win) {
+            if (b.body === tv) continue
+            ReaderUi.appended.add(b.body to b.raw)
+            ReaderUi.heads.add(b.head)
+        }
+    }
+
+    /** 第 [i] 块在滚动内容里的身高：用相邻块顶差算，末块用内容总高兜底。 */
+    fun blockSpan(i: Int): Int {
+        val b = win.getOrNull(i) ?: return 0
+        val top = childTopIn(body, b.head)
+        val next = win.getOrNull(i + 1)?.let { childTopIn(body, it.head) }
+            ?: (body.getChildAt(0)?.height ?: 0)
+        return (next - top).coerceAtLeast(0)
+    }
+
+    /**
+     * 把窗口收回到游标前后的三块：离窗的块从视图树里摘掉。
+     *
+     * 摘掉视口上方的块必须**同帧补偿 scrollY**（摘多高就减多少），否则整页往上跳一截；
+     * 下方的块不影响当前视口，直接摘。主块永不摘（见 [WinBlock]）。
+     */
+    fun pruneWindow() {
+        if (win.size <= 1) return
+        val drop = ReaderPaging.dropOutside(win.map { it.ch }, cursor, info.chapters.size, index)
+        if (drop.isEmpty()) return
+        for (ch in drop) {
+            val i = win.indexOfFirst { it.ch == ch }
+            if (i < 0) continue
+            val b = win[i]
+            if (b.body === tv) continue
+            // 摘之前先量它有多高：它上面的章要按这个高度把 scrollY 补回去。
+            val span = blockSpan(i)
+            val above = childTopIn(body, b.head) < body.scrollY + body.paddingTop
+            win.removeAt(i)
+            chapCol.removeView(b.head)
+            chapCol.removeView(b.body)
+            if (above && span > 0) body.scrollTo(0, (body.scrollY - span).coerceAtLeast(0))
+        }
+        publishWindow()
+        syncChapBounds()
+    }
+
+    /**
+     * 块内锚：把视口顶那一行换算成「字符偏移 + 行内余量」。
+     *
+     * 换章重建要拿它当落点：同一块的字符偏移到新页仍指同一行；用像素的话，
+     * 窗口里这块上面还压着上一章，绝对 y 会多出一整个章高。取不到布局时返回 null。
+     */
+    fun anchorAt(desiredTop: Int): Pair<WinBlock, ReaderPaging.Anchor>? {
+        var at = win.firstOrNull() ?: return null
+        for (b in win) if (childTopIn(body, b.head) <= desiredTop) at = b else break
+        val layout = at.body.layout ?: return null
+        if (layout.lineCount == 0) return null
+        val top = childTopIn(body, at.body) + at.body.paddingTop
+        val line = layout.getLineForVertical((desiredTop - top).coerceAtLeast(0))
+        return at to ReaderPaging.anchor(
+            layout.getLineStart(line), desiredTop, top, layout.getLineTop(line))
+    }
+
+    /**
+     * 把当前位置记成「第 [ch] 章的字符偏移」，写进 [ReaderUi.restoreChars]。
+     *
+     * 只在视口顶正落在 [ch] 那一块时成立：跨章时字符偏移属于另一段正文，
+     * 落到新页会指错行。写不成返回 false，调用方退回像素路径（[ReaderUi.restoreAt]）。
+     */
+    fun rememberChars(ch: Int): Boolean {
+        val (block, anchor) = anchorAt(body.scrollY + body.paddingTop) ?: return false
+        if (block.ch != ch) return false
+        ReaderUi.restoreKey = "${readingId(info)}#$ch"
+        ReaderUi.restoreChars = anchor.chars
+        ReaderUi.restoreDelta = anchor.delta
+        ReaderUi.restoreAt = -1
+        return true
+    }
+
+    /**
+     * 把下一章接到窗口末尾。
+     *
+     * 只有游标已经走到窗口末尾才补（游标后面恒有一章待读，窗口就不会越堆越长）；
+     * 正文不足一屏时例外，否则读者滑不动。
+     * 失败不提示：章末再戳一下仍能走原来的换屏路径，行为不比以前差。
+     * 空正文也不追加 —— 追加一条空块只会把读者卡在一段空白里。
+     */
+    fun appendNext() {
+        val last = win.lastOrNull() ?: return
+        if (last.ch > cursor && scrollLimit(body) > body.height) return
+        val next = last.ch + 1
+        if (next >= info.chapters.size) return
+        // 付费章取不到正文：留给换屏路径去跳过，这里不伸手。
+        if (info.chapters[next].locked) return
+        if (win.size >= winCap || !loading.add(next)) return
+        val ch = info.chapters[next]
+        bg(curScreen, body = { loadOpening(info, ch, src) }) { r ->
+            loading.remove(next)
+            val raw = r.getOrNull()
+            if (raw.isNullOrBlank()) return@bg
+            // 三道硬守卫：这一屏还在、章号仍在游标 ±1 以内、窗口里还没有这一章。
+            // 过期回调（读者已经翻走、或者预取与追加各回来一次）在这里被丢掉。
+            if (ReaderUi.bodyView !== tv) return@bg
+            if (next !in cursor - 1..cursor + 1) return@bg
+            if (win.any { it.ch == next }) return@bg
+            if (win.size >= winCap) return@bg
+            val head = blockHead(ch.title)
+            val nx = blockBody(next, raw)
+            win.add(WinBlock(next, head, nx, raw))
+            chapCol.addView(head)
+            chapCol.addView(nx)
+            publishWindow()
+            // 块顶要等这一帧排完才有真实高度：先 post，拿不到就下次滚动再算。
+            body.post { syncChapBounds() }
+            // 埋点：连续滚动最容易出的错是同一章被追加两遍（预取与 appendNext 各挂一次）。
+            // 只在开发者日志开启时落盘，用来数「同一章追加了几次」。
+            com.watchdl.core.DevLog.log("Reader", "append idx=$next n=${win.size} chars=${raw.length} h=${scrollLimit(body)}")
+            // 本章不满一屏：追加完立刻再试一次，否则读者滑不动。
+            body.post { if (scrollLimit(body) <= body.height) appendNext() }
+        }
+    }
+
+    /** 视图还没挂上窗口时先记下的落位闭包，挂上后由 preDraw 那一套取走。 */
+    var pendingPlace: (() -> Int)? = null
+
+    /**
+     * 首帧之前落位。
+     *
+     * `body.post{}` 排在消息队列里，可能首帧已经画出章首才滚 —— 换章时就是“先闪一下章首再跳”。
+     * `OnPreDraw` 在布局之后、绘制之前，这里到位当帧就是最终位置。
+     * 目标位置要等排版完成（maxScroll、拼接块高度）才知道，所以传闭包。
+     * 脱离窗口的 [android.view.ViewTreeObserver] 是浮动对象，注册的监听会丢，
+     * 所以未挂窗口时先存着，由 showReader 末尾挂好后重调。
+     */
+    fun placeBeforeDraw(compute: () -> Int) {
+        if (!body.isAttachedToWindow) {
+            // 还没挂上窗口：浮动 ViewTreeObserver 上注册的监听会丢，等挂上来再试一次。
+            pendingPlace = compute
+            body.post {
+                val p = pendingPlace ?: return@post
+                pendingPlace = null
+                if (body.isAttachedToWindow) placeBeforeDraw(p)
+                else body.scrollTo(0, p().coerceIn(0, scrollLimit(body)))
+            }
+            return
+        }
+        val vto = body.viewTreeObserver
+        val l = object : android.view.ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                if (vto.isAlive) vto.removeOnPreDrawListener(this)
+                body.scrollTo(0, compute().coerceIn(0, scrollLimit(body)))
+                return true
+            }
+        }
+        vto.addOnPreDrawListener(l)
+    }
+
+    /**
+     * 往窗口前面插一块（[cursor] 的上一章）。
+     *
+     * 前插会把它下面的内容整体下移一整章高，所以插入前记下「旧首块顶」，
+     * 布局完、绘制前把位移补进 scrollY —— 补在同一帧里，画面一动不动。
+     * 不补就是「往上一滑，整页跳下去一章」，这就是从前的观感。
+     */
+    fun prependPrev() {
+        val first = win.firstOrNull() ?: return
+        if (prependBusy) return
+        // 游标还没退到窗口首块：它上面那章已经在屏上，不用再补。
+        if (cursor > first.ch) return
+        val prev = first.ch - 1
+        if (prev < 0) return
+        if (info.chapters[prev].locked) return
+        if (win.size >= winCap || !loading.add(prev)) return
+        val ch = info.chapters[prev]
+        bg(curScreen, body = { loadOpening(info, ch, src) }) { r ->
+            loading.remove(prev)
+            val raw = r.getOrNull()
+            if (raw.isNullOrBlank()) return@bg
+            if (ReaderUi.bodyView !== tv) return@bg
+            if (prev !in cursor - 1..cursor + 1) return@bg
+            if (win.any { it.ch == prev }) return@bg
+            if (win.size >= winCap) return@bg
+            val head = blockHead(ch.title)
+            val nx = blockBody(prev, raw)
+            // 插入前量一次旧首块顶，插入后同一点会整体下移一个块高。
+            val keep = win.first()
+            val before = childTopIn(body, keep.head)
+            win.add(0, WinBlock(prev, head, nx, raw))
+            chapCol.addView(nx, 0)
+            chapCol.addView(head, 0)
+            publishWindow()
+            prependBusy = true
+            placeBeforeDraw {
+                prependBusy = false
+                // 旧首块被顶下去多少，scrollY 就加多少：视口留在原处，一个字都不动。
+                (body.scrollY + childTopIn(body, keep.head) - before).coerceAtLeast(0)
+            }
+            // 兜底：PreDraw 万一没跑到（视图被摘），别把前插永久锁死。
+            body.postDelayed({ prependBusy = false }, 400L)
+            body.post { syncChapBounds() }
+        }
+    }
 
     /** 游标变动后的显示回调，底栏建好后绑上（局部函数看不到后面声明的视图）。 */
     var onCursor: ((Int) -> Unit)? = null
 
     /**
-     * 游标切到 [at]：标题、进度滑条、章钮状态、落盘一起跟。
+     * 游标切到 [at]：进度滑条、章钮状态、落盘一起跟。
      *
      * 只改显示与落盘目标，不重建视图 —— 正文已经在屏上，重建就是当前这个 bug 的成因。
+     * **不碰任何块的标题**：每块自带标题，改写主块标题只会让往上滑回去时看到别的章名
+     * （从前那行 `titleTv.text = t` 就是这个毛病）。
      */
     fun applyCursor(at: Int) {
         if (at == cursor) return
         cursor = at
         readerIndex = at
         readerOffset = body.scrollY
-        info.chapters.getOrNull(at)?.title?.let { t ->
-            if (t.isNotBlank()) titleTv.text = t
-        }
         onCursor?.invoke(at)
         saveProgress(info, at, rememberBook = false)
     }
 
-    /**
-     * 取下一章正文并接到正文列后面。
-     *
-     * 失败不提示：章末再戳一下仍能走原来的换屏路径，行为不比以前差。
-     * 空正文也不追加 —— 追加一条空块只会把读者卡在一段空白里。
-     */
-    fun appendNext() {
-        if (appendBusy || appendedViews.size >= appendCap) return
-        val next = appendedThrough + 1
-        if (next >= info.chapters.size) return
-        val ch = info.chapters[next]
-        appendBusy = true
-        bg(curScreen, body = { loadOpening(info, ch, src) }) { r ->
-            appendBusy = false
-            val raw = r.getOrNull()
-            if (raw.isNullOrBlank()) return@bg
-            // 追加之前先确认这一屏还在：后台线程回来时用户可能已经去了别的章。
-            if (ReaderUi.bodyView !== tv) return@bg
-            if (next != appendedThrough + 1) return@bg
-            if (appendedViews.size >= appendCap) return@bg
-            val head = Md3.text(this, ch.title, readerSize + ReaderUi.titleAdd, readerInk,
-                bold = ReaderUi.titleBold)
-            head.setPadding(0, Md3.dp(this, 18), 0, Md3.dp(this, 2))
-            val nxShown = shownText(raw)
-            val nx = Md3.text(this, nxShown, readerSize, readerInk)
-            nx.justificationMode = android.text.Layout.JUSTIFICATION_MODE_INTER_WORD
-            nx.setPadding(Md3.dp(this, 3), Md3.dp(this, 2), Md3.dp(this, 3), Md3.dp(this, 24))
-            styleBody(nx, raw)
-            // 追加块也吃预排件：往下滑到下一章时不必在滚动中重排一整章。
-            ReaderPrecompute.take(preKey(info, next), nxShown, preSpec(nx))
-                ?.let { nx.setText(it, TextView.BufferType.SPANNABLE) }
-            chapCol.addView(head)
-            chapCol.addView(nx)
-            appendedViews.add(nx)
-            ReaderUi.appended.add(nx to raw)
-            appendedThrough = next
-            // 块顶要等这一帧排完才有真实高度：先 post，拿不到就下次滚动再算。
-            body.post { syncChapBounds() }
-            // 埋点：连续滚动最容易出的错是同一章被追加两遍（预取与 appendNext 各挂一次）。
-            // 只在开发者日志开启时落盘，用来数「同一章追加了几次」。
-            com.watchdl.core.DevLog.log("Reader", "append idx=$next n=${appendedViews.size} chars=${raw.length} h=${scrollLimit(body)}")
-            // 本章不满一屏：追加完立刻再试一次，否则读者滑不动。
-            body.post { if (scrollLimit(body) <= body.height) appendNext() }
-        }
-    }
-
-    // 当前布局只包含本章；预取不会增加滚动高度。
-    val tvNext: TextView? = null
     fun chapterPending(): Boolean = ReaderUi.pendingToken != null
     ++ReaderUi.spliceGen
 
@@ -685,22 +888,17 @@ internal fun MainActivity.showReader(
         chapBounds, at, body.scrollY, body.paddingTop, mainLimit())
 
     /**
-     * 拼接块读完处在那块正文里的**字符偏移**；下一章从这一处接着显示，不重读。
+     * 滚动内容坐标 [y] 落在哪一块正文上：返回那块 layout 与它文字顶边的 y。
      *
-     * 存字符不存像素：拼接块的字是下一章正文的头部（同一个 [shownText]、同一条
-     * [styleBody]），字符偏移两边指的是同一行；像素坐标则不然 —— 拼接块在旧页里
-     * 排在整章正文之后，拿它的绝对 y 到新页去落位会多出一个章的高度。
-     * 未排版时退回 0：宁可让新页落回章首（最多重读一屏），也不按猜的行高乱定位。
+     * 窗口里有前 1 / 后 1 两块，翻屏吸附、行顶计算不能再拿本章一个坐标系套下去。
+     * 未排版时返回 null，调用方退回不吸附。
      */
-    fun spliceAnchor(advance: Int): ReaderPaging.Anchor? {
-        val nx = tvNext ?: return null
-        val layout = nx.layout ?: return null
-        val top = childTopIn(body, nx) + nx.paddingTop
-        val viewport = body.height - body.paddingTop - body.paddingBottom
-        val safeAdvance = advance.coerceIn(0, ReaderPaging.step(viewport, nx.lineHeight))
-        val desired = body.scrollY + body.paddingTop + safeAdvance
-        val line = layout.getLineForVertical((desired - top).coerceAtLeast(0))
-        return ReaderPaging.anchor(layout.getLineStart(line), desired, top, layout.getLineTop(line))
+    fun textAt(y: Int): Pair<android.text.Layout, Int>? {
+        var at: WinBlock? = null
+        for (b in win) if (childTopIn(body, b.head) <= y) at = b else break
+        val b = at ?: win.firstOrNull() ?: return null
+        val layout = b.body.layout ?: return null
+        return layout to (childTopIn(body, b.body) + b.body.paddingTop)
     }
 
     // 底角状态浮层位于正文裁剪区之外，不参与滚动内容布局。
@@ -768,40 +966,6 @@ internal fun MainActivity.showReader(
         return (body.scrollY * 100 / limit).coerceIn(0, 100)
     }
 
-    /** 视图还没挂上窗口时先记下的落位闭包，挂上后由 preDraw 那一套取走。 */
-    var pendingPlace: (() -> Int)? = null
-
-    /**
-     * 首帧之前落位。
-     *
-     * `body.post{}` 排在消息队列里，可能首帧已经画出章首才滚 —— 换章时就是“先闪一下章首再跳”。
-     * `OnPreDraw` 在布局之后、绘制之前，这里到位当帧就是最终位置。
-     * 目标位置要等排版完成（maxScroll、拼接块高度）才知道，所以传闭包。
-     * 脱离窗口的 [android.view.ViewTreeObserver] 是浮动对象，注册的监听会丢，
-     * 所以未挂窗口时先存着，由 showReader 末尾挂好后重调。
-     */
-    fun placeBeforeDraw(compute: () -> Int) {
-        if (!body.isAttachedToWindow) {
-            // 还没挂上窗口：浮动 ViewTreeObserver 上注册的监听会丢，等挂上来再试一次。
-            pendingPlace = compute
-            body.post {
-                val p = pendingPlace ?: return@post
-                pendingPlace = null
-                if (body.isAttachedToWindow) placeBeforeDraw(p)
-                else body.scrollTo(0, p().coerceIn(0, scrollLimit(body)))
-            }
-            return
-        }
-        val vto = body.viewTreeObserver
-        val l = object : android.view.ViewTreeObserver.OnPreDrawListener {
-            override fun onPreDraw(): Boolean {
-                if (vto.isAlive) vto.removeOnPreDrawListener(this)
-                body.scrollTo(0, compute().coerceIn(0, scrollLimit(body)))
-                return true
-            }
-        }
-        vto.addOnPreDrawListener(l)
-    }
     val total = info.chapters.size.coerceAtLeast(1)
 
     // ── 点击分区：上屏回滚一屏 / 中段出菜单 / 下屏前进一屏 ─────────────
@@ -842,35 +1006,34 @@ internal fun MainActivity.showReader(
         }
     })
 
-    /** 往下滚到章末：有拼接块就把「读完处」当偏移带过去，没有就整章换。 */
+    /** 往下滚到章末：窗口末尾再往下就是换屏换章。 */
     fun toNext() {
         if (chapterPending()) return
-        // 从游标往后找：追加区里的章已经读过，不能按建屏时的 index 重来。
-        val from = maxOf(cursor, appendedThrough) + 1
+        // 从窗口末尾往后找：窗口里的章已经读过，不能按建屏时的 index 重来。
+        val from = (win.lastOrNull()?.ch ?: cursor) + 1
         val next = (from until info.chapters.size).firstOrNull { !info.chapters[it].locked }
         if (next == null) { ReaderAuto.stop(); toast("已是最后一章"); return }
         cancelMotion()
         ReaderUi.anchor = null
         preview(info, next)
     }
+
+    /** 往上到窗口之前的章：再往上要新取一章，只能换屏。 */
     fun toPrevious() {
         if (chapterPending()) return
-        if ((index - 1 downTo 0).none { !info.chapters[it].locked }) {
-            toast("已是第一章")
-            return
-        }
+        val from = win.firstOrNull()?.ch ?: cursor
+        if (from <= 0) { toast("已是第一章"); return }
         cancelMotion()
-        prevChapter(info, index, atEnd = true)
+        prevChapter(info, from, atEnd = true)
     }
 
     /**
      * 平滑滚一屏。步距按「一屏减一行」走，到内容底 / 顶才换章。
      *
      * 步距照 legado 的 `ReaderScrollPolicy.pageStep`：新屏顶上留一行旧内容做接续。
-     * 关键是**跨块不另算**：章末接的下一章开头（[tvNext]）与本章正文同一条版式，
-     * 「一屏减一行」在接缝处照样成立。以前接缝处特意跳 `nxTop`，而那一跳的位移
-     * 只剩「分隔线 + 下一章标题」那一小截 —— 就是「只挪一点点」。
-     * 落点再吸附到行顶，行号用落点所在那一块自己的 layout（两块版式相同，坐标独立）。
+     * 关键是**跨块不另算**：章末接的下一章开头与本章正文同一条版式，
+     * 「一屏减一行」在接缝处照样成立。
+     * 落点再吸附到行顶，行号用落点所在那一块自己的 layout（见 [textAt]）。
      */
     fun scrollPage(forward: Boolean) {
         if (chapterPending() || !body.isLaidOut) return
@@ -878,23 +1041,15 @@ internal fun MainActivity.showReader(
         val limit = scrollLimit(body)
         val from = body.scrollY
         val vp = (body.height - body.paddingTop - body.paddingBottom).coerceAtLeast(1)
-        val pageStep = ReaderPaging.step(vp, tv.lineHeight)
         if (forward && from >= limit) { toNext(); return }
         if (!forward && from <= 0) { toPrevious(); return }
-
-        // 两块的行顶：控件在滚动内容里的顶边 + 自身 paddingTop，与章内查找同一套算法。
-        val mainTop = childTopIn(body, tv) + tv.paddingTop
-        val nx = tvNext
-        val nxTop = if (nx == null) 0 else childTopIn(body, nx) + nx.paddingTop
-
-        // 一屏减一行（legado 的「保留一行」）；一屏不足两行时至少走一行。
-        val lineH = (if (nx != null && from >= nxTop) nx.lineHeight else tv.lineHeight)
-            .coerceAtLeast(1)
-        val step = ReaderPaging.step(vp, lineH)
+        // 行高按主正文取：三块走同一条 [styleBody]，行高本来就一致。
+        val step = ReaderPaging.step(vp, tv.lineHeight.coerceAtLeast(1))
         val target = ReaderPaging.target(from, forward, step, limit) { raw ->
-            val inNext = nx != null && raw + body.paddingTop >= nxTop
-            val layout = if (inNext) nx?.layout else tv.layout
-            val top = if (inNext) nxTop else mainTop
+            // 吸附到落点所在那一块的行顶：窗口里有前/后两章，不能拿本章的坐标系算。
+            val at = textAt(raw + body.paddingTop)
+            val layout = at?.first
+            val top = at?.second ?: 0
             if (layout == null || layout.lineCount == 0) raw else {
                 val li = layout.getLineForVertical((raw + body.paddingTop - top).coerceAtLeast(0))
                 top + layout.getLineTop(li) - body.paddingTop
@@ -1274,8 +1429,8 @@ internal fun MainActivity.showReader(
     foot.addView(seek, LinearLayout.LayoutParams(0, Md3.dp(this, 32), 1f))
 
     val next = chapterArrow("下一章", true) {
-        // 已读进追加区的章不能再跳一遍：底栏从「已追加到的章」往后取。
-        nextChapter(info, maxOf(cursor, appendedThrough))
+        // 已读进窗口的章不能再跳一遍：底栏从窗口末章往后取。
+        nextChapter(info, maxOf(cursor, win.lastOrNull()?.ch ?: cursor))
     }
     if (index >= total - 1) { next.alpha = 0.35f; next.isClickable = false }
     foot.addView(next, LinearLayout.LayoutParams(Md3.dp(this, 28), Md3.dp(this, 28)))
@@ -1396,12 +1551,18 @@ internal fun MainActivity.showReader(
     // 给整屏 scrollY 就会在拼接区存下一大串数字，回读时被限幅到章末、跳进后一章。
     readerPos = { cursor to savedOffset(cursor) }
     body.setOnScrollChangeListener { _, _, y, _, _ ->
+        val prevY = readerOffset
         readerOffset = y
-        // 游标跟着滚动走：进追加块就把章号、标题、进度切到那一章。
-        if (appendedViews.isNotEmpty()) {
+        // 游标跟着滚动走：进窗口里别的块就把章号、标题、进度切到那一章。
+        if (win.size > 1) {
             syncChapBounds()
             applyCursor(cursorAt())
+            // 游标一动，离窗的块就该摘了：不摘窗口会一路长下去。
+            pruneWindow()
         }
+        // 往回滑到窗口顶就往前补一章。不补就只能顶在首块不动 —— 这就是「只能往下读」。
+        // 阈值取一行高：贴边就取，读者不会看到顶死的空白。
+        if (y < prevY && y <= tv.lineHeight.coerceAtLeast(1)) prependPrev()
         // 进度滑条跟着正文走（不触发跳章：回调里只认 fromUser）。
         if (!draggingSeek) {
             val limit = mainLimit()
@@ -1560,8 +1721,12 @@ internal fun MainActivity.showReader(
             // 只换底色，字号行距不动；重建页是因为整套前景色都得跟着换。
             ReaderUi.restoreKey = findKey
             ReaderUi.restoreAt = body.scrollY
-            saveReaderPrefs(readerSize, readerSpacing,
-                if (light) ReaderStyle.BG_FANQIE_NIGHT else ReaderStyle.BG_FANQIE_DAY)
+            // 留在当前配色族里换亮度：米色主题下切到深色要变「米·夜」，不是夜间中性色。
+            // 主题 id 显式传，不让 saveReaderPrefs 从底色反推 —— 反推只能分四档。
+            val family = Palette.family(Md3.palette.id)
+            val dark = !light
+            saveReaderPrefs(readerSize, readerSpacing, ReaderStyle.bgOf(dark, family),
+                themeId = Palette.combine(dark, family))
             showReader(info, index, text, src)
         }
     }
@@ -1623,12 +1788,29 @@ internal fun MainActivity.styleBody(tv: TextView, raw: String) {
     applyParaSpacing(tv, shown)
 }
 
+/**
+ * 窗口块的章节标题样式。
+ *
+ * 与主标题唯一的差别是上下留白：块与块之间要空开 18 dp，主标题顶上不留。
+ * 字号 / 字重 / 是否隐藏走同一套设置，改设置时整窗一起变。
+ */
+internal fun MainActivity.styleBlockHead(v: TextView) {
+    v.visibility = if (ReaderUi.titleMode == 2) View.GONE else View.VISIBLE
+    if (ReaderUi.titleMode == 2) return
+    v.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, readerSize + ReaderUi.titleAdd)
+    v.setTextColor(Md3.onSurface)
+    v.setTypeface(
+        android.graphics.Typeface.SANS_SERIF,
+        if (ReaderUi.titleBold) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+    v.setPadding(0, Md3.dp(this, 18), 0, Md3.dp(this, 2))
+}
+
 /** 标题样式。位置 / 字号 / 字重 / 下间距四项都跟着设置变。 */
 private fun MainActivity.restyleTitle(ink: Int) {
     val t = ReaderUi.titleView ?: return
     val hide = ReaderUi.titleMode == 2
     // 拼接块的下一章标题也走这一套：它就是一个章标题，样式不能比正文标题差。
-    for (v in listOfNotNull(t, ReaderUi.nextTitleView)) {
+    for (v in listOfNotNull(t, ReaderUi.nextTitleView) + ReaderUi.heads) {
         v.visibility = if (hide) View.GONE else View.VISIBLE
         if (hide) continue
         v.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, readerSize + ReaderUi.titleAdd)

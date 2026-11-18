@@ -607,6 +607,7 @@ internal fun MainActivity.readShelfBook(request: BookInfo) {
     }) { result ->
         if (token != com.watchdl.ui.reader.ReaderUi.pageToken) return@bg
         result.onSuccess { (info, src) ->
+            // 目录守卫的第一条：本地已有章表就绝不联网重取（TocGuard 只管将来的自动刷新）。
             if (info.chapters.isEmpty()) {
                 showDetail(info, src)
             } else {

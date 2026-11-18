@@ -7,6 +7,7 @@ import android.widget.LinearLayout
 import com.watchdl.MainActivity
 import com.watchdl.core.BookInfo
 import com.watchdl.core.BookSource
+import com.watchdl.core.Palette
 import com.watchdl.core.ReaderStyle
 import com.watchdl.core.Screen
 import com.watchdl.core.readingId
@@ -37,8 +38,9 @@ private const val PREVIEW_TEXT = "夜里风声很轻。\n他翻过一页。"
  * | 其他 | 常亮、自动翻页、恢复默认 | `MoreConfigSheet` |
  *
  * 已按用户要求砍掉：护眼（开关 / 强度 / 按钟点自动）、页眉页脚、五档底色。
- * 底色只留日、夜两档：日间用番茄那套（`BG_FANQIE_DAY`，棕褐字），夜间 `BG_FANQIE_NIGHT`。
- * 两档的字色都由 `ReaderStyle.inkOverride` 显式给出，不靠深浅反推。
+ * 底色归「亮度 × 配色」两维：亮度日/夜，配色默认（番茄）/米，共四套，与外观页同款两条段式条。
+ * 番茄两档的字色由 `ReaderStyle.inkOverride` 显式给出；米色两档不进去，
+ * 背景深、字色浅，靠深浅反推已经够看（对比度由 `test/PaletteTest.kt` 管）。
  *
  * 每一项都即时生效：改完写盘 + 当场重排正文（[restyleReader]），回阅读页看到的就是新样子。
  * 只有底色要重建整屏 —— 顶栏、按钮、进度条的前景色全由底色推。
@@ -143,16 +145,41 @@ internal fun MainActivity.showReaderSettings(
 
         // ── 外观 ───────────────────────────────────────────
         card("外观") { g ->
-            chips(g, "主题", listOf("日" to "day" as Any, "夜" to "night", "米" to "miuix"),
-                { Md3.palette.id }, rebuildsScreen = true) { sel ->
-                // 底色一换，整套前景色都要跟着换，只能重建整屏；这也是本页唯一离开此屏的项。
-                val id = sel as String
-                val bg = if (id == "night") ReaderStyle.BG_FANQIE_NIGHT else ReaderStyle.BG_FANQIE_DAY
-                saveReaderPrefs(readerSize, readerSpacing, bg, themeId = id)
+            val cur = Md3.palette
+            val family = Palette.family(cur.id)
+            // 色点预告「切到这一档会变成什么颜色」，所以按当前亮度取对应那套的主色。
+            val defDot = Palette.find(Palette.combine(cur.dark, Palette.FAMILY_DEFAULT)).primary
+            val miuixDot = Palette.find(Palette.combine(cur.dark, Palette.FAMILY_MIUIX)).primary
+
+            /*
+             * 两条段式条：亮度（日/夜）+ 配色（默认/米），与「我的 → 设置 → 外观」
+             * 用的是同一个控件，两处形态才一致。四套组合各自一个主题 id，由
+             * [Palette.combine] 算，不在这里拼字串。
+             *
+             * 任一维改动都重建整屏：底色一换，顶栏、按钮、进度条的前景色全得跟着换。
+             * 底色与主题 id 两样都显式传，不让 `saveReaderPrefs` 从底色反推 ——
+             * 反推只能分四档，主题再多一套就会错。
+             */
+            fun repick(dark: Boolean, fam: String) {
+                saveReaderPrefs(readerSize, readerSpacing,
+                    ReaderStyle.bgOf(dark, fam), themeId = Palette.combine(dark, fam))
                 saveReaderExtras()
                 showReaderSettings(info, index, text, src)
             }
 
+            g.addView(Widgets.segBar(this, "亮度", listOf(
+                Widgets.SegOption("day", "日"), Widgets.SegOption("night", "夜")),
+                selected = if (cur.dark) "night" else "day",
+                // 标签列 26 dp，与卡内其他行（`chips` 的标签列）对齐。
+                labelWidthDp = 26,
+                onPick = { repick(it == "night", family) }))
+
+            g.addView(Widgets.segBar(this, "配色", listOf(
+                Widgets.SegOption(Palette.FAMILY_DEFAULT, "默认", defDot),
+                Widgets.SegOption(Palette.FAMILY_MIUIX, "米", miuixDot)),
+                selected = family,
+                labelWidthDp = 26,
+                onPick = { repick(cur.dark, it) }))
         }
 
         // ── 正文 ───────────────────────────────────────────

@@ -66,6 +66,28 @@ object ReaderPaging {
             .coerceIn(0, chapSpan(bounds, chapter, limit))
     }
 
+    /**
+     * 三块窗口：游标 [cur] 前后各一章，越界自动收窄。
+     *
+     * 抄 legado 的固定三章窗口（`ReadBook.kt:184-186` 的 prev / cur / next）：
+     * 窗口只由游标决定，跟屏上现有的块无关 —— 多余的一律按它摘掉。
+     */
+    fun windowAround(cur: Int, total: Int): List<Int> {
+        if (total <= 0) return emptyList()
+        val c = cur.coerceIn(0, total - 1)
+        return ((c - 1).coerceAtLeast(0)..(c + 1).coerceAtMost(total - 1)).toList()
+    }
+
+    /**
+     * 该从窗口里摘掉的块。
+     *
+     * [exempt] 是永不摘除的那一块：屏的主块（正文落点、章内查找、恢复口径都指着它）。
+     */
+    fun dropOutside(blocks: List<Int>, cur: Int, total: Int, exempt: Int?): List<Int> {
+        val keep = windowAround(cur, total).toSet()
+        return blocks.filter { it !in keep && it != exempt }
+    }
+
     /** 保留行内距离，也保留视口仍在下一章标题上方时的负距离。 */
     fun anchor(chars: Int, desiredTop: Int, blockTop: Int, lineTop: Int): Anchor =
         Anchor(chars, desiredTop - blockTop - lineTop)
