@@ -551,6 +551,21 @@ internal fun MainActivity.showReader(
     val loading = HashSet<Int>()
     /** 前插的 scrollY 补偿还没落地：这期间不再前插，否则两次位移会叠算两遍。 */
     var prependBusy = false
+    /**
+     * 摘块的 scrollY 补偿还没落地：这期间块顶是摘除前的旧值，一律不许据此算游标。
+     *
+     * 与 [prependBusy] 同一套写法，但挡的东西不同：前插挡的是「再插一块」，
+     * 这里挡的是「拿旧坐标系反查章号」（[pruneWindow] 与滚动监听两处）。
+     */
+    var pruneBusy = false
+    /**
+     * 摘块的收尾：补偿落地（重排之后）再重算游标。
+     *
+     * 存成变量而不是由 [pruneWindow] 直接调，是因为它要用到声明在后面的
+     * [placeBeforeDraw] 与 [applyCursor]，而 Kotlin 的局部函数不能前向引用。
+     * 建屏时赋值，早于滚动监听的注册。
+     */
+    var pruneSettle: (() -> Unit)? = null
     /** 窗口第一块就是建屏那一章，先登记，后面所有块按章号往里插。 */
     win.add(WinBlock(index, titleTv, tv, text))
 
@@ -619,6 +634,19 @@ internal fun MainActivity.showReader(
     fun cursorAt(): Int = ReaderPaging.cursorAt(
         chapBounds, body.scrollY + body.paddingTop, win.firstOrNull()?.ch ?: index)
 
+    /**
+     * 视口实际落在哪一章：换章一律以它为准。
+     *
+     * [cursor] 是上一次滚动算出来的缓存值，摘块补偿那一帧还没跟上；按 `cursor ± 1`
+     * 取章就会整整差一章（跳过 / 回退都是这么来的）。补偿未落地时坐标本身是旧值，
+     * 这时退回 [cursor]。
+     */
+    fun vpChapter(): Int {
+        if (pruneBusy) return cursor
+        syncChapBounds()
+        return cursorAt()
+    }
+
     /** 把窗口块同步给 [ReaderUi]：改字号要能重排所有块，[ReaderMenu.reset] 要能清干净。 */
     fun publishWindow() {
         ReaderUi.appended.clear()
@@ -642,28 +670,45 @@ internal fun MainActivity.showReader(
     /**
      * 把窗口收回到游标前后的三块：离窗的块从视图树里摘掉。
      *
-     * 摘掉视口上方的块必须**同帧补偿 scrollY**（摘多高就减多少），否则整页往上跳一截；
+     * 摘掉视口上方的块必须补偿 scrollY（摘多高就减多少），否则整页往上跳一截；
      * 下方的块不影响当前视口，直接摘。主块永不摘（见 [WinBlock]）。
+     *
+     * 补偿与游标重算都在 [pruneBusy] 里做完，游标还要等重排落地才算：
+     * `removeView` 只请求重排、本帧不重排，就地滚一屏会立刻重入滚动监听，
+     * 那一刻块顶仍是摘除前的旧值 —— [cursorAt] 于是少算一两块，游标往回退。
+     * 游标一退，[toNext] / [toPrevious] 的 `cursor ± 1` 就整整错一章。
      */
     fun pruneWindow() {
-        if (win.size <= 1) return
+        if (pruneBusy || win.size <= 1) return
         val drop = ReaderPaging.dropOutside(win.map { it.ch }, cursor, info.chapters.size, index)
         if (drop.isEmpty()) return
+        // 摘之前先量：这是内容整体上移的距离，拿量好的块高直接减，不依赖重排结果。
+        val vpTop = body.scrollY + body.paddingTop
+        var lift = 0
         for (ch in drop) {
             val i = win.indexOfFirst { it.ch == ch }
             if (i < 0) continue
             val b = win[i]
             if (b.body === tv) continue
-            // 摘之前先量它有多高：它上面的章要按这个高度把 scrollY 补回去。
-            val span = blockSpan(i)
-            val above = childTopIn(body, b.head) < body.scrollY + body.paddingTop
+            if (childTopIn(body, b.head) < vpTop) lift += blockSpan(i)
             win.removeAt(i)
             chapCol.removeView(b.head)
             chapCol.removeView(b.body)
-            if (above && span > 0) body.scrollTo(0, (body.scrollY - span).coerceAtLeast(0))
         }
         publishWindow()
-        syncChapBounds()
+        if (lift <= 0) {
+            syncChapBounds()
+            return
+        }
+        // 摘掉的块在视口上方：整页要往上贴回这么多。减法是量好的块高，与布局无关，
+        // 可以就地生效；但重排落地前不许再反查章号，[pruneBusy] 把这段空窗堵上。
+        pruneBusy = true
+        body.scrollTo(0, (body.scrollY - lift).coerceAtLeast(0))
+        val settle = pruneSettle
+        if (settle == null) {
+            pruneBusy = false
+            syncChapBounds()
+        } else settle()
     }
 
     /**
@@ -802,7 +847,8 @@ internal fun MainActivity.showReader(
      */
     fun prependPrev() {
         val first = win.firstOrNull() ?: return
-        if (prependBusy) return
+        // 摘块的补偿还没落地时也不前插：两次位移落进同一帧，互相把对方的 scrollY 盖掉。
+        if (prependBusy || pruneBusy) return
         // 游标还没退到窗口首块：它上面那章已经在屏上，不用再补。
         if (cursor > first.ch) return
         val prev = first.ch - 1
@@ -856,6 +902,19 @@ internal fun MainActivity.showReader(
         readerOffset = body.scrollY
         onCursor?.invoke(at)
         saveProgress(info, at, rememberBook = false)
+    }
+
+    /** 摘块收尾（见 [pruneWindow]）：等重排落地再反查章号。 */
+    pruneSettle = {
+        // 重排之后、绘制之前：去掉的块已经不占位，这时的块顶反查出来的章号才准。
+        placeBeforeDraw {
+            pruneBusy = false
+            syncChapBounds()
+            applyCursor(cursorAt())
+            body.scrollY
+        }
+        // 兜底：PreDraw 万一没跑到（视图被摘），别把摘块永久锁死。
+        body.postDelayed({ pruneBusy = false }, 400L)
     }
 
     fun chapterPending(): Boolean = ReaderUi.pendingToken != null
@@ -1011,15 +1070,17 @@ internal fun MainActivity.showReader(
     /** 往下滚到章末：窗口末尾再往下就是换屏换章。 */
     fun toNext() {
         if (chapterPending()) return
-        // 从游标往后找。只用游标，不能看窗口末章：章短于一屏时建屏就会预填到 N+2，
+        // 以视口所在章为基准。不能看窗口末章：章短于一屏时建屏就会预填到 N+2，
         // 按 win.last+1 取就是「跳章」——读者停在 N，一次越界拖拽直接跳过 N+1。
         // 也不能用建屏时的 index：连续滚动进了后一章，index 就不再是读者停的位置。
-        val from = cursor + 1
+        // 更不能用 cursor：摘块补偿那一帧它还在上一章，cursor+1 会整整差一章。
+        val at = vpChapter()
+        val from = at + 1
         val next = (from until info.chapters.size).firstOrNull { !info.chapters[it].locked }
         if (next == null) { ReaderAuto.stop(); toast("已是最后一章"); return }
         // 邻章已在后台取：等 appendNext 的回调把它接到窗口末尾。到边换屏只会二次拉取 + 整屏重排。
         // 取失败时回调第一行就 loading.remove(next)，那时再戳一下才走 preview 兜底。
-        if (next == cursor + 1 && loading.contains(next)) {
+        if (next == at + 1 && loading.contains(next)) {
             com.watchdl.core.DevLog.log("Reader", "awaitFetch idx=$next")
             return
         }
@@ -1031,8 +1092,8 @@ internal fun MainActivity.showReader(
     /** 往上到窗口之前的章：再往上要新取一章，只能换屏。 */
     fun toPrevious() {
         if (chapterPending()) return
-        // 同 toNext：窗口首块可能已经前插到 N-1，按它取就是跨两章。游标才是读者停的位置。
-        val from = cursor
+        // 同 toNext：窗口首块可能已经前插到 N-1，按它取就是跨两章；cursor 可能还停在上一章。
+        val from = vpChapter()
         if (from <= 0) { toast("已是第一章"); return }
         if (loading.contains(from - 1)) {
             com.watchdl.core.DevLog.log("Reader", "awaitFetch prev=$from")
@@ -1569,7 +1630,9 @@ internal fun MainActivity.showReader(
         val prevY = readerOffset
         readerOffset = y
         // 游标跟着滚动走：进窗口里别的块就把章号、标题、进度切到那一章。
-        if (win.size > 1) {
+        // 摘块补偿期间块顶是摘除前的旧值，这时一律不算游标（见 [pruneWindow]）；
+        // 补偿落定后由 pruneWindow 自己重算一次。
+        if (win.size > 1 && !pruneBusy) {
             syncChapBounds()
             applyCursor(cursorAt())
             // 游标一动，离窗的块就该摘了：不摘窗口会一路长下去。

@@ -53,6 +53,16 @@ class FanqieApp(
             "https://api5-normal-lf.fqnovel.com",
             "https://api5-normal-sinfonlinec.fqnovel.com",
         )
+        /**
+         * 目录主机的进程内端点池。
+         *
+         * 以前是 `attempt % DIR_HOSTS.size` 顺序轮：坏的那台每次都要白等一个超时
+         * （最长 25 秒），而它下一轮还会被轮到。改成按健康度取用：连续失败就临时
+         * 剔除，冷却到期自动放回（**不永久删** —— 间歇故障会自己恢复）。
+         * 池是进程级的：一次取目录踩到的坏主机，下一次取目录不必再踩。
+         */
+        private val dirPool = EndpointPool(DIR_HOSTS)
+
         private const val HOST_CONTENT = "https://novel.snssdk.com"
         private const val HOST_SEARCH = "https://api.fanqiesdk.com"
 
@@ -136,7 +146,8 @@ class FanqieApp(
             val remain = left()
             // 不够一次有效尝试就收手：前几次已经全超时，再来一次也一样，只是多等一份预算。
             if (remain < 1_500) break
-            val host = DIR_HOSTS[attempt % DIR_HOSTS.size]
+            // 端点池取用：健康度优先、同分轮转。坏主机由池子临时剔除，不再每轮踩一次。
+            val host = dirPool.take()
             val url = "$host/reading/bookapi/directory/all_items/v" +
                 "?book_type=0&item_data_list_md5=&catalog_data_md5=&book_id=$bookId" +
                 "&book_info_md5=&need_version=true&device_id=$dev" + DIR_Q
@@ -144,7 +155,13 @@ class FanqieApp(
                 signedGet(url, aid = 1967, ua = UA_DIR, timeoutMs = remain.toInt()).body
             }.getOrNull()
             items = body?.let { TinyJson.objects(it, "item_data_list") } ?: emptyList()
-            if (items.isNotEmpty()) break
+            // 空目录也是失败信号：软限流时正是 HTTP 200 + code 0 + 无 item_data_list，
+            // 与 TLS 握手失败一样该扣这台主机的分。
+            if (items.isNotEmpty()) {
+                dirPool.good(host)
+                break
+            }
+            dirPool.bad(host)
             val wait = minOf(700L * (attempt + 1), left())
             if (wait <= 0) break
             Thread.sleep(wait)
@@ -267,4 +284,85 @@ class FanqieApp(
     private fun latin1(b: ByteArray): String = String(CharArray(b.size) { (b[it].toInt() and 0xFF).toChar() })
 
     private fun strBytes(s: String): ByteArray = ByteArray(s.length) { (s[it].code and 0xFF).toByte() }
+}
+
+/**
+ * 主机健康度池。
+ *
+ * 记分：成功 +1（封顶 [MAX_SCORE]），失败 -1（下限 [MIN_SCORE]）。
+ * 连续失败 [EVICT_AFTER] 次即临时剔除 [cooldownMs] 毫秒，到期自动放回并复位；
+ * 成功一次也立刻清零连败。
+ *
+ * 取用在未剔除的主机里挑分数最高的一档，同分轮转（[cursor]），
+ * 免得请求全压在列表头一台 —— 顺序轮的意义就在这里，丢掉它就退化成固定主机。
+ */
+internal class EndpointPool(
+    private val hosts: List<String>,
+    private val cooldownMs: Long = 90_000L,
+) {
+    companion object {
+        const val MAX_SCORE = 3
+        const val MIN_SCORE = -3
+        const val EVICT_AFTER = 2
+    }
+
+    private class St(var score: Int = 0, var streak: Int = 0, var until: Long = 0L)
+
+    private val lock = Any()
+    private val states = LinkedHashMap<String, St>().apply { hosts.forEach { put(it, St()) } }
+    private var cursor = 0
+
+    /**
+     * 取一台可用主机。
+     *
+     * 全员都在冷却时解冻最早到期的那台再试一次，而不是抛错：本机到
+     * `sinfonlineb` 的握手失败是间歇性的，同一台重试常常就通。
+     * 一次网络抖动不该被放大成「整本书取不到目录」。
+     */
+    fun take(): String {
+        synchronized(lock) {
+            if (states.isEmpty()) error("端点池为空：没有配置任何主机")
+            val now = System.currentTimeMillis()
+            states.values.forEach { if (it.until != 0L && it.until <= now) { it.until = 0L; it.streak = 0 } }
+            val live = states.entries.filter { it.value.until == 0L }
+            if (live.isEmpty()) {
+                val h = states.entries.minByOrNull { it.value.until }!!.key
+                states.getValue(h).apply { until = 0L; streak = 0 }
+                return h
+            }
+            val best = live.maxOf { it.value.score }
+            val cands = live.filter { it.value.score == best }
+            val h = cands[cursor % cands.size].key
+            cursor = (cursor + 1) and 0x3FFFFFFF
+            return h
+        }
+    }
+
+    /** 成功：加分、清连败、解除冷却。 */
+    fun good(host: String) {
+        synchronized(lock) {
+            states[host]?.apply {
+                score = minOf(score + 1, MAX_SCORE)
+                streak = 0
+                until = 0L
+            }
+        }
+    }
+
+    /** 失败（请求抛错，或 HTTP 200 但目录为空）：扣分，连败到 [EVICT_AFTER] 次就冷却剔除。 */
+    fun bad(host: String) {
+        synchronized(lock) {
+            states[host]?.apply {
+                score = maxOf(score - 1, MIN_SCORE)
+                streak++
+                if (streak >= EVICT_AFTER) until = System.currentTimeMillis() + cooldownMs
+            }
+        }
+    }
+
+    /** 当前可用主机数（0 表示全员冷却中）。只给自检用。 */
+    fun liveCount(): Int = synchronized(lock) {
+        val now = System.currentTimeMillis()
+        states.values.count { it.until == 0L || it.until <= now }
+    }
 }

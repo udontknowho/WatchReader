@@ -129,6 +129,58 @@ fun main() {
                 "实际 ${st?.statuses?.get(0)}")
         }
 
+        println("[Downloader] 错误页不算成功（关键词 + 长度双重判定）")
+        // 风控/错误页：短正文 + 错误字样。不判的话它会当成功写进 jsonl，
+        // 进度显示全部完成，打开全是「下载失败，请重试」。
+        // 反向用例同样必要：正文里出现「请求失败」四个字但章很长，那是真章节，不能尊杀。
+        fun longChapterBody(s: String) = "<p>$s" + "正文填充".repeat(400) + "</p>"
+        run {
+            val eStore = JobStore(root.resolve("errpage"))
+            val eBook = BookJob("ep1", "错误页书", "作者",
+                (1..4).map { ChapterRef("e$it", "第${it}章", false) })
+            val r = Downloader(eStore, fetchChapter = { ch -> when (ch.itemId) {
+                "e1" -> "<p>下载失败，请稍后重试</p>"
+                "e2" -> "<p>访问太频繁，请稍后再试</p>"
+                else -> longChapterBody("他打开浏览器验证了心中的猜想，请求失败的消息让他愣住了")
+            } }, log = {}, sleep = {}).run(eBook)
+            val st = Downloader.restore(eStore, "ep1")!!
+            check("短正文 + 关键词 → FAILED",
+                st.statuses[0] == ChapterStatus.FAILED && st.statuses[1] == ChapterStatus.FAILED,
+                "实际 ${st.statuses[0]} / ${st.statuses[1]}")
+            check("长正文 + 同一关键词 → DONE（不误杀）",
+                st.statuses[2] == ChapterStatus.DONE && st.statuses[3] == ChapterStatus.DONE,
+                "实际 ${st.statuses[2]} / ${st.statuses[3]}")
+            check("错误页不落盘", !eStore.readChapters("ep1").containsKey("e1"))
+            check("正常章照旧落盘", eStore.readChapters("ep1").containsKey("e3"))
+            check("统计对得上", r.success == 2 && r.failed == 2, "成功 ${r.success} / 失败 ${r.failed}")
+            check("长度门槛 = 4 倍最小字数",
+                Downloader.BODY_ERROR_MAX_CHARS == Downloader.MIN_BODY_CHARS * 4)
+        }
+
+        println("[FanqieApp] 目录端点池")
+        run {
+            val pool = EndpointPool(listOf("A", "B", "C"), cooldownMs = 200L)
+            check("初始三台全可用", pool.liveCount() == 3, "可用 ${pool.liveCount()}")
+            val a = pool.take()
+            val b = pool.take()
+            check("同分轮转，不连着取同一台", a != b, "$a / $b")
+            pool.bad(a); pool.bad(a)
+            check("连败两次即临时剔除", pool.liveCount() == 2, "可用 ${pool.liveCount()}")
+            check("剔除后取不到它", (0 until 4).all { pool.take() != a })
+            pool.bad(b); pool.bad(b)
+            check("第二台连败也被剔除", pool.liveCount() == 1, "可用 ${pool.liveCount()}")
+            Thread.sleep(250)
+            check("冷却到期自动放回（不永久删）", pool.liveCount() == 3, "可用 ${pool.liveCount()}")
+            // 全员冷却时不能把「取目录」直接搞死：解冻最早到期的那台再试一次。
+            val p2 = EndpointPool(listOf("X", "Y"), cooldownMs = 60_000L)
+            repeat(2) { p2.bad("X"); p2.bad("Y") }
+            check("全员冷却时可用数为 0", p2.liveCount() == 0, "可用 ${p2.liveCount()}")
+            val revived = p2.take()
+            check("全员冷却仍能取到一台，不抛错", revived == "X", revived)
+            check("取用即解冻", p2.liveCount() == 1, "可用 ${p2.liveCount()}")
+            check("未配置主机要报错", runCatching { EndpointPool(emptyList()).take() }.isFailure)
+        }
+
         println("[Downloader] 续传不重复下载")
         // 注意：必须用新计数器测新实例——用旧变量会读到第一次那个 lambda 的值
         var resumeCalls = 0

@@ -478,6 +478,10 @@ class MainActivity : Activity() {
     /** 更新平台主题、窗口及常驻根布局；调用方随后重建当前页。 */
     private fun applyAppTheme(palette: Palette) {
         Md3.applyPalette(palette)
+        // 几何随配色族变（米族换一套形状），所以必须排在 applyPalette 之后：
+        // load() 靠 palette.id 反查族，顺序反了就永远选到默认族，而且不报错、不崩。
+        // 本函数的每个调用点随后都会重建当前页，改完不会留下半新半旧的视图。
+        Md3.load(this)
         val night = palette.dark
         val style = appThemeStyle(palette)
         // 重建 Theme 对象，避免从深色切浅色时残留父主题属性。

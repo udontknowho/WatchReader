@@ -320,8 +320,10 @@ object Widgets {
                 }
                 setOnClickListener { onPick(opt.id) }
             }
+            // 段间 8 dp。两枚 chip 等分整行，540 dp 屏上各占 243 dp，原来的 4 dp 缝
+            // 在手机上看着就是两个按钮贴在一起（实测缝宽 8 px）。8 dp 与全局间距刻度同档。
             row.addView(chip, LinearLayout.LayoutParams(0, Md3.dp(ctx, 26), 1f).apply {
-                leftMargin = if (i == 0) 0 else Md3.dp(ctx, 4)
+                leftMargin = if (i == 0) 0 else Md3.dp(ctx, 8)
             })
         }
         return row
@@ -1039,10 +1041,20 @@ object Widgets {
      * 图标走 [Icons] 矢量图，标签仍是文字：手表上光图标分不清「书架」与「发现」。
      */
     fun navBar(ctx: Context, items: List<Triple<String, String, Boolean>>, onSelect: ((Int) -> Unit)? = null): LinearLayout {
+        // 米族底栏与正文同底色，靠顶部一条 1 dp 发丝线分层。GradientDrawable 画不出单边描边，
+        // 用 LayerDrawable 把线贴在顶上。MD3 走 surfaceContainer 一整块，不要线。
+        val mxNav = Md3.miuixGeo
         val nav = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            background = Md3.bg(Md3.surfaceContainer, 0)
+            background = if (mxNav) {
+                val layer = android.graphics.drawable.LayerDrawable(arrayOf(
+                    android.graphics.drawable.GradientDrawable().apply { setColor(Md3.surface) },
+                    android.graphics.drawable.GradientDrawable().apply { setColor(Md3.outlineVariant) }))
+                layer.setLayerGravity(1, Gravity.TOP or Gravity.FILL_HORIZONTAL)
+                layer.setLayerHeight(1, Md3.dp(ctx, 1))
+                layer
+            } else Md3.bg(Md3.surfaceContainer, 0)
             // 高度 64dp 内只放得下 32dp 指示器 + 4dp + 标签，上下不再加固定内边距，
             // 交给格子的 gravity=CENTER 居中 —— 写 12/16 会把内容顶出容器。
         }
@@ -1051,8 +1063,22 @@ object Widgets {
             // 图标坐在 secondaryContainer 胶囊里，所以取 onSecondaryContainer；
             // 标签在胶囊下方、不在胶囊里，取 onSurface。
             // 之前两者都吃 onSecondaryContainer，标签成了胶囊外挂的一行淡紫字。
-            val iconTint = if (active) Md3.onSecondaryContainer else Md3.onSurfaceVariant
-            val labelTint = if (active) Md3.onSurface else Md3.onSurfaceVariant
+            //
+            // 米族不画胶囊，选中态只靠颜色：图标与标签转 primary，未选中压到 40% 透明 ——
+            // 这是 HyperOS 底栏的做法，与 M3 的「胶囊 + 原色文字」是两套语汇。
+            val dim = 0x66 shl 24
+            val iconTint = when {
+                mxNav && active -> Md3.primary
+                mxNav -> (Md3.onSurfaceVariant and 0x00FFFFFF) or dim
+                active -> Md3.onSecondaryContainer
+                else -> Md3.onSurfaceVariant
+            }
+            val labelTint = when {
+                mxNav && active -> Md3.primary
+                mxNav -> (Md3.onSurfaceVariant and 0x00FFFFFF) or dim
+                active -> Md3.onSurface
+                else -> Md3.onSurfaceVariant
+            }
             val cell = Md3.column(ctx).apply {
                 gravity = Gravity.CENTER
                 background = Md3.ripple(ctx, Color.TRANSPARENT, 0f)
@@ -1070,7 +1096,8 @@ object Widgets {
             // 结果屏上置成 46dp 的扁块。格子 63dp 放 64dp 胶囊差 1dp，
             // 居中后左右各溢 0.5dp，被裁掉的是圆弧端点，看不出束。
             val ind = FrameLayout(ctx).apply {
-                background = if (active) Md3.bg(Md3.secondaryContainer, Md3.NAV_IND_H / 2f) else null
+                // 米族不画胶囊：图标直接坐在格子里（跟 HyperOS 一致）。
+                background = if (active && !mxNav) Md3.bg(Md3.secondaryContainer, Md3.NAV_IND_H / 2f) else null
             }
             val ico: View = if (icon != null) {
                 Icons.view(ctx, icon, iconTint, Md3.ICON_ACTION).apply {
@@ -1091,7 +1118,7 @@ object Widgets {
             cell.addView(cellInd, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, Md3.dp(ctx, Md3.NAV_IND_H)))
             // 指示器到标签 4dp。标签也撑满格子并居中，不与图标各自的偏移叠在一起。
-            cell.addView(Md3.text(ctx, label, Md3.FS_LABEL, labelTint).apply {
+            cell.addView(Md3.text(ctx, label, Md3.FS_LABEL, labelTint, bold = mxNav && active).apply {
                 gravity = Gravity.CENTER
                 maxLines = 1
                 isSingleLine = true

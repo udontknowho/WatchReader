@@ -28,31 +28,51 @@ internal fun MainActivity.attachTabs(active: Int) {
     // 收起来会把唯一出口一起收走。
     if (rootTab) Widgets.autoHideHeader(this, root)
 
-    val nav = com.watchdl.ui.theme.Md3.row(this)
-    nav.setPadding(0, 0, 0, 0)
-    listOf("书架", "发现", "下载", "设置").forEachIndexed { i, label ->
-        val chosen = i == selected
-        val cell = com.watchdl.ui.theme.Md3.text(this, label,
-            com.watchdl.ui.theme.Md3.FS_LABEL,
-            if (chosen) com.watchdl.ui.theme.Md3.primary else com.watchdl.ui.theme.Md3.onSurfaceVariant,
-            bold = chosen).apply {
-            gravity = android.view.Gravity.CENTER
-            contentDescription = "$label${if (chosen) "，当前栏" else "，切换栏"}"
-            background = com.watchdl.ui.theme.Md3.ripple(this@attachTabs,
-                if (chosen) com.watchdl.ui.theme.Md3.surfaceContainerHigh else android.graphics.Color.TRANSPARENT,
-                com.watchdl.ui.theme.Md3.R_GRID.toFloat())
-            isClickable = true
-            setOnClickListener {
-                if (i == selected) scrollToTop(root) else when (i) {
-                    0 -> showShelf()
-                    1 -> showDiscover()
-                    2 -> showDownloads()
-                    else -> showSettingsRoot()
-                }
+    val nav: View
+    if (com.watchdl.ui.theme.Md3.phoneTier) {
+        // 手机档：图标 + 标签的底栏。胶囊、着色、分割线、高度全由 navBar 按族决定。
+        // 底栏高度 80（默认族）/ 64（米族）取自 Md3.NAV，不再写死 28。
+        nav = Widgets.navBar(this, listOf(
+            Triple("shelf", "书架", selected == 0),
+            Triple("explore", "发现", selected == 1),
+            Triple("download", "下载", selected == 2),
+            Triple("settings", "设置", selected == 3))) { i ->
+            if (i == selected) scrollToTop(root) else when (i) {
+                0 -> showShelf()
+                1 -> showDiscover()
+                2 -> showDownloads()
+                else -> showSettingsRoot()
             }
         }
-        nav.addView(cell, android.widget.LinearLayout.LayoutParams(0,
-            com.watchdl.ui.theme.Md3.dp(this, 28), 1f))
+    } else {
+        // 手表档：189×248 上放不下图标 + 标签，仍是 28 dp 的文字标签条（本档一行不动）。
+        val row = com.watchdl.ui.theme.Md3.row(this)
+        row.setPadding(0, 0, 0, 0)
+        listOf("书架", "发现", "下载", "设置").forEachIndexed { i, label ->
+            val chosen = i == selected
+            val cell = com.watchdl.ui.theme.Md3.text(this, label,
+                com.watchdl.ui.theme.Md3.FS_LABEL,
+                if (chosen) com.watchdl.ui.theme.Md3.primary else com.watchdl.ui.theme.Md3.onSurfaceVariant,
+                bold = chosen).apply {
+                gravity = android.view.Gravity.CENTER
+                contentDescription = "$label${if (chosen) "，当前栏" else "，切换栏"}"
+                background = com.watchdl.ui.theme.Md3.ripple(this@attachTabs,
+                    if (chosen) com.watchdl.ui.theme.Md3.surfaceContainerHigh else android.graphics.Color.TRANSPARENT,
+                    com.watchdl.ui.theme.Md3.R_GRID.toFloat())
+                isClickable = true
+                setOnClickListener {
+                    if (i == selected) scrollToTop(root) else when (i) {
+                        0 -> showShelf()
+                        1 -> showDiscover()
+                        2 -> showDownloads()
+                        else -> showSettingsRoot()
+                    }
+                }
+            }
+            row.addView(cell, android.widget.LinearLayout.LayoutParams(0,
+                com.watchdl.ui.theme.Md3.dp(this, 28), 1f))
+        }
+        nav = row
     }
     root.addView(nav)
     tabActive = if (rootTab) selected else -1

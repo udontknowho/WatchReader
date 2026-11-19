@@ -77,6 +77,17 @@ object Md3 {
     /** 当前主题，供设置页标选中态。 */
     var palette: Palette = Palette.all[0]; private set
 
+    /**
+     * 当前几何是否走米族（MIUIX）那套。由 [load] 写入，随主题切换重算。
+     *
+     * 只影响形状（边距、圆角、底栏高度），颜色一律由 [applyPalette] 决定。
+     * 因此 [load] 必须排在 [applyPalette] 之后调用：这里靠 palette.id 反查族。
+     */
+    var miuixGeo = false; private set
+
+    /** 手机/平板档为 true，手表档为 false。由 [load] 写入，底栏据此换形态。 */
+    var phoneTier = false; private set
+
     /** 灌一套配色。调用方负责落盘与重画。 */
     fun applyPalette(selected: Palette) {
         // 直接采用传入的配色。以前这里丢弃参数、按硬编码常量重建日/夜两套，
@@ -161,17 +172,34 @@ object Md3 {
         // 调用点一律写 dp —— 以前令牌直接当 px 塞进去，2.0 密度下所有圆角只有标称值一半。
         densityScale = ctx.resources.displayMetrics.density
         val w = ctx.resources.configuration.screenWidthDp
+        // 两轴正交：颜色 = 族 × 亮度（[applyPalette] 灌），形状 = 族 × 档位（这里选）。
+        // 亮度不参与形状，所以四套配色只有两套几何。
+        // 手表档不认族：189×248 上两套几何挤不出差别，且手表是逐屏调过的。
+        miuixGeo = w >= 320 && Palette.family(palette.id) == Palette.FAMILY_MIUIX
+        phoneTier = w >= 320
         if (w >= 320) {
-            PAD = if (w >= 600) 24 else 16
-            GAP = 8; TOP_BAR = 48; SEARCH = 44; BTN = 40
-            ITEM = 48; ITEM_TALL = 60; TAP = 40; HIT = 40
+            GAP = 8; BTN = 40
             FS_XL = 22f; FS_LG = 16f; FS_MD = 14f; FS_SM = 12f; FS_LABEL = 12f
-            NAV = 80
             TAB_H = 48
             HEADER_H = 34
             NAV_DOT_H = 12
             NAV_DOT = 4f
-            NAV_IND_W = 64
+            if (miuixGeo) {
+                // 米族（MIUIX / HyperOS）手机档：密度高、圆角大、底栏收窄成 64。
+                PAD = if (w >= 600) 24 else 12
+                TOP_BAR = 56; SEARCH = 40
+                ITEM = 56; ITEM_TALL = 60; TAP = 44; HIT = 44
+                NAV = 64; NAV_IND_W = 56
+                R_XS = 6; R_GRID = 12; R_CARD = 16; R_ITEM = 14; R_LG = 20; R_XL = 32
+            } else {
+                // 默认族（MD3）手机档：M3 规范原值 —— 应用栏 64、搜索 56、双行列表 72，
+                // 触控目标 48（M3 硬下限，原值 40 不符合规范）。
+                PAD = if (w >= 600) 24 else 16
+                TOP_BAR = 64; SEARCH = 56
+                ITEM = 56; ITEM_TALL = 72; TAP = 48; HIT = 48
+                NAV = 80; NAV_IND_W = 64
+                R_XS = 4; R_GRID = 8; R_CARD = 12; R_ITEM = 12; R_LG = 16; R_XL = 28
+            }
         } else {
             GAP = 6; TOP_BAR = 36; SEARCH = 32; BTN = 32
             ITEM = 36; ITEM_TALL = 44; TAP = 32; HIT = 32
@@ -183,16 +211,26 @@ object Md3 {
             NAV_DOT = 3f
             NAV_IND_W = 48
             PAD = 10
+            // 手表档不分族：圆角写回 M3 那套，免得从米族切过来时带着 MIUIX 的圆角。
+            R_XS = 4; R_GRID = 8; R_CARD = 12; R_ITEM = 12; R_LG = 16; R_XL = 28
         }
     }
 
     // 圆角取 M3 shape scale：extra-small 4 / small 8 / medium 12 / large 16 / extra-large 28。
-    val R_XS = 4             // extraSmall：角标、小标签
-    val R_GRID = 8           // 网格项 / 角标标签（small）
-    val R_CARD = 12          // 分组卡 / 大块容器（medium）
-    val R_ITEM = 12          // 列表卡 / 菜单项（medium）
-    val R_LG = 16            // large：抽屉、侧栏容器
-    val R_XL = 28            // extraLarge：对话框、全屏 Sheet
+    // 数值随族变（米族用 MIUIX 的 6/12/16/14/20/32），所以是 var —— 由 [load] 写入。
+    // 默认值保持 M3 那套：手表档与 MD3 档都用它。
+    var R_XS = 4             // extraSmall：角标、小标签
+        private set
+    var R_GRID = 8           // 网格项 / 角标标签（small）
+        private set
+    var R_CARD = 12          // 分组卡 / 大块容器（medium）
+        private set
+    var R_ITEM = 12          // 列表卡 / 菜单项（medium）
+        private set
+    var R_LG = 16            // large：抽屉、侧栏容器
+        private set
+    var R_XL = 28            // extraLarge：对话框、全屏 Sheet
+        private set
 
     // 图标：M3 顶栏动作、导航项、列表前导都是 24dp。
     val ICON_ACTION = 24

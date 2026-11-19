@@ -93,5 +93,42 @@ fun main() {
         }
         eq(maxSize <= 4, true)
     }
+    // ── 摘块补偿：游标不许因摘块而退章 ────────────────────
+    // 窗口 [4,5,6,7]（每块高 800），读者已经滚进第 7 章。
+    val w4 = listOf(4 to 0, 5 to 800, 6 to 1600, 7 to 2400)
+    val vp7 = 2500
+    eq(ReaderPaging.cursorAt(w4, vp7, 4), 7)
+    // 该摘的只有视口上方的 4 与 5；7 是当前章，不进摘除名单。
+    eq(ReaderPaging.dropOutside(listOf(4, 5, 6, 7), 7, 12, null), listOf(4, 5))
+    eq(ReaderPaging.dropOutside(listOf(4, 5, 6, 7), 7, 12, 4), listOf(5))
+    eq(ReaderPaging.dropOutside(listOf(4, 5, 6, 7), 7, 12, 7), listOf(4, 5))
+    // 摘掉 4、5 之后内容整体上移 1600：scrollY 减同一数、块顶也减同一数，
+    // 反查出来的章号必须还是 7。这就是补偿与重算都要等重排落地才做的原因。
+    val after = w4.filter { it.first >= 6 }.map { it.first to (it.second - 1600) }
+    eq(ReaderPaging.cursorAt(after, vp7 - 1600, 6), 7)
+    // 对照：拿摘除前的旧块顶去查减过 lift 的视口，会退成 5 —— 退两章。
+    // 旧写法就是在这里把游标算歪的（「跳到上两章」）。
+    eq(ReaderPaging.cursorAt(w4, vp7 - 1600, 6), 5)
+    eq(ReaderPaging.windowAround(5, 12).contains(5), true)
+
+    // ── 视口落在哪一块，章号就是哪一块 ────────────────────
+    val b3 = listOf(4 to 0, 5 to 800, 6 to 1600)
+    eq(ReaderPaging.cursorAt(b3, 800, 4), 5)      // 块顶那一刻就归这一章
+    eq(ReaderPaging.cursorAt(b3, 1200, 4), 5)     // 整块之内都算 5
+    eq(ReaderPaging.cursorAt(b3, 1599, 4), 5)
+    eq(ReaderPaging.cursorAt(b3, 1600, 4), 6)     // 跨过块顶才归 6
+
+    // ── 连续下滚 20 章：每步章号 == 视口所在块，换章只走紧邻的一块 ────
+    run {
+        val span = 800
+        for (k in 1..20) {
+            val list = listOf(k - 1 to (k - 1) * span, k to k * span, k + 1 to (k + 1) * span)
+            val vp = k * span + span / 2
+            val at = ReaderPaging.cursorAt(list, vp, 0)
+            eq(at, k)
+            // 换章取「视口章的下一章」：窗口里紧邻的那一块，不能隔章。
+            eq(list.first { it.first > at }.first, at + 1)
+        }
+    }
     println("ReaderPagingTest: $checks checks passed")
 }

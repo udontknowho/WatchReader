@@ -405,6 +405,13 @@ class Downloader(
         if (html.isBlank()) error("正文为空")
         val chars = bodyChars(html)
         if (chars < MIN_BODY_CHARS) error("正文过短（${title.take(12)} 仅 ${chars} 字）")
+        // 错误页识别：短正文里出现「下载失败」这类字样，说明取到的是风控/错误页，
+        // 不是正文。不判的话它会当成功写进 jsonl，进度显示全部完成、打开全是提示语。
+        // 长度门槛见 [BODY_ERROR_MAX_CHARS]：长正文不查，防误杀。
+        if (chars < BODY_ERROR_MAX_CHARS) {
+            val marker = bodyErrorMarker(html)
+            if (marker != null) error("正文是错误页（${title.take(12)} 命中“$marker”，仅 ${chars} 字）")
+        }
         return chars
     }
 
@@ -474,6 +481,39 @@ class Downloader(
          * 阈值与 e2e 第 6 段「正文完整」同一口径。
          */
         const val MIN_BODY_CHARS = 300
+
+        /**
+         * 错误页判定的长度上限：只有正文短于这个数才查关键词（[MIN_BODY_CHARS] 的 4 倍，即 1200 字）。
+         *
+         * 为什么必须叠长度：只凭关键词会误杀。正常章节里出现「浏览器」「验证」这类词
+         * 是文风问题，不是错误页；而错误页/风控页**只可能是短的**——番茄正常一章
+         * 4000~13000 字（见 [FanqieApp.content] 的注释），错误页往往几十到几百字。
+         * 两头夹住（≥300 且 <1200）才查关键词，长正文一律放行：宁可漏杀，不冤枉一章。
+         */
+        const val BODY_ERROR_MAX_CHARS = MIN_BODY_CHARS * 4
+
+        /**
+         * 错误页标记。前四条直接取自第三方实现（`fanqienovel-downloader/src/server.py:1013`）。
+         *
+         * 后几条是同类页面的必备字样：JS 挑战页、人机验证、章节已删。
+         * **不收裸词「浏览器」「验证」**：它们在正文里太常见（「他打开浏览器」「验证心中猜想」），
+         * 收了就是白送误杀。
+         */
+        private val BODY_ERROR_MARKERS = listOf(
+            "下载失败", "获取失败", "请求失败", "访问太频繁", "访问频繁",
+            "请开启JavaScript", "浏览器验证", "人机验证", "请输入验证码", "章节不存在",
+        )
+
+        /**
+         * 正文里是否带错误页标记。命中返回标记本身（写进错误文案，便于归因），否则 null。
+         *
+         * 与 [bodyChars] 同口径：先按标签切掉再找，免得属性里的文字误命中。
+         * `ignoreCase` 是给「JavaScript」的各种写法兜底，对汉字无影响。
+         */
+        fun bodyErrorMarker(html: String): String? {
+            val text = html.replace(Regex("<[^>]+>"), "")
+            return BODY_ERROR_MARKERS.firstOrNull { text.contains(it, ignoreCase = true) }
+        }
 
         /**
          * [restoreLight] 的解析结果快照。
