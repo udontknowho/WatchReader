@@ -173,13 +173,6 @@ internal object ReaderUi {
     val heads: MutableList<TextView> = ArrayList()
 
     /**
-     * 屏上已经有一页占位页（书架点击进来的「正在打开书籍…」）。
-     *
-     * [preview] 建临时页前先看它：已经有一页等着，再建一页就是白做一屏重活。
-     */
-    var holdPlaceholder = false
-
-    /**
      * 跨章入场方向：[ReaderTransition.FORWARD] 顺读 / [ReaderTransition.BACKWARD] 回读 / 0 不动画。
      *
      * 由 [preview] 在派发换章时置位，[showReader] 读走并立刻清零 —— 只在跨章那一次
@@ -748,6 +741,22 @@ internal fun MainActivity.showReader(
             publishWindow()
             // 块顶要等这一帧排完才有真实高度：先 post，拿不到就下次滚动再算。
             body.post { syncChapBounds() }
+            // 预热链前移：本轮追加后顺手把下一章的 shaping 挪到后台线程，
+            // 翻到它时 take() 命中，addView 那一帧不再整章重排。
+            val ahead = info.chapters.getOrNull(next + 1)
+            if (ahead != null && !ahead.locked) {
+                val pKey = preKey(info, next + 1)
+                val pFp = preFp()
+                body.post {
+                    // 宽度这一帧才准，控件宽为 0 时 build 会直接拒排。
+                    val spec = preSpec(nx)
+                    bg(curScreen, body = {
+                        val rawAhead = loadOpening(info, ahead, src)
+                        ReaderPrecompute.build(pKey, pFp, shownText(rawAhead), spec)
+                        Unit
+                    }) { _ -> }
+                }
+            }
             // 埋点：连续滚动最容易出的错是同一章被追加两遍（预取与 appendNext 各挂一次）。
             // 只在开发者日志开启时落盘，用来数「同一章追加了几次」。
             com.watchdl.core.DevLog.log("Reader", "append idx=$next n=${win.size} chars=${raw.length} h=${scrollLimit(body)}")
@@ -1009,10 +1018,18 @@ internal fun MainActivity.showReader(
     /** 往下滚到章末：窗口末尾再往下就是换屏换章。 */
     fun toNext() {
         if (chapterPending()) return
-        // 从窗口末尾往后找：窗口里的章已经读过，不能按建屏时的 index 重来。
-        val from = (win.lastOrNull()?.ch ?: cursor) + 1
+        // 从游标往后找。只用游标，不能看窗口末章：章短于一屏时建屏就会预填到 N+2，
+        // 按 win.last+1 取就是「跳章」——读者停在 N，一次越界拖拽直接跳过 N+1。
+        // 也不能用建屏时的 index：连续滚动进了后一章，index 就不再是读者停的位置。
+        val from = cursor + 1
         val next = (from until info.chapters.size).firstOrNull { !info.chapters[it].locked }
         if (next == null) { ReaderAuto.stop(); toast("已是最后一章"); return }
+        // 邻章已在后台取：等 appendNext 的回调把它接到窗口末尾。到边换屏只会二次拉取 + 整屏重排。
+        // 取失败时回调第一行就 loading.remove(next)，那时再戳一下才走 preview 兜底。
+        if (next == cursor + 1 && loading.contains(next)) {
+            com.watchdl.core.DevLog.log("Reader", "awaitFetch idx=$next")
+            return
+        }
         cancelMotion()
         ReaderUi.anchor = null
         preview(info, next)
@@ -1021,8 +1038,13 @@ internal fun MainActivity.showReader(
     /** 往上到窗口之前的章：再往上要新取一章，只能换屏。 */
     fun toPrevious() {
         if (chapterPending()) return
-        val from = win.firstOrNull()?.ch ?: cursor
+        // 同 toNext：窗口首块可能已经前插到 N-1，按它取就是跨两章。游标才是读者停的位置。
+        val from = cursor
         if (from <= 0) { toast("已是第一章"); return }
+        if (loading.contains(from - 1)) {
+            com.watchdl.core.DevLog.log("Reader", "awaitFetch prev=$from")
+            return
+        }
         cancelMotion()
         prevChapter(info, from, atEnd = true)
     }
@@ -2246,17 +2268,13 @@ internal fun MainActivity.preview(
     // 换章不清屏（legado 是旧页一直画着、新页就绪后当帧换窗口，
     // `feature/reader/ReaderCanvasSurface.kt:607-636` 的 pendingPageWindow）：
     // 已在阅读页时旧正文继续显着，正文取到后同帧交给 showReader 替换。
-    // 先铺一页「正在取正文…」再整屏重建，就是每换一章闪两下的根源。
-    // 书架进来的那一跳，屏上已经有「正在打开书籍…」占位页（[readShelfBook] 刚建好），
-    // 这里再建一页就是白丢一屏重活；[ReaderUi.holdPlaceholder] 由那边置位。
-    val held = ReaderUi.holdPlaceholder
-    ReaderUi.holdPlaceholder = false
-    if (curScreen !is Screen.Reader && !held) {
+    // 不在阅读页时照 legado 只铺底色：`ReadView.onSizeChanged → setBackgroundColor`，
+    // 布局文件里根本没有 loading 控件（activity_book_read.xml 只有 ReadView + 菜单）。
+    // 原来先建一页「正在取正文…」、正文到了再整屏重建，手表上每开一章就多一次整屏布局。
+    if (curScreen !is Screen.Reader) {
         root.removeAllViews()
-        root.addView(Widgets.topBar(this, ch.title, onBack = { showToc(info, src) }))
-        val body = Widgets.scrollBody(this, crownStep, crownGlide)
-        (Widgets.contentColumn(body)).addView(Widgets.emptyState(this, "refresh", "正在取正文…"))
-        root.addView(body)
+        readerBackground = Md3.surface
+        root.setBackgroundColor(readerBackground)
     }
 
     // 读者停在 Toc / Reader 屏上点章节，回来时应该还在原来的屏。

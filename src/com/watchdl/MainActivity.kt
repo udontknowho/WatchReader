@@ -63,7 +63,8 @@ class MainActivity : Activity() {
      */
     private val multiLock = Any()
     @Volatile private var multiCache: MultiSource? = null
-    internal val multi: MultiSource get() = synchronized(multiLock) {
+    // 快路径不取锁：池子建好后读它不该排队。取锁只为了「只建一次」。
+    internal val multi: MultiSource get() = multiCache ?: synchronized(multiLock) {
         multiCache ?: buildMulti().also { multiCache = it }
     }
 
@@ -938,14 +939,14 @@ class MainActivity : Activity() {
      * - **不降级**：[CloudSource.update] 自带的版本比对会跳过旧版。
      */
     private fun syncSourcesOnStart() {
-        // 已有源在跑就不用等它；同步完成后再刷新 multi。
         thread {
+            // 先把源池建好，再谈云端更新：点书路径要的是池子，不是最新版本的池子。
+            // 顺序颠倒（先联网再建池）时，那段等待里点书就得到冷池上现建，
+            // 34 个源文件解析外加设备注册，用户看到的就是「点进去等十几秒」。
+            warmSources()
             val r = runCatching { CloudSource.update(sourcesDir()) }.getOrNull()
             if (r == null || !r.ok) {
                 if (r != null) DevLog.log("WatchDL", "启动同步书源未更新：${r.message}")
-                // 云端没更新（离线、版本相同）也要把池建好。留在第一次点书时建，
-                // 用户看到的就是「点下去先等几十到几百毫秒」。
-                warmSources()
                 return@thread
             }
             // 库变了，multi 缓存的是旧列表 —— 作废重建成新的。
@@ -970,7 +971,9 @@ class MainActivity : Activity() {
     internal fun warmSources(rebuild: Boolean = false): Long {
         val t0 = System.currentTimeMillis()
         val pool = runCatching {
-            if (rebuild) synchronized(multiLock) { buildMulti().also { multiCache = it } } else multi
+            // 重建在**锁外**跑：建一次要解析 34 个源文件，占着锁等于把点书路径按住等它。
+            // multiCache 是 @Volatile，读到的要么是旧的要么是新的，不会是半成品。
+            if (rebuild) buildMulti().also { multiCache = it } else multi
         }.getOrNull()
         val cost = System.currentTimeMillis() - t0
         DevLog.log("WatchDL", "源池${if (rebuild) "重建" else "预热"} $cost ms（${pool?.allNamed()?.size ?: 0} 个源）")
@@ -979,7 +982,8 @@ class MainActivity : Activity() {
 
     /** 把 multi 缓存作废并重读源目录。必须先重建才能拿到新库。 */
     internal fun rebuildSources(then: () -> Unit = {}) {
-        synchronized(multiLock) { multiCache = buildMulti() }
+        // 同 warmSources：建在锁外，只换引用。
+        multiCache = buildMulti()
         then()
     }
 

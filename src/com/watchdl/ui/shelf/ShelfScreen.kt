@@ -560,6 +560,16 @@ internal fun MainActivity.setShelfNewCount(bookId: String, n: Int) {
 private fun MainActivity.openShelfBook(row: ShelfRow) {
     val info = row.favorite?.info ?: BookInfo(row.job.bookId, row.job.name, row.job.author, row.job.chapters)
     if (shelfNewCount(info.bookId) > 0) setShelfNewCount(info.bookId, 0)
+    // 章表已经在手上：row 与书架列表出自同一份快照，job 里就是这本的章表。
+    // 回读 shelf.json + job.json 只是为了拿「可能更新的章表」，不值得挡在正文前面。
+    // 照 legado：点书架直接进阅读页（`onOpenBookshelfBook` → `MainRouteReadBook`）。
+    if (info.chapters.isNotEmpty()) {
+        rememberReturn()
+        com.watchdl.ui.reader.ReaderUi.fromShelf = true
+        preview(info, readProgress(info).coerceIn(0, info.chapters.lastIndex))
+        return
+    }
+    // 没取过目录的书没有正文可读，退回旧行为：进目录去取。
     readShelfBook(info)
 }
 
@@ -617,8 +627,6 @@ internal fun MainActivity.readShelfBook(request: BookInfo) {
                 // coerceIn(0, -1) 会直接抛 IllegalArgumentException。
                 val at = if (info.chapters.isEmpty()) 0
                          else readProgress(info).coerceIn(0, info.chapters.lastIndex)
-                // 上面那页占位页已经建好了，preview 不必再建一页空的。
-                com.watchdl.ui.reader.ReaderUi.holdPlaceholder = true
                 preview(info, at, src = src)
             }
         }.onFailure {
