@@ -75,6 +75,20 @@ fun main() {
     evaluates("模板空值合并", "var t=null; `v=\${t??'none'}`", "v=none")
     evaluates("嵌套模板表达式", "var t=null; `a=\${`b=\${t??'none'}`}`", "a=b=none")
 
+    // 回归：at[] 记录源位置→输出位置的映射，跳过区段（字符串/正则/注释）旧实现没补，
+    // 一旦 exprStart 落在未记录位置（默认 0），`out.setLength(head)` 会把前面已生成的
+    // 输出全部截没，脚本变成语法错。下面把「前缀不许丢」钉住。
+    println("[Es5Compat] 改写不丢前缀")
+    for ((src, prefix) in listOf(
+        "var x=1; 'a'?.b" to "var x=1;",
+        "var s=\"q\"; f(); \"a/b\"?.length ?? 0" to "var s=\"q\"; f();",
+        "/* c */ var t=2; `t\${x}`?.length" to "/* c */ var t=2;",
+        "var n=1; // c\n 2?.toString()" to "var n=1;",
+    )) {
+        val out = Es5Compat.rewrite(src)
+        check("前缀保留：$src", out.startsWith(prefix) && out.contains("void 0"), out)
+    }
+
     if (failures > 0) {
         println("Es5CompatTest: FAIL ($failures)")
         kotlin.system.exitProcess(1)

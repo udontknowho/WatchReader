@@ -15,15 +15,32 @@ import org.mozilla.javascript.ScriptableObject
  * 1. **禁 Java 类访问**（[ClassShutter]）—— 脚本不能 `new java.util.ArrayList()`。
  *    实测 yiove 源里 `Packages.` 出现 310 次，放开的代价是内存与 CPU 完全不可控。
  * 2. **只暴露白名单 API** —— 见 [installApi]，网络、编码这些常用能力。
- * 3. **超时中断** —— 死循环最多跑 [TIMEOUT_MS] 毫秒就被掐断。
+ * 3. **超时中断** —— JS 死循环最多跑 [TIMEOUT_MS] 毫秒（钳在 [MIN_BUDGET_MS]..[MAX_BUDGET_MS]）就被掐断。
+ *    **阻塞在宿主调用上时掐不断**：`observeInstructionCount` 只在 Rhino 解释字节码时回调，
+ *    `java.ajax` 卡在 socket 里不回调，所以单次 HTTP 另有自己的钳制（见 [timeoutOf]）。
+ *    同理，脚本里的**正则字面量**由 java.util.regex 一次跑完，也不回调 —— 那条路靠执行前的
+ *    静态扫描拦（见 [eval] 开头的 [SafeRegex.suspectPatterns]）。
  *
  * 关掉 JIT（`setOptimizationLevel(-1)`）：Android 上生成字节码既慢又占内存，
  * 解释执行对书源这种小脚本足够。
  */
 object JsEngine {
 
-    /** 单次执行上限。手表上宁可不跑，也不能卡住界面。 */
+    /** 单次执行的默认上限。手表上宁可不跑，也不能卡住界面。 */
     private const val TIMEOUT_MS = 2000L
+
+    /**
+     * 脚本预算的钳制区间。
+     *
+     * - 下限 200ms：Rhino 首次调用要加载类并建工厂，比这更短的预算等于必超时，没意义。
+     * - 上限 6000ms：搜索 URL 这类「先握手再搜索」的脚本要串多次 `java.ajax`（uu书库），
+     *   2 秒物理上做不到，所以调用方（SourceEngine）为它放宽到 6 秒。再长用户已经能
+     *   明显感到界面卡住，不如让脚本失败、降级到别的源。
+     *
+     * 两个界限与 [eval] 抛出的超时文案一致：文案报的是**本次实际用的预算**，不是默认值。
+     */
+    private const val MIN_BUDGET_MS = 200L
+    private const val MAX_BUDGET_MS = 6000L
 
     /** 脚本执行失败。调用方应当降级处理，不要把书源整体判死。 */
     class JsError(message: String, cause: Throwable? = null) : Exception(message, cause)
@@ -85,12 +102,21 @@ object JsEngine {
      * @param env 注入的上下文
      * @param budgetMs 脚本预算。默认 2 秒；搜索 URL 这类「先握手再搜索」的脚本
      *   要串多次 `java.ajax`（uu书库），2 秒物理上做不到，由调用方放宽到 6 秒。
+     *   实际生效值钳在 [MIN_BUDGET_MS]..[MAX_BUDGET_MS]。
      */
     fun eval(code: String, env: Env = Env(), budgetMs: Long = TIMEOUT_MS): String {
+        val budget = budgetMs.coerceIn(MIN_BUDGET_MS, MAX_BUDGET_MS)
+        // 脚本里的正则字面量（`/^(a+)+$/.test(s)`）由 Rhino 直接交给 java.util.regex 跑，
+        // 一次调用跑完，**不经过 observeInstructionCount** —— 指数回溯时能把 lane 线程
+        // 永久钉死，而且不抛异常、拦不住。超时管不到，只能在执行前静态扫出来直接拒。
+        val risky = SafeRegex.suspectPatterns(code)
+        if (risky.isNotEmpty()) {
+            throw JsError("脚本含高风险正则（可能把线程钉死）：" + risky.take(3).joinToString("、"))
+        }
         // 死线必须在检测之前立好：以前在 enterContext() 之后才设，而首次调用那次
         // enterContext 要加载 Rhino 的类和建工厂（数百毫秒到数秒），这段不计入预算，
         // 于是「2000ms 超时」实测能跑到 6 秒。自检里就因此偶发不过。
-        Guava.set(System.currentTimeMillis() + budgetMs)
+        Guava.set(System.currentTimeMillis() + budget)
         val cx = GuardedFactory.enterContext()
         try {
             cx.setLanguageVersion(Context.VERSION_ES6)
@@ -99,7 +125,11 @@ object JsEngine {
             // 让 Rhino 定期回调 observeInstructionCount，超时才有机会中断死循环
             cx.instructionObserverThreshold = 1000
 
-            val scope = cx.initSafeStandardObjects(null, false)            // Env 没显式给源地址时，回退到线程本地（字段求值走这条）。
+            val scope = cx.initSafeStandardObjects(null, true)
+            // sealed=true：冻结 Object/Array/Function 等内置原型。
+            // 旧值 false 时脚本能改 `Object.prototype` / `JSON.stringify`，污染同一进程里
+            // 后续所有脚本（源是自己写的第三方代码，没有理由需要改内置原型）。
+            // Env 没显式给源地址时，回退到线程本地（字段求值走这条）。
             val env2 = if (env.sourceKey.isNotEmpty()) env
                        else env.copy(sourceKey = currentSourceKey())
             installApi(cx, scope, env2)
@@ -118,7 +148,8 @@ object JsEngine {
             }
             return Context.toString(v)
         } catch (e: TimeoutSignal) {
-            throw JsError("脚本超时（>${TIMEOUT_MS}ms）", e)
+            // 报本次实际预算，不是默认 2000 —— 搜索 URL 用的 6 秒预算超时了必须看得见。
+            throw JsError("脚本超时（>${budget}ms）", e)
         } catch (e: Exception) {
             throw JsError("脚本出错：${e.message?.take(120)}", e)
         } finally {
@@ -568,9 +599,35 @@ object JsEngine {
         else -> v.toString().toDoubleOrNull()?.toInt() ?: dflt
     }
 
+    /**
+     * 脚本内单次 HTTP 请求的超时。
+     *
+     * 与脚本预算无关：指令计数在 socket 阻塞时不回调，这个钳制是唯一的兜底。
+     * 上限 30s 是给慢站点留的（书源里写 12000 的很多）；下限 1s 以下等于必然超时。
+     */
+    private const val HTTP_TIMEOUT_MS = 8000
+    private const val HTTP_TIMEOUT_MIN_MS = 1000
+    private const val HTTP_TIMEOUT_MAX_MS = 30_000
+
     /** `java.get(url, {}, 12000)` 的第三个参数是超时毫秒。 */
     private fun timeoutOf(a: Array<Any?>): Int =
-        num(a.getOrNull(2), 8000).coerceIn(1000, 30_000)
+        num(a.getOrNull(2), HTTP_TIMEOUT_MS).coerceIn(HTTP_TIMEOUT_MIN_MS, HTTP_TIMEOUT_MAX_MS)
+
+    /** 参数名以这些词结尾就当凭据（`access_token`、`csrf_token`、`sign` 都命中，`keyword` 不中）。 */
+    private val SENSITIVE_PARAM = Regex(
+        "(?i)([?&;])([A-Za-z0-9_.-]*(?:token|sign|sig|secret|key|uid|pwd|passwd|password|auth|ticket|session|code))=[^&#]*"
+    )
+
+    /**
+     * 日志里的 URL 脱敏：把 `token` / `sign` / `key` / `uid` 这类参数的值换成 `***`。
+     *
+     * 为什么必须做：失败请求的 URL 会原样进 DevLog，日志能导出。番茹一类接口把凭据
+     * 放在查询串里（`?token=…&sign=…`），一条失败日志就等于把账号凭据写进文件。
+     */
+    fun redactUrl(u: String): String {
+        if (u.indexOf('=') < 0) return u
+        return SENSITIVE_PARAM.replace(u) { m -> m.groupValues[1] + m.groupValues[2] + "=***" }
+    }
 
     /** 界面类 API 的出口：不做事，但留一行痕迹。 */
     private fun uiNoop(name: String, a: Array<Any?>) {
@@ -1195,8 +1252,9 @@ object JsEngine {
         return try {
             response(cx, scope, Http.fetch(url, "GET", null, emptyMap(), null, timeoutMs))
         } catch (e: Exception) {
-            // 吞掉异常但必须留痕迹：八叉书库就是这样被误判成「缺 header()」的。
-            log("书源请求失败", arrayOf(url.take(80), e.message ?: e.javaClass.simpleName))
+            // 尔掉异常但必须留痕迹：八叉书库就是这样被误判成「缺 header()」的。
+            // URL 先脱敏再截断：番茹的搜索地址带 `?token=`，日志能导出，不能原样落盘。
+            log("书源请求失败", arrayOf(redactUrl(url).take(80), e.message ?: e.javaClass.simpleName))
             // 失败也要给响应对象：源常写 `java.get(u,{}).headers("Location")`，
             // 给空串会在 `.headers` 上报 `Cannot find function`（无忧书城）。
             response(cx, scope, Http.Response("", url, null, 0))
@@ -1208,7 +1266,7 @@ object JsEngine {
         return try {
             response(cx, scope, Http.fetch(url, "POST", body, emptyMap(), null, 8000))
         } catch (e: Exception) {
-            log("书源请求失败", arrayOf(url.take(80), e.message ?: e.javaClass.simpleName))
+            log("书源请求失败", arrayOf(redactUrl(url).take(80), e.message ?: e.javaClass.simpleName))
             ""
         }
     }

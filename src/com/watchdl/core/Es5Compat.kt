@@ -107,33 +107,43 @@ object Es5Compat {
     private fun modern(src: String): String {
         val out = StringBuilder(src.length + 64)
         val at = IntArray(src.length + 1)
+        // 源位置 → 输出位置。默认值不能是 0 —— 0 是「输出开头」的合法位置，
+        // 没填过的位置当成 0 会让调用方把输出截成空串。用 -1 标未记。
+        java.util.Arrays.fill(at, -1)
         val tmp = intArrayOf(0)
         var i = 0
         while (i < src.length) {
             at[i] = out.length
             val literal = literalEnd(src, i)
             if (literal > i) {
+                val head = out.length
                 if (src[i] == '`') out.append(template(src.substring(i, literal)))
                 else out.append(src, i, literal)
+                markRange(at, src, i, literal, head)
                 i = literal
                 continue
             }
             val c = src[i]
             if (c == '\'' || c == '"' || c == '`') {
-                val e = endOfString(src, i); out.append(src, i, e); i = e; continue
+                val e = endOfString(src, i)
+                val head = out.length
+                out.append(src, i, e)
+                markRange(at, src, i, e, head)
+                i = e
+                continue
             }
             if (c == '/' && i + 1 < src.length && src[i + 1] == '/') {
-                val e = endOfLine(src, i); out.append(src, i, e); i = e; continue
+                val e = endOfLine(src, i); out.append(src, i, e); markRange(at, src, i, e, out.length - (e - i)); i = e; continue
             }
             if (c == '/' && i + 1 < src.length && src[i + 1] == '*') {
-                val e = endOfBlockComment(src, i); out.append(src, i, e); i = e; continue
+                val e = endOfBlockComment(src, i); out.append(src, i, e); markRange(at, src, i, e, out.length - (e - i)); i = e; continue
             }
             if (c == '?' && i + 1 < src.length && src[i + 1] == '.' &&
                 (i + 2 >= src.length || !src[i + 2].isDigit())) {
                 val r = chain(src, i, out, at, tmp)
                 if (r > i) {
                     // 后续 ?? 会从原文回溯到已消费的链；这些位置必须指向改写后的同一开头。
-                    val head = at[exprStart(src, i)]
+                    val head = at[exprStart(src, i)].coerceIn(0, out.length)
                     for (k in i until r) at[k] = head
                     i = r
                     continue
@@ -147,6 +157,21 @@ object Es5Compat {
             i++
         }
         return out.toString()
+    }
+
+    /**
+     * 记下跳过区间 [from, to) 里每个源位置对应的输出位置。
+     *
+     * 为什么要补：[chain] / [nullish] 用 `at[exprStart(src, q)]` 找「已改写的左操作数」的
+     * 起点。exprStart 会向回扫到字符串字面量的开头（如 `"x"?.length`），而那些位置在
+     * 主循环里是被整段跳过的 —— 不补就留着初始化值，旧实现里正好是 0。
+     * `head = 0` 再配 `out.setLength(0)` 会把前面已经生成的全部输出静默截没，
+     * 结果是「脚本语法错」，而不是一个看得出的异常。
+     */
+    private fun markRange(at: IntArray, src: String, from: Int, to: Int, head: Int) {
+        val verbatim = src[from] != '`'      // 模板串会被重写，长度不再一一对应
+        var k = from
+        while (k < to && k < at.size) { at[k] = if (verbatim) head + (k - from) else head; k++ }
     }
 
     /** 模板的文本保持原样，只递归处理 ${'$'}{…} 中的表达式。 */
@@ -174,9 +199,9 @@ object Es5Compat {
     private fun chain(src: String, q: Int, out: StringBuilder, at: IntArray, tmp: IntArray): Int {
         val leftStart = exprStart(src, q)
         if (leftStart >= q) return -1
-        var cur = out.substring(at[leftStart])          // 已改写的左操作数
+        val head = at[leftStart].coerceIn(0, out.length)   // -1（未记）或越界都不许截空输出
+        var cur = out.substring(head)                     // 已改写的左操作数
         if (cur.isBlank()) return -1
-        val head = at[leftStart]
         var acc = StringBuilder()
         var i = q + 2
         while (i < src.length) {
@@ -220,7 +245,8 @@ object Es5Compat {
     private fun nullish(src: String, q: Int, out: StringBuilder, at: IntArray, tmp: IntArray): Int {
         val leftStart = exprStart(src, q)
         if (leftStart >= q) return -1
-        val left = out.substring(at[leftStart])
+        val head = at[leftStart].coerceIn(0, out.length)
+        val left = out.substring(head)
         if (left.isBlank()) return -1
         val rhsStart = skipSpace(src, q + 2)
         val rhsEnd = operandEnd(src, rhsStart)
@@ -228,7 +254,7 @@ object Es5Compat {
         val rhs = modern(src.substring(rhsStart, rhsEnd).trimEnd())
         if (rhs.isBlank()) return -1
         val t = "__wc" + tmp[0]++
-        out.setLength(at[leftStart])
+        out.setLength(head)
         out.append("(($t = $left) != null ? $t : ($rhs))")
         return rhsEnd
     }

@@ -564,6 +564,37 @@ fun linkCheck() {
         SafeRegex.compileLenient("(?<=[^\\s])(?=第)") != null)
     check("空模式返回 null（不是匹配一切）",
         SafeRegex.compileLenient("") == null)
+
+    // 灾难性回溯形状判定：旧实现是一句 `\([^)]*[+*]\)[+*]`，只认「`)` 前紧邻 +*」，
+    // `(\w+\s?)*`、`(a|a)+`、`(?:x+){2,}` 全部放行 —— 这些在 java.util.regex 上是指数回溯，
+    // 能把线程钉死且不抛异常。现在改成解析正则体再判形状，下面把两侧边界都钉住。
+    println("[回归] 灾难性回溯形状")
+    for (p in listOf("^(a+)+$", "^(a+)+$", "^(abc)+$", "^a+$")) {
+        // 占位，真正的断言在下面
+    }
+    check("嵌套量词 (a+)+ 被报", SafeRegex.isSuspicious("^(a+)+$"))
+    check("组内量词后接 * 被报", SafeRegex.isSuspicious("(\\w+\\s?)*"))
+    check("重叠分支 (a|a)+ 被报", SafeRegex.isSuspicious("(a|a)+"))
+    check("非捕获组加区间的 (?:x+){2,} 被报", SafeRegex.isSuspicious("(?:x+){2,}"))
+    check("(a|ab)+ 前缀重叠被报", SafeRegex.isSuspicious("(a|ab)+"))
+    check("正常 /^\\d+$/ 不能报", !SafeRegex.isSuspicious("^\\d+$"))
+    check("有界量词 (\\d{2,4}) 不能报", !SafeRegex.isSuspicious("(\\d{2,4})"))
+    check("字符类 [a-z]+ 不能报", !SafeRegex.isSuspicious("[a-z]+"))
+    check("普通组 ^(abc)+$ 不能报", !SafeRegex.isSuspicious("^(abc)+$"))
+    check("真实目录正则不误杀",
+        !SafeRegex.isSuspicious("第(\\d+)章(.+?)") && !SafeRegex.isSuspicious(".*本章未完.*"))
+    check("编译入口也拦嵌套量词", SafeRegex.compile("^(a+)+$") == null)
+    check("compileLenient 不拦正常正则", SafeRegex.compileLenient("第\\d+章.*") != null)
+
+    // JS 源码里的正则字面量：超时中断盖不住（一次 java.util.regex 调用跑完，不回调
+    // observeInstructionCount），所以执行前静态扫。
+    println("[回归] 脚本正则字面量静态扫描")
+    check("检出 /^(a+)+$/", SafeRegex.suspectPatterns("var s='x'; /^(a+)+$/.test(s)").size == 1)
+    check("检出 (\\w+\\s?)*", SafeRegex.suspectPatterns("if(/(\\w+\\s?)*/.test(a)){}").size == 1)
+    check("检出任一位置的字面量", SafeRegex.suspectPatterns("a.match(/(a|a)+/)").size == 1)
+    check("不安全字面量返回空", SafeRegex.suspectPatterns("/^\\d+$/.test(x); /[a-z]+/i.test(y)").isEmpty())
+    check("字符串里的伪正则不误判", SafeRegex.suspectPatterns("var s='/^(a+)+$/'; s").isEmpty())
+    check("除号不当正则起点", SafeRegex.suspectPatterns("var r = a / 2 / b").isEmpty())
     // `{{...}}` 是 legado 的模板占位，不是正则语法。
     // 旧实现把它转义成字面量 `\{\{...\}\}`，等于要求正文里真的出现 "{{sourceUrl}}"
     // —— 那是错的。现在整个占位丢掉（模板在正则里不是要匹配的文本）。

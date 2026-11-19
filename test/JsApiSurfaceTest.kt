@@ -225,6 +225,37 @@ fun main() {
     check("java.setCookie 也在",
         eval("java.setCookie('http://e','z=3'); cookie.getCookie('http://e')") == "z=3")
 
+    println("[JsApi] 高风险正则与日志脱敏")
+    // 脚本里的正则字面量走 java.util.regex，一次调用跑完，超时不回调。
+    // `/^(a+)+$/` 能把线程钉死且不抛异常，所以执行前直接拒。
+    check("嵌套量词脚本被拒",
+        runCatching { JsEngine.eval("var s='aaaaaaaaaaaaaa'; /^(a+)+$/.test(s)") }
+            .exceptionOrNull()?.message?.contains("高风险正则") == true,
+        runCatching { JsEngine.eval("var s='a'; /^(a+)+$/.test(s)") }.toString())
+    check("正常正则脚本照跑", eval("/^\\d+$/.test('123')") == "true")
+    check("日志 URL 的 token 被脱敏",
+        JsEngine.redactUrl("https://api.fanqie.com/s?q=x&token=abc123&sign=dead&uid=42") ==
+            "https://api.fanqie.com/s?q=x&token=***&sign=***&uid=***")
+    check("access_token 也被脱敏",
+        JsEngine.redactUrl("http://a/b?access_token=zzz") == "http://a/b?access_token=***")
+    check("无凭据的 URL 原样",
+        JsEngine.redactUrl("http://a/b?q=%E6%96%97%E7%A0%B4&page=2") ==
+            "http://a/b?q=%E6%96%97%E7%A0%B4&page=2")
+    check("keyword 不被误脱敏",
+        JsEngine.redactUrl("http://a/s?keyword=abc") == "http://a/s?keyword=abc")
+    check("无查询串不动", JsEngine.redactUrl("http://a/b/c") == "http://a/b/c")
+
+    println("[JsApi] 内置原型已封")
+    // 旧值 sealed=false：脚本能改 Object.prototype / JSON.stringify，污染同进程后续所有脚本。
+    check("改 Object.prototype 不生效",
+        eval("try{Object.prototype.polluted=1}catch(e){}" +
+            "String(({}).polluted)") == "undefined")
+    check("改 Array.prototype 不生效",
+        eval("try{Array.prototype.bad=1}catch(e){}" +
+            "String(([]).bad)") == "undefined")
+    check("封原型后常规对象操作仍可用",
+        eval("var o={a:1}; Object.keys(o).join(',') + '|' + JSON.stringify({b:2})") == "a|{\"b\":2}")
+
     println(if (failures == 0) "JsApiSurfaceTest: 全绿" else "JsApiSurfaceTest: $failures 项失败")
     if (failures != 0) kotlin.system.exitProcess(1)
 }
