@@ -45,7 +45,14 @@ object CloudSource {
     )
 
     /** 清单。`sources` 是相对 [DEFAULT_BASE] 的路径。 */
-    data class Manifest(val version: Int, val file: String)
+    data class Manifest(
+        val version: Int,
+        val file: String,
+        /** 正文摘要。可空：老仓库没这个字段，见 [verifySum]。 */
+        val sha256: String? = null,
+    )
+
+    private const val TAG = "CloudSource"
 
     /** 一次更新的结果。 */
     data class Result(
@@ -188,6 +195,27 @@ object CloudSource {
         }
         if (text.isBlank()) return Result(false, "下载到空内容")
 
+        // ---- 2b. 校验和 ----
+        // 判据与版本、解析两道门一致：内容对不上清单就不收，版本号也不推进。
+        // 差别只在「上面有多个镜像」——不符时弃用当前镜像，交给 [update] 的循环换下一个，
+        // 而不是把整条更新路挂掉（版本号与解析层同样不会因此改动旧库）。
+        val mirror = mirrorName(b)
+        val sum = manifest?.sha256
+        if (sum != null) {
+            if (!sum.equals(sha256Hex(text), ignoreCase = true)) {
+                val msg = "书源库校验不符（镜像内容与清单不一致）：$mirror"
+                DevLog.log(TAG, msg)
+                return Result(false, msg)
+            }
+        } else if (manifest != null) {
+            // 刻意兼容：清单存在但没写校验和。主源路径从没有过摘要要求，
+            // 卡死在这里会让所有老仓库当场停更，所以只记一行日志然后按内容接受。
+            DevLog.log(TAG, "该镜像未提供校验和，按内容接受：$mirror")
+        } else {
+            // 清单本身就取不到：无法核对，但也不能因此拒收（否则镜像缺 manifest.json 就全废）。
+            DevLog.log(TAG, "该镜像没有清单，无从核对校验和，按内容接受：$mirror")
+        }
+
         // ---- 3. 校验：必须能解析出书源 ----
         // S16 起 importAll 不再对坏 JSON 抛异常，而是返回一条带 issue 的记录
         //（界面要能告诉用户哪条坏了）。所以这里要把「整个文件解析失败」
@@ -246,17 +274,29 @@ object CloudSource {
         return Result(true, "已更新 ${parsed.size} 条书源$ver", dest, bytes)
     }
 
-    /**
-     * 读清单。仓库里放 `manifest.json`：`{"version": 3, "file": "legado.json"}`。
+    /** 读清单。仓库里放 `manifest.json`：`{"version": 3, "file": "legado.json", "sha256": "…"}`。
      *
      * 没清单不算错 —— 退回「每次都拉、靠用户手动触发」也能用。
+     * 校验和字段两种名都认：新仓库写 `sha256`，早期手写的写 `checksum`。
      */
     private fun fetchManifest(base: String, timeoutMs: Int): Manifest {
         val body = Http.fetch("$base/manifest.json", "GET", null, emptyMap(), null, timeoutMs).body
         val v = TinyJson.path(body, "version")?.toIntOrNull()?.takeIf { it > 0 }
             ?: error("manifest 没有有效的正整数 version")
-        return Manifest(v, TinyJson.path(body, "file") ?: FILE_NAME)
+        val sum = (TinyJson.path(body, "sha256") ?: TinyJson.path(body, "checksum"))
+            ?.trim()?.takeIf { it.isNotEmpty() }
+        return Manifest(v, TinyJson.path(body, "file") ?: FILE_NAME, sum)
     }
+
+    /** 正文的 SHA-256（hex 小写）。与 [digest] 同一套摘要，只是不截断。 */
+    private fun sha256Hex(text: String): String {
+        val md = MessageDigest.getInstance("SHA-256")
+        return md.digest(text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+    }
+
+    /** 日志里的镜像名：优先主机名，取不到就退回整条地址。 */
+    private fun mirrorName(base: String): String =
+        runCatching { java.net.URI(base).host }.getOrNull()?.takeIf { it.isNotBlank() } ?: base
 
     /**
      * 本地库的版本号。

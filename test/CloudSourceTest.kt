@@ -177,6 +177,49 @@ fun main() {
         val invalid = CloudSource.update(dir, base)
         check("新版本不能绕过内容校验", !invalid.ok && dest.readText() == validJson, invalid.message)
         check("坏包不能推进版本", verFile.readText() == "10")
+
+        // ---------- 15–18. 镜像校验和（清单 sha256）----------
+        // 口径与主源路径一致：内容对不上清单就不收、不写版本；镜像内容不合只弃当前镜像。
+        fun sha256Hex(s: String): String =
+            java.security.MessageDigest.getInstance("SHA-256")
+                .digest(s.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+
+        println("[15] 清单 sha256 对得上 → 入库")
+        File(web, "manifest.json").writeText(
+            """{"version":20,"file":"legado.json","sha256":"${sha256Hex(validJson)}"}""")
+        val r15 = CloudSource.update(dir, base)
+        check("校验通过入库", r15.ok, r15.message)
+        check("内容是远端那份", dest.readText() == validJson)
+        check("版本推进到 20", verFile.readText() == "20")
+
+        println("[16] 清单 sha256 对不上 → 弃用该镜像，旧库不动")
+        dest.writeText(largerJson)
+        verFile.writeText("20")
+        File(web, "manifest.json").writeText(
+            """{"version":21,"file":"legado.json","sha256":"${"0".repeat(64)}"}""")
+        val r16 = CloudSource.update(dir, base)
+        check("拒绝入库", !r16.ok, r16.message)
+        check("说明是校验不符", r16.message.contains("校验不符"), r16.message)
+        check("已入库内容没被覆盖", dest.readText() == largerJson)
+        check("已入库版本没被清掉", verFile.readText() == "20")
+
+        println("[17] 清单没有校验和字段 → 按内容接受")
+        File(web, "manifest.json").writeText("""{"version":22,"file":"legado.json"}""")
+        val r17 = CloudSource.update(dir, base)
+        check("没校验和也入库", r17.ok, r17.message)
+        check("内容是远端那份", dest.readText() == validJson)
+        check("版本推进到 22", verFile.readText() == "22")
+
+        println("[18] 校验和字段写 checksum 也认")
+        val validJson2 = """[{"bookSourceName":"假源2","bookSourceUrl":"https://example.com","enabled":true,"searchUrl":"https://example.com/s?q={{key}}"}]"""
+        File(web, "legado.json").writeText(validJson2)
+        File(web, "manifest.json").writeText(
+            """{"version":23,"file":"legado.json","checksum":"${sha256Hex(validJson2)}"}""")
+        val r18 = CloudSource.update(dir, base)
+        check("checksum 别名同样生效", r18.ok, r18.message)
+        check("落盘的确实是新版内容", dest.readText() == validJson2)
+        check("版本推进到 23", verFile.readText() == "23")
+        File(web, "legado.json").writeText(validJson)
     } finally {
         server.stop(0)
         web.deleteRecursively()
