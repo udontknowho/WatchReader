@@ -275,21 +275,10 @@ class MainActivity : Activity() {
     }
 
     /**
-     * 目录页当前用的源。
-     *
-     * 从阅读页/下载页返回目录时不会再传 src，而原来的兜底是
-     * `(screen as? Screen.Toc)?.src` —— 那时 screen 已经不是 Toc，
-     * 于是源变 null，默默退回默认的番茄源，等于换个源进去、返回一次就串源。
-     * 保留此字段供旧下载入口读取；页面恢复应从同书屏幕或目标元数据解析。
-     */
-    internal var tocSrc: BookSource? = null
-
-    /**
      * 进书详情页时手上带着的同名候选源。
      *
      * 详情页的「查看目录」要靠它走 [loadToc] 的逐源重试。
-     * 不放进 [Screen.Detail] 是因为它是「怎么进来的」，不是「哪一屏」——
-     * 与 [tocSrc] 同一类状态。
+     * 不放进 [Screen.Detail] 是因为它是「怎么进来的」，不是「哪一屏」。
      */
     internal var detailCandidates: List<BookHit> = emptyList()
 
@@ -986,10 +975,18 @@ class MainActivity : Activity() {
 
     /** 把 multi 缓存作废并重读源目录。必须先重建才能拿到新库。 */
     internal fun rebuildSources(then: () -> Unit = {}) {
-        // 同 warmSources：建在锁外，只换引用。
-        multiCache = buildMulti()
+        // 重建串行化：书源页的启用/删除/导入与启动同步都会调这里，并且各自在
+        // `thread { }` 里。两路并发 = 同一批文件解析两遍，还各自往 multiCache 赋值。
+        // 锁只盖「建 + 换引用」这一段，不用 multiLock —— 那个锁是给读路径用的，
+        // 占着它建库等于把点书路径按住等解析完。
+        synchronized(rebuildLock) {
+            multiCache = buildMulti()
+        }
         then()
     }
+
+    /** 源池重建锁，见 [rebuildSources]。 */
+    private val rebuildLock = Any()
 
     // ══════════════════ 屏幕 ══════════════════
 
@@ -1041,10 +1038,8 @@ class MainActivity : Activity() {
             ?: (screen as? Screen.Reader)?.takeIf { it.info == info }?.src
             ?: sourceForBook(info)) {
         // 到这一步说明是「目录 → 阅读」这条路，返回落点回到目录。
-        com.watchdl.ui.reader.ReaderUi.fromShelf = false
         // 源跟着屏幕走：预览/下载要从同一个源取正文，否则多源下会串源。
         val useSrc = src
-        tocSrc = useSrc
         saveReadingBook(info, useSrc)
         // M8：从别的屏进来时把窗口挪回上次读到的那章附近。
         // 翻页时调用方会自己设好 tocWinStart 再进来，这里只在换书或从别处进来时重置。
@@ -1294,6 +1289,8 @@ class MainActivity : Activity() {
         setScreen(Screen.Progress(info))
         if (same) { refreshProgressLive(); return }
         progressNum = null
+        // 一次读到位：这个屏一次只用得上两份统计（总数/失败章），
+        // 以前同本书在这里连读两次 job.json（第二次专门取失败章）。
         val snapshot = Downloader.restoreLight(jobsStore(), info.bookId)
         progressDone = snapshot?.count(ChapterStatus.DONE) ?: 0
         progressFailed = snapshot?.count(ChapterStatus.FAILED) ?: 0
@@ -1319,9 +1316,8 @@ class MainActivity : Activity() {
         // shortcut: 进度屏首次进入时在主线程完整读一次，用来列出失败章。
         // 按章数线性增长：167 章实测 10.6 ms，3000 章约 190 ms（超一帧）。
         // 真要治得把失败章列表挪进后台线程或单独存文件，等有 3000 章的真实抱怨再说。
-        val currentJob = Downloader.restoreLight(jobsStore(), info.bookId)
-        if (currentJob?.failedIndexes?.isNotEmpty() == true) {
-            card.addView(Md3.text(this, "失败：" + currentJob.failedIndexes.take(5).joinToString { currentJob.chapters[it].title }, Md3.FS_SM, Md3.error))
+        if (snapshot?.failedIndexes?.isNotEmpty() == true) {
+            card.addView(Md3.text(this, "失败：" + snapshot.failedIndexes.take(5).joinToString { snapshot.chapters[it].title }, Md3.FS_SM, Md3.error))
         }
         col.addView(card)
 
@@ -1534,8 +1530,6 @@ class MainActivity : Activity() {
                 }.onFailure { toast("收藏更新失败：${it.message}") }
                 detailCandidates = valid
                 if (readAfterLoad) {
-                    ReaderUi.fromShelf = false
-                    tocSrc = pair.first
                     preview(full, readProgress(full).coerceIn(0, full.chapters.lastIndex), src = pair.first)
                 } else showToc(full, pair.first)
             } else {
@@ -2426,7 +2420,6 @@ class MainActivity : Activity() {
 
     /** 正文出口共用真实进入栈；翻章不会覆盖这个落点。 */
     internal fun returnFromReader(info: BookInfo) {
-        ReaderUi.fromShelf = false
         val previous = returnStack.lastOrNull()?.screen
         if (previous != null && previous !is Screen.Reader) goBackToPrevious()
         else showToc(info)

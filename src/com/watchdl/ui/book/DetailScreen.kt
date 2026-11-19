@@ -408,8 +408,6 @@ private fun MainActivity.detailOpenToc(info: BookInfo, src: BookSource?, readAft
         DetailUi.tocFailed = false
         rememberReturn()
         if (readAfterLoad) {
-            ReaderUi.fromShelf = false
-            tocSrc = resolved
             preview(full, readProgress(full).coerceIn(0, full.chapters.lastIndex), src = resolved)
         } else showToc(full, resolved)
     }

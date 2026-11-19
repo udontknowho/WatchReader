@@ -565,14 +565,12 @@ private fun MainActivity.openShelfBook(row: ShelfRow) {
     // 旧慢路径同样用 job.chapters 覆盖，否则点书进的章表可能比已下载的少。
     if (row.job.chapters.isNotEmpty()) {
         rememberReturn()
-        com.watchdl.ui.reader.ReaderUi.fromShelf = true
         preview(info.copy(chapters = row.job.chapters),
             readProgress(info).coerceIn(0, row.job.chapters.lastIndex))
         return
     }
     if (info.chapters.isNotEmpty()) {
         rememberReturn()
-        com.watchdl.ui.reader.ReaderUi.fromShelf = true
         preview(info, readProgress(info).coerceIn(0, info.chapters.lastIndex))
         return
     }
@@ -593,8 +591,8 @@ internal fun MainActivity.matchingBookJob(info: BookInfo): BookJob? =
  * 章节表在 job.json 里（restoreLight 只读它），从上次读到的章续上。
  * 还没取过目录的书没有正文可读，退回旧行为进目录去取。
  *
- * 返回落点交给 [com.watchdl.ui.reader.ReaderUi.fromShelf]：从书架进来的退回书架，
- * 从目录进来的退回目录，不再一律跳目录。
+ * 返回落点交给 [com.watchdl.MainActivity.rememberReturn] 记下的真实进入栈：
+ * 从书架进来的退回书架，从目录进来的退回目录，不再一律跳目录。
  */
 internal fun MainActivity.readShelfBook(bookId: String, name: String, author: String) {
     readShelfBook(BookInfo(bookId, name, author, emptyList()))
@@ -628,8 +626,6 @@ internal fun MainActivity.readShelfBook(request: BookInfo) {
             if (info.chapters.isEmpty()) {
                 showDetail(info, src)
             } else {
-                com.watchdl.ui.reader.ReaderUi.fromShelf = true
-                tocSrc = src
                 // 收藏的章表可能为空（刚收藏未取目录），空表上 lastIndex = -1，
                 // coerceIn(0, -1) 会直接抛 IllegalArgumentException。
                 val at = if (info.chapters.isEmpty()) 0

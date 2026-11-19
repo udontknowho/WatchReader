@@ -476,6 +476,43 @@ class Downloader(
         const val MIN_BODY_CHARS = 300
 
         /**
+         * [restoreLight] 的解析结果快照。
+         *
+         * 只存「解析完的字段」，不存 BookJob 实体：BookJob.statuses 是 `var` + apply 改写的，
+         * 共享实例会被某一次 withStatuses 串到别人手上。每次取用时新建一份。
+         */
+        private class LightSnap(
+            val stamp: Long,
+            val name: String,
+            val author: String,
+            /** 已把 RUNNING 改判为 PAUSED 之后的状态。 */
+            val state: JobState,
+            val chapters: List<ChapterRef>,
+            val statuses: Map<Int, ChapterStatus>,
+        ) {
+            fun toJob(bookId: String): BookJob =
+                BookJob(bookId, name, author, chapters, state)
+                    // 拷一份再交出去：调用方拿到的 statuses 与缓存互不影响。
+                    .withStatuses(HashMap(statuses))
+        }
+
+        /**
+         * 轻量快照缓存，键是 job.json 的绝对路径（含根目录，不会串库）。
+         *
+         * 上限 24 本：每本只存章表引用与状态表，不开正文；
+         * 超了按访问序丢最久没用的那本 —— 丢了只是下次重新解析一遍。
+         */
+        private val lightCache = object : LinkedHashMap<String, LightSnap>(32, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, LightSnap>?): Boolean =
+                size > 24
+        }
+
+        /** 清空轻量缓存。测试里换目录时用，避免跨 store 串读。 */
+        internal fun clearLightCache() {
+            synchronized(lightCache) { lightCache.clear() }
+        }
+
+        /**
          * 正文有效字数（去标签、去空白）。
          *
          * 特意不走 [htmlToText]：restore() 要对整本 jsonl 逐章判，
@@ -612,7 +649,20 @@ class Downloader(
          * 首页显示的是粗略进度，点进目录时会走 [restore] 拿到准确值。
          */
         fun restoreLight(store: JobStore, bookId: String): BookJob? {
-            val raw = store.readJob(bookId) ?: return null
+            // 首页一次列 8 本，书架/缓存页还会按行重复调。同一份 job.json 反复解析
+            // 3000 章的 JSON 是实打实的主线程开销，所以按「写版本号」缓存解析结果。
+            // 版本号变了（download/writeState/删除）就重读；命中时只新建 BookJob ——
+            // 不能直接缓存 BookJob 实例：withStatuses 是 apply，会原地改 statuses 表。
+            val key = store.jobFile(bookId).absolutePath
+            val stamp = store.writeStamp(bookId)
+            synchronized(lightCache) {
+                // 快照里的 state 已经是「RUNNING 改判 PAUSED」之后的值，直接用。
+                lightCache[key]?.takeIf { it.stamp == stamp }?.let { return it.toJob(bookId) }
+            }
+            val raw = store.readJob(bookId) ?: run {
+                synchronized(lightCache) { lightCache.remove(key) }
+                return null
+            }
             val name = TinyJson.path(raw, "name") ?: bookId
             val author = TinyJson.path(raw, "author") ?: ""
             val state = runCatching { JobState.valueOf(TinyJson.path(raw, "state") ?: "PENDING") }
@@ -633,7 +683,9 @@ class Downloader(
                 }
             }
             val recovered = if (state == JobState.RUNNING) JobState.PAUSED else state
-            return BookJob(bookId, name, author, chapters, recovered).withStatuses(statuses)
+            val snap = LightSnap(stamp, name, author, recovered, chapters, statuses)
+            synchronized(lightCache) { lightCache[key] = snap }
+            return snap.toJob(bookId)
         }
 
         /** 导出纯文本。正文存的是 XHTML，导出时才转文本。 */

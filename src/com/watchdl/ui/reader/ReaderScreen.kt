@@ -51,13 +51,6 @@ internal object ReaderUi {
      * 与 legado 的 ToggleBrightnessAuto 同一个语义。
      */
     var brightAuto = true
-    /**
-     * 这次阅读是从书架直接点进来的（legado 点书架就进 ReadBook）。
-     *
-     * 只影响返回落点：书架进来的退回家架，从目录进来的退回目录。
-     * 置真的地方只有 [com.watchdl.ui.shelf.readShelfBook]，其余入口一律清零。
-     */
-    var fromShelf = false
     /** 工具格按钮（legado 的 `bottomBarButtons`），按顺序一行排开，csv 存 `tools` 键。 */
     var tools: List<String> = listOf("search", "auto_page", "catalog", "setting")
     /** 自动翻页间隔秒数（legado 的 `autoReadSpeed`，手机端 1–120，手表 1–60 够用）。 */

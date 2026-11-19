@@ -58,6 +58,14 @@ object ReaderPrecompute {
     /** 已经验过「断行一致」的参数指纹。同一套参数只验一次。 */
     private val verified = HashSet<String>()
 
+    /**
+     * 正在排的键。
+     *
+     * 换章处与追加章处各推一次同一章的预排（预取链与 appendNext 会重叠），
+     * 不去重就是同一章整章重排两遍 —— 手表上一章几万字的 shaping 是百毫秒级。
+     */
+    private val building = HashSet<String>()
+
     /** LRU，超过 [CAP] 丢最久没用的那件。访问序由 accessOrder 维护。 */
     private val items = object : java.util.LinkedHashMap<String, Item>(8, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Item>?): Boolean =
@@ -95,12 +103,27 @@ object ReaderPrecompute {
      */
     fun build(key: String, fp: String, shown: String, spec: Spec): Boolean {
         if (spec.width <= 0 || shown.isEmpty()) return false
+        // 已经有一件同内容的件在手，不用再排。
+        synchronized(items) {
+            val have = items[key]
+            if (have != null && have.len == shown.length && have.hash == shown.hashCode() &&
+                sameSpec(have.spec, spec)) return true
+        }
+        // 同一章已经在别处排上了就让它排完，别并行重排。
+        synchronized(building) { if (!building.add(key)) return false }
+        try {
+            return buildInner(key, fp, shown, spec)
+        } finally {
+            synchronized(building) { building.remove(key) }
+        }
+    }
+
+    private fun buildInner(key: String, fp: String, shown: String, spec: Spec): Boolean {
         val t0 = System.nanoTime()
         var pre: PrecomputedText? = null
         var verdict = "ok"
         var lines = -1
         try {
-            pre = PrecomputedText.create(paraSpanned(shown, spec.paraPx), spec.params)
             val needCheck = synchronized(verified) {
                 // 改设置会一直加新指纹，攒多了先清一遍：验过的东西丢了最多再验一次。
                 if (verified.size > 32) verified.clear()
@@ -109,8 +132,13 @@ object ReaderPrecompute {
             if (needCheck) {
                 // 两套排法都要各自新建 span：ParaSpan 每行只加一次高（done 标记），
                 // 同一批 span 复用给两次排版，第二遍就不加了，比出来的行高是假的。
+                //
+                // 探测用的这一件只用于验断行，**验完就扔**：layout 会把里面的 ParaSpan
+                // 逐一标成 done，再把这一件存进缓存，真用时段距就再也不加了（行高变短，
+                // 段落挤在一起）。以前就犯过这个错。
                 val plain = layout(paraSpanned(shown, spec.paraPx), spec)
-                val fast = layout(pre, spec)
+                val probe = PrecomputedText.create(paraSpanned(shown, spec.paraPx), spec.params)
+                val fast = layout(probe, spec)
                 lines = fast.lineCount
                 if (sameBreaks(plain, fast)) {
                     synchronized(verified) { verified.add(fp) }
@@ -118,6 +146,8 @@ object ReaderPrecompute {
                     verdict = "split ${plain.lineCount}/${fast.lineCount}"
                 }
             }
+            // 要进缓存的那一件在验完之后才建，span 全是新的（done = false）。
+            pre = PrecomputedText.create(paraSpanned(shown, spec.paraPx), spec.params)
             // needCheck 为假时不再多排一遍：本套参数已经验过，断行一致是已知的。
         } catch (t: Throwable) {
             verdict = "err ${t.javaClass.simpleName}"

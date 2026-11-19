@@ -77,6 +77,7 @@ class JobStore(private val root: File) {
      */
     fun markDeleted(bookId: String): Boolean {
         deleted.add(bookId)
+        bumpStamp(bookId)
         return synchronized(lockFor(bookId)) {
             invalidateChapterIndex(bookId)
             val dir = dirOf(bookId)
@@ -87,6 +88,22 @@ class JobStore(private val root: File) {
     private fun invalidateChapterIndex(bookId: String) {
         synchronized(chapterIndexes) { chapterIndexes.remove(rootKey + "\u0000" + bookId) }
     }
+
+    /**
+     * 当前写版本号（进程内单调递增）。上层缓存拿它判断自己手里的快照还新不新。
+     *
+     * 计数器在 [writeStamps] 里按「根目录 + bookId」分开，重启后从 0 重新开始 ——
+     * 那时上层缓存本来就是空的，不需要跨进程可比。
+     */
+    fun writeStamp(bookId: String): Long = writeStamps[stampKey(bookId)]?.get() ?: 0L
+
+    /** 每次 job.json 换了内容就自增一次。改动点只有 [writeJob] / [commitStaging] / [markDeleted]。 */
+    private fun bumpStamp(bookId: String) {
+        writeStamps.computeIfAbsent(stampKey(bookId)) { java.util.concurrent.atomic.AtomicLong() }
+            .incrementAndGet()
+    }
+
+    private fun stampKey(bookId: String) = rootKey + "\u0000" + bookId
 
     /** 重新下载同一本书时撤销墓碑。 */
     fun clearDeleted(bookId: String) { deleted.remove(bookId) }
@@ -112,6 +129,15 @@ class JobStore(private val root: File) {
             name.endsWith(STAGING_SUFFIX) || name.endsWith(OLD_SUFFIX)
 
         private val locks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+
+        /**
+         * 各书的写版本号，见 [writeStamp]。
+         *
+         * 只增不减、体积按书的数量算（每本一个 AtomicLong），不限长也不漏 ——
+         * 删掉的书留着一条 8 字节的记录，比每次判断「还能不能删」便宜。
+         */
+        private val writeStamps =
+            java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>()
         private val fallbackDirs = java.util.concurrent.ConcurrentHashMap<String, File>()
         private data class ChapterIndex(val length: Long, val modified: Long, val offsets: Map<String, Long>)
         // 只缓存定位，不保留正文。跨实例共享，并限制同时驻留的书数。
@@ -192,6 +218,8 @@ class JobStore(private val root: File) {
                 dst.writeText(snapshot)
                 tmp.delete()
             }
+            // 落定之后才自增：上层缓存看到新版本号时，文件已经是新的。
+            bumpStamp(bookId)
         }
     }
 
@@ -411,6 +439,8 @@ class JobStore(private val root: File) {
                 job.writeText(json, Charsets.UTF_8)
                 staged.delete()
             }
+            // 换源补章/本地导入都走这里：job.json 整份换了，版本号得跟上。
+            bumpStamp(bookId)
         }
     }
 
