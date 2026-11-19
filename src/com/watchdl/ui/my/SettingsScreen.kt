@@ -141,9 +141,10 @@ private fun MainActivity.settingsTheme(col: LinearLayout) {
             Widgets.SegOption("day", "日"), Widgets.SegOption("night", "夜")),
             selected = if (cur.dark) "night" else "day",
             onPick = {
-                // 换完主题要重画本页：配色是单例上的值，只影响之后新建的视图。
-                pickTheme(Palette.combine(it == "night", family))
-                showSettings(PAGE_THEME)
+                // 一次写入一次重画，切主题不允许分两步：
+                // 目标亮度与当前配色族一起算进 Palette.combine，再交给 pickTheme 一次写定、
+                // 只重画本页一次。以前 pickTheme 内部先重画首屏、这里再重画子页，白建一遍。
+                pickTheme(Palette.combine(it == "night", family), PAGE_THEME)
             }))
     })
 
@@ -153,8 +154,8 @@ private fun MainActivity.settingsTheme(col: LinearLayout) {
             Widgets.SegOption(Palette.FAMILY_MIUIX, "米", miuixDot)),
             selected = family,
             onPick = {
-                pickTheme(Palette.combine(cur.dark, it))
-                showSettings(PAGE_THEME)
+                // 同上：配色族与当前亮度一次算好，只重画一次本页。
+                pickTheme(Palette.combine(cur.dark, it), PAGE_THEME)
             }))
     })
 
@@ -178,8 +179,7 @@ private fun MainActivity.askResetPalette() {
         body = "应用与阅读恢复日间主题，不改阅读排版与书架排序。",
         confirm = "恢复",
         onConfirm = {
-            pickTheme(Palette.DEFAULT_ID)
-            showSettings(PAGE_THEME)
+            pickTheme(Palette.DEFAULT_ID, PAGE_THEME)
         },
     ).show()
 }

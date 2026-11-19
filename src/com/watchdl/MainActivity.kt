@@ -24,6 +24,7 @@ import com.watchdl.ui.my.showCache
 import com.watchdl.ui.my.showFiles
 import com.watchdl.ui.my.showLogs
 import com.watchdl.ui.my.showReplace
+import com.watchdl.ui.my.PAGE_MAIN
 import com.watchdl.ui.my.showSettings
 import com.watchdl.ui.reader.*
 import com.watchdl.ui.search.*
@@ -457,15 +458,21 @@ class MainActivity : Activity() {
     /**
      * 换主题。配色是 [Md3] 单例上的值，只影响之后新建的视图，
      * 所以存盘后必须重画当前屏，否则屏上还是旧色。
+     *
+     * [page] 是重画后要停在的子页。调用方不许在调完本函数后再补一次
+     * `showSettings(...)`：那会把整屏建两遍（先首屏、再子页），按下芯片时肉眼可见一次闪跳。
+     * 一次写入一次重画，切主题不允许分两步。
      */
-    internal fun pickTheme(id: String) {
+    internal fun pickTheme(id: String, page: String = PAGE_MAIN) {
+        // 明暗与配色族由调用方一次算进 id 里（[Palette.combine]），这里只写一次状态：
+        // 单例换成目标配色，阅读背景跟着换，两者同一次存档提交。
         val palette = Palette.find(id)
         applyAppTheme(palette)
         readerBackground = Md3.surface
         getSharedPreferences("reader", MODE_PRIVATE).edit()
             .putString("theme", palette.id).putInt("bg", readerBackground).apply()
-        // 只从设置页进得来，重画设置页即可；滚动会回顶（主题行本来就在顶上）。
-        showSettings()
+        // 只重画一次，且停在触发切换的那一页。滚动会回顶（主题行本来就在顶上）。
+        showSettings(page)
     }
 
     /** 更新平台主题、窗口及常驻根布局；调用方随后重建当前页。 */
