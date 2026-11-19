@@ -677,6 +677,11 @@ private fun MainActivity.deleteCacheBook(u: CacheUsage) {
             },
         confirm = "删除",
         onConfirm = {
+            // 服务的取消是整库级的（ACTION_CANCEL 会清空 queue.json）。
+            // 删的在跑书之外还排着别的书时，先留一份，停完再放回去 ——
+            // 否则删一本，其它书排好的队列也被连带作废（跟 pauseCacheBook 同一套做法）。
+            val rest = if (DownloadService.runningBookId == u.bookId)
+                DownloadService.queueOf(filesDir).items().filter { it.bookId != u.bookId } else null
             if (DownloadService.runningBookId == u.bookId) DownloadService.cancel(this)
             // 队列里那条也要剔除，否则轮它当队头时又下一遭，用户以为没删掉。
             DownloadService.queueOf(filesDir).remove(u.bookId)
@@ -688,6 +693,15 @@ private fun MainActivity.deleteCacheBook(u: CacheUsage) {
                 }
                 // 等不到也不要紧：墓碑会让后面所有落盘都落空。
                 val gone = runCatching { jobsStore().markDeleted(u.bookId) }.getOrDefault(false)
+                // 刚才清掉的队列里还有别的书：等 ACTION_CANCEL 落完再写回，
+                // 然后叫醒服务接着跑队头。
+                if (gone && rest != null && rest.isNotEmpty()) {
+                    Thread.sleep(800)
+                    runCatching {
+                        DownloadService.queueOf(filesDir).enqueue(rest)
+                        DownloadService.startQueue(this)
+                    }
+                }
                 postAlive(Screen.Cache) {
                     toast(if (gone) "已删除《${u.name}》" else "删除失败：目录仍被占用")
                     if (CacheUi.open == u.bookId) CacheUi.open = null

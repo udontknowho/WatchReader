@@ -1,6 +1,7 @@
 package com.watchdl.ui.my
 
 import android.widget.LinearLayout
+import com.watchdl.DownloadService
 import com.watchdl.MainActivity
 import com.watchdl.core.Screen
 import com.watchdl.core.TinyJson
@@ -340,7 +341,18 @@ private fun MainActivity.deleteFileRow(row: FileRow) {
     // 里面更深的子目录没有别人依赖，整个删掉，省得留一堆空壳。
     val keepDir = row.isDir && row.file.parentFile == filesDir &&
         MANAGED_DIRS.any { it == row.file.name }
+    // 删顶层 books/ 前必须先停服务：跑着的作业每章落盘都会把目录与 job.json
+    // 重建出来，裸删就是诈尸。停服务（连带清队列）等它收工再删。
+    val stopServiceFirst = row.isDir && row.file.parentFile == filesDir && row.file.name == "books"
+    if (stopServiceFirst) DownloadService.cancel(this)
     bg(Screen.Files, body = {
+        if (stopServiceFirst) {
+            var waited = 0
+            while (DownloadService.runningBookId != null && waited < 3000) {
+                Thread.sleep(50)
+                waited += 50
+            }
+        }
         runCatching {
             if (row.isDir) {
                 row.file.listFiles()?.forEach { it.deleteRecursively() }

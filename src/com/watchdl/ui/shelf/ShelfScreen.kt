@@ -560,9 +560,16 @@ internal fun MainActivity.setShelfNewCount(bookId: String, n: Int) {
 private fun MainActivity.openShelfBook(row: ShelfRow) {
     val info = row.favorite?.info ?: BookInfo(row.job.bookId, row.job.name, row.job.author, row.job.chapters)
     if (shelfNewCount(info.bookId) > 0) setShelfNewCount(info.bookId, 0)
-    // 章表已经在手上：row 与书架列表出自同一份快照，job 里就是这本的章表。
-    // 回读 shelf.json + job.json 只是为了拿「可能更新的章表」，不值得挡在正文前面。
-    // 照 legado：点书架直接进阅读页（`onOpenBookshelfBook` → `MainRouteReadBook`）。
+    // 章表已在手上：row.job 是书架快照里 restoreLight 的结果（job.json 的章表）。
+    // 章表以 job.json 为准：shelf.json 的 info.chapters 可能落后（更新目录只写 job.json），
+    // 旧慢路径同样用 job.chapters 覆盖，否则点书进的章表可能比已下载的少。
+    if (row.job.chapters.isNotEmpty()) {
+        rememberReturn()
+        com.watchdl.ui.reader.ReaderUi.fromShelf = true
+        preview(info.copy(chapters = row.job.chapters),
+            readProgress(info).coerceIn(0, row.job.chapters.lastIndex))
+        return
+    }
     if (info.chapters.isNotEmpty()) {
         rememberReturn()
         com.watchdl.ui.reader.ReaderUi.fromShelf = true

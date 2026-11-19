@@ -2272,6 +2272,14 @@ internal fun MainActivity.preview(
     // 布局文件里根本没有 loading 控件（activity_book_read.xml 只有 ReadView + 菜单）。
     // 原来先建一页「正在取正文…」、正文到了再整屏重建，手表上每开一章就多一次整屏布局。
     if (curScreen !is Screen.Reader) {
+        // 清屏前先把当前屏记进返回栈：进 Reader 的 setScreen 补推发生在 root 已清空之后，
+        // 读到的 scrollY 恒为 0，会覆盖点书前记下的书架/目录滚动位置。
+        // ReaderSettings 本来就不进返回栈；书架慢路径的 Detail 占位页也不能进
+        // （leavingShelfLoading 原本就是为压住它）。
+        if (curScreen !is Screen.ReaderSettings && !shelfBookLoading) {
+            rememberReturn()
+            suppressReaderReturnPush = true
+        }
         root.removeAllViews()
         readerBackground = Md3.surface
         root.setBackgroundColor(readerBackground)

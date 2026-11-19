@@ -185,7 +185,9 @@ class MainActivity : Activity() {
         }
         cancelReturnScroll?.invoke()
         pendingReturnPoint = null
-        if (!replayingReturn && !leavingShelfLoading && next is Screen.Reader &&
+        val skipReaderPush = suppressReaderReturnPush
+        suppressReaderReturnPush = false
+        if (!replayingReturn && !leavingShelfLoading && !skipReaderPush && next is Screen.Reader &&
             screen !is Screen.Reader && screen !is Screen.ReaderSettings) rememberReturn()
         if (!replayingReturn && next is Screen.Progress && screen !is Screen.Progress) rememberReturn()
         // 书架阅读页的顶栏直接 showShelf，不经过 goBackToPrevious。
@@ -357,6 +359,8 @@ class MainActivity : Activity() {
     private var replayingReturn = false
     private var cancelReturnScroll: (() -> Unit)? = null
     private var pendingReturnPoint: ReturnPoint? = null
+    /** preview 已在清屏前手动记过返回点，setScreen 进 Reader 时不再补推（补推读到的是空 root，scrollY=0）。 */
+    internal var suppressReaderReturnPush = false
 
     override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
         if (ev.actionMasked == MotionEvent.ACTION_SCROLL) {
@@ -2381,6 +2385,15 @@ class MainActivity : Activity() {
     }
 
     override fun onBackPressed() {
+        // 正文还在取（preview 已清空 root，但屏还是旧屏，比如书架）：
+        // 这时按返回不能按旧屏处理（书架会直接退出应用），
+        // 而是作废在飞的取正文回调，退回原来的屏。
+        if (screen !is Screen.Reader && ReaderUi.pendingToken != null) {
+            ReaderUi.pageToken++
+            ReaderUi.pendingToken = null
+            goBackToPrevious()
+            return
+        }
         when (val s = screen) {
             // 书架是根栏：在这一栏按返回才退出应用。
             Screen.Shelf -> super.onBackPressed()
