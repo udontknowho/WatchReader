@@ -472,6 +472,26 @@ internal fun MainActivity.shelfColor(job: BookJob): Int {
  */
 internal fun MainActivity.shelfStore(): ShelfStore = ShelfStore(File(filesDir, "shelf.json"))
 
+/**
+ * 旧档只读回退。1.6.2 起书架只写 shelf.json，`reading-books.json` 只为
+ * 迁移期认回老收藏而读，**只读不写**，且只允许经过本文件这一处。
+ */
+internal fun MainActivity.legacyShelfRecord(request: BookInfo): ShelfBook? =
+    readingBookStore().find(request)
+
+internal fun MainActivity.legacyShelfRecord(bookId: String): ShelfBook? =
+    readingBookStore().find(bookId)
+
+/** 书架记录的单一读入口：shelf.json 是第一真相，认不到才回退旧档。 */
+internal fun MainActivity.shelfRecord(request: BookInfo): ShelfBook? =
+    shelfStore().find(request) ?: legacyShelfRecord(request)
+
+/** 按地址读书架记录，含「换源候选里出现过该地址」的情形。 */
+internal fun MainActivity.shelfRecordFor(bookId: String): ShelfBook? =
+    shelfStore().books()
+        .filter { it.info.bookId == bookId || it.candidates.any { c -> c.bookId == bookId } }
+        .singleOrNull() ?: legacyShelfRecord(bookId)
+
 internal fun MainActivity.ensureShelfMigration() {
     val store = shelfStore()
     if (store.readError() != null) return
@@ -560,18 +580,19 @@ internal fun MainActivity.setShelfNewCount(bookId: String, n: Int) {
 private fun MainActivity.openShelfBook(row: ShelfRow) {
     val info = row.favorite?.info ?: BookInfo(row.job.bookId, row.job.name, row.job.author, row.job.chapters)
     if (shelfNewCount(info.bookId) > 0) setShelfNewCount(info.bookId, 0)
-    // 章表已在手上：row.job 是书架快照里 restoreLight 的结果（job.json 的章表）。
-    // 章表以 job.json 为准：shelf.json 的 info.chapters 可能落后（更新目录只写 job.json），
-    // 旧慢路径同样用 job.chapters 覆盖，否则点书进的章表可能比已下载的少。
+    // 章表以 shelf.json 为准：refreshShelfTocs 把完整新目录写进 shelf.json，
+    // job.json 只收合并结果（旧章保号 + 新章追加），它的章表不是全量真相。
+    // job.json 在这里只提供下载状态与状态位，不再主导点书进正文的章表。
+    if (info.chapters.isNotEmpty()) {
+        rememberReturn()
+        preview(info, readProgress(info).coerceIn(0, info.chapters.lastIndex))
+        return
+    }
+    // 书架记录还没章表（刚收藏未取目录）时，退一步用 job.json 已下载的章表。
     if (row.job.chapters.isNotEmpty()) {
         rememberReturn()
         preview(info.copy(chapters = row.job.chapters),
             readProgress(info).coerceIn(0, row.job.chapters.lastIndex))
-        return
-    }
-    if (info.chapters.isNotEmpty()) {
-        rememberReturn()
-        preview(info, readProgress(info).coerceIn(0, info.chapters.lastIndex))
         return
     }
     // 没取过目录的书没有正文可读，退回旧行为：进目录去取。
@@ -616,8 +637,7 @@ internal fun MainActivity.readShelfBook(request: BookInfo) {
         val saved = favorite?.info ?: request
         val job = matchingBookJob(saved)
         val info = if (job != null && job.chapters.isNotEmpty()) saved.copy(chapters = job.chapters) else saved
-        val source = resolveBookSource(info.bookId, favorite
-            ?: ReadingBookStore(File(filesDir, "reading-books.json")).find(info))
+        val source = resolveBookSource(info.bookId, favorite ?: legacyShelfRecord(info))
         info to source
     }) { result ->
         if (token != com.watchdl.ui.reader.ReaderUi.pageToken) return@bg
@@ -846,17 +866,14 @@ internal fun MainActivity.refreshShelfTocs() {
  * 番茄源的构造依赖它。
  */
 internal fun MainActivity.sourceForBook(bookId: String): BookSource? {
-    val saved = shelfStore().books().filter { book ->
-        book.info.bookId == bookId || book.candidates.any { it.bookId == bookId }
-    }.singleOrNull() ?: ReadingBookStore(File(filesDir, "reading-books.json")).find(bookId)
-    return resolveBookSource(bookId, saved)
+    return resolveBookSource(bookId, shelfRecordFor(bookId))
 }
 
 /** 页面已有元数据时优先按逻辑身份找来源，避免同地址不同书相互借源。 */
 internal fun MainActivity.sourceForBook(info: BookInfo): BookSource? {
     val favorite = shelfStore().find(info)
     val saved = favorite?.takeIf { it.info.bookId == info.bookId }
-        ?: ReadingBookStore(File(filesDir, "reading-books.json")).find(info)
+        ?: legacyShelfRecord(info)
         ?: favorite
     return resolveBookSource(info.bookId, saved)
 }
