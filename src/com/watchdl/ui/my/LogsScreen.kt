@@ -232,6 +232,9 @@ private fun MainActivity.askClearLog() {
         confirm = "清空",
         onConfirm = {
             DevLog.clear()
+            // 缓存的尾巴同步作废：否则清完再点「复制日志」，
+            // 拷出去的还是清空前的旧内容。
+            lastTail = null
             toast("已清空日志")
             showLogs()
         },

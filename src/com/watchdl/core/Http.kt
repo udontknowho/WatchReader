@@ -325,9 +325,16 @@ object Http {
     /**
      * 卡死的请求线程不会自己退出（阻塞在 getaddrinfo 里），所以池必须能长大：
      * 固定大小会在几次卡死后把整个下载冻住，正是要避免的那个毛病。
+     * 但也不能无界：DNS 持续卡死会一根一根堆线程。上限 64，满了之后的
+     * 请求退回调用线程里跑（CallerRuns），慢但不死锁。
      */
-    private val POOL = java.util.concurrent.Executors.newCachedThreadPool { r ->
+    private val POOL = java.util.concurrent.ThreadPoolExecutor(
+        0, 64, 60L, java.util.concurrent.TimeUnit.SECONDS,
+        java.util.concurrent.SynchronousQueue(),
+    ) { r ->
         Thread(r, "http").apply { isDaemon = true }
+    }.apply {
+        rejectedExecutionHandler = java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy()
     }
 
     /**

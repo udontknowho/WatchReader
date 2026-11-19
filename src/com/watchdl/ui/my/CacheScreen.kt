@@ -132,16 +132,32 @@ private fun MainActivity.askCacheQuery() {
 internal fun MainActivity.showCache() {
     setScreen(Screen.Cache)
     root.removeAllViews()
-    val rows = jobsStore().cacheUsages()
-    // legado 的副标题是五段固定格式，不算「有就显、没有就不显」。
+    // cacheUsages 要逐本读 job.json 并数 chapters.jsonl 行数，库大时主线程会冻住。
+    // 先铺顶栏与占位，列表在后台算完再上屏。
+    root.addView(Widgets.topBar(
+        this, "缓存管理",
+        onBack = { showMy() },
+        subtitle = "统计中…",
+        trailing = listOf("search" to { askCacheQuery() }, "list" to { showCacheFilter() }),
+    ))
+    val body = Widgets.scrollBody(this, crownStep, crownGlide)
+    val col = Widgets.contentColumn(body)
+    col.addView(Widgets.emptyState(this, "refresh", "正在统计缓存…"))
+    root.addView(body, Md3.lpWeight(1f))
+    bg(Screen.Cache, { jobsStore().cacheUsages() }) { result ->
+        val rows = result.getOrDefault(emptyList())
+        showCacheList(rows)
+    }
+}
+
+private fun MainActivity.showCacheList(rows: List<CacheUsage>) {
+    root.removeAllViews()
     root.addView(Widgets.topBar(
         this, "缓存管理",
         onBack = { showMy() },
         subtitle = cacheSummary(rows),
-        // 搜索在顶栏，跟 legado 同一个位置：列表上方不再占一行搜索框。
         trailing = listOf("search" to { askCacheQuery() }, "list" to { showCacheFilter() }),
     ))
-
     val body = Widgets.scrollBody(this, crownStep, crownGlide)
     val col = Widgets.contentColumn(body)
 
@@ -188,7 +204,7 @@ internal fun MainActivity.showCache() {
         // 只有真在筛状态时才提一句，否则这句话每屏都占一行，读的人又不需要它。
         col.addView(Md3.ellipsize(Md3.text(this,
             "筛出 ${shown.size}/${rows.size} 本", Md3.FS_SM, Md3.onSurfaceVariant)).apply {
-            setPadding(Md3.dp(this@showCache, 4), 0, Md3.dp(this@showCache, 4), 0)
+            setPadding(Md3.dp(this@showCacheList, 4), 0, Md3.dp(this@showCacheList, 4), 0)
         })
     }
     root.addView(body, Md3.lpWeight(1f))

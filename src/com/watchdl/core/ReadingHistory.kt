@@ -28,19 +28,26 @@ object ReadingHistory {
     private fun read(dir: File): List<ReadingEvent> {
         val f = File(dir, NAME)
         if (!f.isFile) return emptyList()
-        return f.bufferedReader().useLines { lines ->
-            lines.mapNotNull { line ->
-                runCatching {
-                    val p = line.split('\t')
-                    require(p.size == 4 || p.size == 5)
-                    ReadingEvent(p[0].toLong(), String(Base64.getUrlDecoder().decode(p[1]), Charsets.UTF_8),
-                        p[2].toInt(), p[3].toLong(), p.getOrNull(4)?.takeIf { it.isNotBlank() }?.let {
-                            String(Base64.getUrlDecoder().decode(it), Charsets.UTF_8)
-                        }).also {
-                        require(it.id > 0 && it.bookId.isNotBlank() && it.index >= 0 && it.at > 0)
-                    }
-                }.getOrNull()
-            }.toList().takeLast(CAP)
+        // 只需尾部 CAP 行：滚动窗口边读边丢，不把整档堆进内存
+        // （旧档每换章一行，几万行时整读再 takeLast 是白贺内存）。
+        val tail = ArrayDeque<String>(CAP)
+        f.bufferedReader().useLines { lines ->
+            lines.forEach {
+                tail.addLast(it)
+                if (tail.size > CAP) tail.removeFirst()
+            }
+        }
+        return tail.mapNotNull { line ->
+            runCatching {
+                val p = line.split('\t')
+                require(p.size == 4 || p.size == 5)
+                ReadingEvent(p[0].toLong(), String(Base64.getUrlDecoder().decode(p[1]), Charsets.UTF_8),
+                    p[2].toInt(), p[3].toLong(), p.getOrNull(4)?.takeIf { it.isNotBlank() }?.let {
+                        String(Base64.getUrlDecoder().decode(it), Charsets.UTF_8)
+                    }).also {
+                    require(it.id > 0 && it.bookId.isNotBlank() && it.index >= 0 && it.at > 0)
+                }
+            }.getOrNull()
         }
     }
 
