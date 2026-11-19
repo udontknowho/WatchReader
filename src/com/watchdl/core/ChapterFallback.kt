@@ -49,7 +49,11 @@ class ChapterFallback(
         for ((ns, hit) in list) {
             if (isCancelled()) return null
             val info = catalogOf(ns, hit) ?: continue
-            val at = ReaderStyle.chapterIndex(info.chapters.map { it.title }, want)
+            // 这里不能用 ReaderStyle.chapterIndex：它的末级判据是「归一化后双向包含」，
+            // 那是给「换源回到原章」用的，找不到也得给个近处落点。补章不能这么松 ——
+            // 它会让「第3章 出发」命中别站的「第3章 出发前」，把别人的正文写进本书还标 DONE，
+            // 读者根本看不出错。matchIndex 判据全等失败一律 -1：宁可补不到，不可补错。
+            val at = matchIndex(info.chapters.map { it.title }, want)
             if (at < 0) continue
             val ch = info.chapters[at]
             if (isCancelled()) return null
@@ -111,5 +115,129 @@ class ChapterFallback(
             ?.takeIf { it.chapters.isNotEmpty() }
         catalogs[key] = info
         return info
+    }
+
+    companion object {
+        /** 中文式章号：「第12章」「第十二回」「第 三 节」。 */
+        private val NUM_CN = Regex(
+            """第\s*([0-9]{1,6}|[零〇一二三四五六七八九十百千两壹贰叁肆伍陆柒捌玖拾佰仟]{1,8})\s*[章节節回篇集话話]"""
+        )
+
+        /** 英文式章号：「Chapter 12」。 */
+        private val NUM_EN = Regex("""(?i)\bchapter\s*([0-9]{1,6})\b""")
+
+        /** 数字加点：「12. 风起」「3、出发」。 */
+        private val NUM_DOT = Regex("""^\s*([0-9]{1,6})\s*[.、,．:：)）]""")
+
+        /**
+         * 一个标题拆成的三样东西：章号（无则 -1）、带 `#号` 的统一串、标题体。
+         *
+         * 统一串用于第二级判据（全等即可），标题体用于第三级（同号后相容性判定）。
+         */
+        private class Key(val no: Int, val unified: String, val body: String) {
+            companion object {
+                fun parse(title: String): Key {
+                    // 归一化：只留字母数字，CJK 算字母。空格、标点、全角括号一律抹掉。
+                    val norm = title.filter { it.isLetterOrDigit() }
+                    val m = NUM_CN.find(title) ?: NUM_EN.find(title) ?: NUM_DOT.find(title)
+                        ?: return Key(-1, norm, norm)
+                    val no = parseInt(m.groupValues.getOrNull(1).orEmpty())
+                        ?: return Key(-1, norm, norm)
+                    val token = m.value.filter { it.isLetterOrDigit() }
+                    if (token.isEmpty()) return Key(-1, norm, norm)
+                    val at = norm.indexOf(token)
+                    if (at < 0) return Key(-1, norm, norm)
+                    val body = norm.removeRange(at, at + token.length)
+                    return Key(no, "#$no$body", body)
+                }
+
+                private fun parseInt(s: String): Int? {
+                    if (s.isEmpty()) return null
+                    if (s.all { it in '0'..'9' }) return s.toIntOrNull()
+                    val v = chineseNumber(s) ?: return null
+                    return if (v > 0) v else null
+                }
+
+                /** 中文数字转整数：「十二」=12、「一百零一」=101、「十」=10、「三千」=3000。 */
+                private fun chineseNumber(s: String): Int? {
+                    fun digitOf(c: Char): Int? = when (c) {
+                        '零', '〇' -> 0
+                        '一', '壹' -> 1
+                        '二', '两', '贰' -> 2
+                        '三', '叁' -> 3
+                        '四', '肆' -> 4
+                        '五', '伍' -> 5
+                        '六', '陆' -> 6
+                        '七', '柒' -> 7
+                        '八', '捌' -> 8
+                        '九', '玖' -> 9
+                        else -> null
+                    }
+                    fun unitOf(c: Char): Int? = when (c) {
+                        '十', '拾' -> 10
+                        '百', '佰' -> 100
+                        '千', '仟' -> 1000
+                        else -> null
+                    }
+                    var total = 0
+                    var cur = 0
+                    var seen = false
+                    for (c in s) {
+                        val d = digitOf(c)
+                        if (d != null) {
+                            cur = d
+                            seen = true
+                            continue
+                        }
+                        val u = unitOf(c) ?: return null
+                        seen = true
+                        // 「十二」的十前面没数字，按 1 算；「百」单独出现同理。
+                        if (cur == 0) cur = 1
+                        total += cur * u
+                        cur = 0
+                    }
+                    if (!seen) return null
+                    val v = total + cur
+                    return if (v > 0) v else null
+                }
+            }
+        }
+
+        /**
+         * 在 [titles] 里找与 [want] 对应的章节下标；找不到、或吃不准，一律 -1。
+         *
+         * 判据依次收紧，任何一级「不唯一」就退到下一级，最后一级也过不了就是 -1：
+         * 1. 原文全等（trim 后）。
+         * 2. 归一化章号后全等：章号 token 统一成 `#<整数>`，「第十二章 风起」与「第 12 章 风起」相等。
+         * 3. 章号相等 + 标题体相容（互相包含）；同号但标题体多于一种（上/下卷）视为有歧义 → -1；
+         *    其中若有标题体与 [want] 完全一致的，优先取第一条。
+         *
+         * 性能：目录可能上千条，keys 先一次性算成数组，循环里不再重复解析。
+         */
+        fun matchIndex(titles: List<String>, want: String): Int {
+            if (titles.isEmpty()) return -1
+            val w = want.trim()
+            if (w.isEmpty()) return -1
+            for (i in titles.indices) if (titles[i].trim() == w) return i
+
+            val wk = Key.parse(w)
+            val keys = Array(titles.size) { Key.parse(titles[it]) }
+            for (i in keys.indices) if (keys[i].unified == wk.unified) return i
+
+            if (wk.no < 0) return -1
+            var firstCompatible = -1
+            val bodies = LinkedHashSet<String>()
+            for (i in keys.indices) {
+                val k = keys[i]
+                if (k.no != wk.no) continue
+                if (!k.body.contains(wk.body) && !wk.body.contains(k.body)) continue
+                if (k.body == wk.body) return i
+                bodies += k.body
+                if (firstCompatible < 0) firstCompatible = i
+            }
+            // 同号下出现多种标题体：分不清是哪一版正文，宁可补不到。
+            if (bodies.size > 1) return -1
+            return firstCompatible
+        }
     }
 }

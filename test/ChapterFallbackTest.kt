@@ -121,6 +121,30 @@ fun main() {
     check("补不到 → null", fbCap.fetch(want) == null)
     check("候选上限 3：只碰 3 个源", four.count { it.tocs == 1 } == 3, four.joinToString { "${it.name}=${it.tocs}" })
 
+    println("[ChapterFallback] 章节匹配：宁可补不到，不可补错")
+    val mi: (List<String>, String) -> Int = { ts, w -> ChapterFallback.matchIndex(ts, w) }
+    check("完全相同 → 命中", mi(listOf("第1章 风起", "第2章 云涌"), "第1章 风起") == 0)
+    check("双向包含且同号 → 命中", mi(listOf("第3章 出发前"), "第3章 出发") == 0)
+    check("双向包含但章号不同 → -1", mi(listOf("第4章 出发"), "第3章 出发") == -1)
+    check("中文式章号等值 → 命中", mi(listOf("第十二章 风起"), "第12章 风起") == 0)
+    check("同号带空格 → 命中", mi(listOf("第 12 章 风起"), "第12章风起") == 0)
+    check("无章号：归一化全等 → 命中", mi(listOf("序章：出发"), "序章 出发") == 0)
+    check("无章号：双向包含不算 → -1", mi(listOf("序章 出发之前"), "序章 出发") == -1)
+    check("无章号遇到有章号 → -1", mi(listOf("第3章 出发"), "出发") == -1)
+    check("同号多义 → -1", mi(listOf("第3章 出发（上）", "第3章 出发（下）"), "第3章 出发") == -1)
+    check("同号多义但一条标题体全等 → 取该条",
+        mi(listOf("第3章 出发（上）", "第3章 出发", "第3章 出发（下）"), "第3章 出发") == 1)
+    check("英文大小写不同 → -1（已知限制）", mi(listOf("Chapter 5 The End"), "chapter 5 the end") == -1)
+    check("数字加点章号 → 命中", mi(listOf("12. 风起"), "第12章 风起") == 0)
+    check("空标题 → -1", mi(listOf("第1章 风起"), "  ") == -1)
+
+    println("[ChapterFallback] 补章只用全等匹配，不靠近似取名")
+    // 备源目录里只有「第4章 出发」，要补的是「第3章 出发」：章号不同就不能拿。
+    val nearMiss = FakeSource("近站", listOf(hit), listOf("第4章 出发"),
+        mapOf("第4章 出发" to body("出发")))
+    check("章号不同的同名章不补 → null", fbOf(nearMiss).fetch("第3章 出发") == null)
+    check("不匹配就不取正文", nearMiss.contents == 0)
+
     if (failures == 0) println("ChapterFallbackTest 全部通过")
     else { println("ChapterFallbackTest 失败 $failures 项"); kotlin.system.exitProcess(1) }
 }
