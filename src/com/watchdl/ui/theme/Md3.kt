@@ -1,8 +1,15 @@
 package com.watchdl.ui.theme
 
 import android.content.Context
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorFilter
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.Typeface
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.content.res.ColorStateList
@@ -158,7 +165,7 @@ object Md3 {
     /** 指示点直径。3 dp 是实测可用下限，2 dp 在这块屏上圆角看不出来。 */
     var NAV_DOT = 3f
 
-    /** 指示点间距。 */
+    /** 底栏指示点间距。 */
     var NAV_DOT_GAP = 5f
 
     /**
@@ -201,8 +208,11 @@ object Md3 {
                 R_XS = 4; R_GRID = 8; R_CARD = 12; R_ITEM = 12; R_LG = 16; R_XL = 28
             }
         } else {
-            GAP = 6; TOP_BAR = 36; SEARCH = 32; BTN = 32
-            ITEM = 36; ITEM_TALL = 44; TAP = 32; HIT = 32
+            // 手表档按 Miuix（HyperOS）缩放：原值 56dp 行高 ×0.78 → 44，
+            // 内边距 16dp ×0.75 → 12，行内间距 8dp → 4。
+            // 圆角形状全局走超椭圆（见 [squirclePath]），这里只管数值。
+            GAP = 4; TOP_BAR = 36; SEARCH = 32; BTN = 32
+            ITEM = 44; ITEM_TALL = 52; TAP = 40; HIT = 40
             FS_XL = 22f; FS_LG = 16f; FS_MD = 13f; FS_SM = 10f; FS_LABEL = 10f
             NAV = 28
             TAB_H = 32
@@ -210,8 +220,7 @@ object Md3 {
             NAV_DOT_H = 8
             NAV_DOT = 3f
             NAV_IND_W = 48
-            PAD = 10
-            // 手表档不分族：圆角写回 M3 那套，免得从米族切过来时带着 MIUIX 的圆角。
+            PAD = 12
             R_XS = 4; R_GRID = 8; R_CARD = 12; R_ITEM = 12; R_LG = 16; R_XL = 28
         }
     }
@@ -266,19 +275,153 @@ object Md3 {
     /** 屏幕密度，由 [load] 灌入。[bg]/[ripple] 用它把 dp 圆角换成 px。 */
     private var densityScale = 2f
 
-    /** 圆角实心背景。[radiusDp] 是 dp，内部换算成 px 再交给 GradientDrawable。 */
+    /**
+     * 圆角实心背景。[radiusDp] 是 dp，内部换算成 px。
+     *
+     * 返回 [Drawable] 而不是 [GradientDrawable]：圆角走超椭圆时要用自定义形状，
+     * GradientDrawable 只有圆弧一种。调用点都只当 background 用，没有类型依赖。
+     */
     @JvmStatic
-    fun bg(color: Int, radiusDp: Number, strokeColor: Int? = null, strokeDp: Number = 1): GradientDrawable =
+    fun bg(color: Int, radiusDp: Number, strokeColor: Int? = null, strokeDp: Number = 1): Drawable =
         bgPx(color, radiusDp.toFloat() * densityScale, strokeColor, strokeDp)
 
+    /**
+     * 超椭圆圆角的控制点系数。
+     *
+     * 三次贝塞尔逼近 90° 圆弧时，控制点距离取 0.5523r 才是正圆；取更大值，曲线在
+     * 角内更"扁"、与直边的衔接更缓，也就是 HyperOS 那种"鼓"的观感。0.68 是目视
+     * 调出来的档位：再大（>0.75）会显出方肩，再小就看不出与圆弧的差别。
+     */
+    private const val SQUIRCLE_K = 0.68f
+
     /** 已经是 px 的圆角背景。只给 [ripple] 复用，避免二次换算。 */
-    private fun bgPx(color: Int, radiusPx: Float, strokeColor: Int?, strokeDp: Number): GradientDrawable {
-        val d = GradientDrawable()
-        d.shape = GradientDrawable.RECTANGLE
-        d.setColor(color)
-        d.cornerRadius = radiusPx
-        if (strokeColor != null) d.setStroke(strokeDp.toInt().coerceAtLeast(1), strokeColor)
+    private fun bgPx(color: Int, radiusPx: Float, strokeColor: Int?, strokeDp: Number): Drawable {
+        if (radiusPx <= 0f) return flatRect(color, strokeColor, strokeDp)
+        val d = SquircleDrawable(radiusPx, color, strokeColor, strokeDp.toInt().coerceAtLeast(1))
         return d
+    }
+
+    /** 直角块。半径 0 的退化情形，避免为它构造 Path。 */
+    private fun flatRect(color: Int, strokeColor: Int?, strokeDp: Number): GradientDrawable =
+        GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            setColor(color)
+            if (strokeColor != null) setStroke(strokeDp.toInt().coerceAtLeast(1), strokeColor)
+        }
+
+    /**
+     * 固定尺寸的圆角色点。
+     *
+     * 给 `setCompoundDrawables` 用：那条路径不看边界，只读 intrinsic size，
+     * 而 [Drawable] 没有 `setSize`（那是 [GradientDrawable] 自己的）。
+     */
+    @JvmStatic
+    fun dot(ctx: Context, color: Int, sizeDp: Number, radiusDp: Number = 4): Drawable {
+        val px = dp(ctx, sizeDp)
+        return SquircleDrawable(radiusDp.toFloat() * densityScale, color, null, 1)
+            .also { it.setIntrinsicSize(px) }
+    }
+
+    /**
+     * 超椭圆圆角矩形。
+     *
+     * 每个角一段三次贝塞尔，控制点沿两条直边各偏 [SQUIRCLE_K] × 半径。
+     * 半径按短边一半截断，保证退化尺寸（进度条、发丝线）不出现负半径。
+     */
+    private fun squirclePath(l: Float, t: Float, r: Float, b: Float, rad: Float): Path {
+        val path = Path()
+        val w = r - l
+        val h = b - t
+        if (w <= 0f || h <= 0f) return path
+        val R = rad.coerceAtMost(minOf(w, h) / 2f)
+        if (R <= 0f) {
+            path.addRect(l, t, r, b, Path.Direction.CW)
+            return path
+        }
+        val c = R * SQUIRCLE_K
+        path.moveTo(l + R, t)
+        path.lineTo(r - R, t)
+        path.cubicTo(r - R + c, t, r, t + R - c, r, t + R)
+        path.lineTo(r, b - R)
+        path.cubicTo(r, b - R + c, r - R + c, b, r - R, b)
+        path.lineTo(l + R, b)
+        path.cubicTo(l + R - c, b, l, b - R + c, l, b - R)
+        path.lineTo(l, t + R)
+        path.cubicTo(l, t + R - c, l + R - c, t, l + R, t)
+        path.close()
+        return path
+    }
+
+    /** 超椭圆圆角矩形背景。边界变了才重建 Path，滚动时不做无谓分配。 */
+    private class SquircleDrawable(
+        private val radiusPx: Float,
+        color: Int,
+        strokeColor: Int?,
+        private val strokePx: Int,
+    ) : Drawable() {
+
+        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            this.color = color
+            style = Paint.Style.FILL
+        }
+        private val stroke = strokeColor?.let {
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                setColor(it)
+                style = Paint.Style.STROKE
+                strokeWidth = strokePx.toFloat()
+            }
+        }
+        private val path = Path()
+        private var built = false
+
+        /** 固定尺寸（px）。compound drawable 靠 intrinsic size 定大小，-1 表示跟边界走。 */
+        private var intrinsicPx = -1
+
+        fun setIntrinsicSize(px: Int) {
+            intrinsicPx = px
+            invalidateSelf()
+        }
+
+        override fun getIntrinsicWidth(): Int = if (intrinsicPx > 0) intrinsicPx else super.getIntrinsicWidth()
+
+        override fun getIntrinsicHeight(): Int = if (intrinsicPx > 0) intrinsicPx else super.getIntrinsicHeight()
+
+        override fun onBoundsChange(bounds: Rect) {
+            built = false
+        }
+
+        private fun rebuild() {
+            val b = bounds
+            // 描边居中画在路径上，外半宽会溢出边界；整体内缩半线宽把它收回框内。
+            val inset = if (stroke != null) strokePx / 2f else 0f
+            val p = squirclePath(
+                b.left + inset, b.top + inset, b.right - inset, b.bottom - inset, radiusPx,
+            )
+            path.set(p)
+            built = true
+        }
+
+        override fun draw(canvas: Canvas) {
+            if (bounds.isEmpty) return
+            if (!built) rebuild()
+            canvas.drawPath(path, fill)
+            stroke?.let { canvas.drawPath(path, it) }
+        }
+
+        override fun setAlpha(alpha: Int) {
+            fill.alpha = alpha
+            stroke?.alpha = alpha
+            invalidateSelf()
+        }
+
+        override fun setColorFilter(colorFilter: ColorFilter?) {
+            fill.colorFilter = colorFilter
+            stroke?.colorFilter = colorFilter
+            invalidateSelf()
+        }
+
+        @Deprecated("Deprecated in Java")
+        override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
     }
 
     /**
@@ -303,10 +446,11 @@ object Md3 {
     fun ripple(ctx: Context, color: Int, radiusDp: Number, strokeColor: Int? = null): RippleDrawable {
         val px = radiusDp.toFloat() * densityScale
         val content = bgPx(color, px, strokeColor, 1)
-        val mask = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            setColor(Color.WHITE)
-            cornerRadius = px
+        // 遮罩跟内容同形状：圆弧遮罩配超椭圆内容，水波纹会在四角露出方角。
+        val mask: Drawable = if (px <= 0f) {
+            flatRect(Color.WHITE, null, 1)
+        } else {
+            SquircleDrawable(px, Color.WHITE, null, 1)
         }
         val rippleColor = ColorStateList.valueOf((onSurface and 0x00FFFFFF) or 0x22000000)
         return RippleDrawable(rippleColor, content, mask)
@@ -325,7 +469,7 @@ object Md3 {
         text = content
         setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp.toFloat())
         setTextColor(color)
-        if (bold) setTypeface(typeface, Typeface.BOLD)
+        if (bold) setTypeface(Typeface.create(typeface, 500, false))
         if (mono) typeface = Typeface.MONOSPACE
         includeFontPadding = false
     }

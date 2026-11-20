@@ -312,9 +312,7 @@ object Widgets {
                 // 色点画在文字左边：能看见该族的主色，比只写色名好认。
                 // 尺寸不随选中态变（点太小，换色已经看得出来），否则整条会宽度跳一下。
                 opt.dot?.let { c ->
-                    val d = Md3.bg(c, 4f)
-                    val s = Md3.dp(ctx, 8)
-                    d.setSize(s, s)
+                    val d = Md3.dot(ctx, c, 8)
                     setCompoundDrawables(d, null, null, null)
                     compoundDrawablePadding = Md3.dp(ctx, 4)
                 }
