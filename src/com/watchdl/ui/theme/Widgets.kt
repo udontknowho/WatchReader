@@ -830,7 +830,11 @@ object Widgets {
 
         private val crownMotion = com.watchdl.core.CrownMotion(crownGlide)
         private var crownFramePosted = false
+        private var crownFrameAt = 0L
         private var nativeFlingPending = false
+
+        /** 表冠还在走。阅读器据此推迟摘块：摘块改内容总高，会把飞行中的滚动带偏。 */
+        val isCrownRunning: Boolean get() = crownMotion.running
 
         override fun fling(velocityY: Int) {
             nativeFlingPending = velocityY != 0
@@ -846,8 +850,29 @@ object Widgets {
         private val crownFrame = object : Runnable {
             override fun run() {
                 crownFramePosted = false
-                scrollTo(0, crownMotion.frame(maxScrollOf(this@CrownScrollView),
-                    android.view.animation.AnimationUtils.currentAnimationTimeMillis()))
+                val now = android.view.animation.AnimationUtils.currentAnimationTimeMillis()
+                // 上一帧时间缺省时按一个 vsync 算，避免第一帧拿到巨大的 dt。
+                val dt = if (crownFrameAt == 0L) 16L else now - crownFrameAt
+                crownFrameAt = now
+                val want = crownMotion.step(dt)
+                if (want == 0) {
+                    if (crownMotion.running) {
+                        crownFramePosted = true
+                        postOnAnimation(this)
+                    }
+                    return
+                }
+                val before = scrollY
+                // 增量滚动：与内容总高无关，摘块与前插都不会把它带到别处。
+                scrollBy(0, want)
+                // 想走却没走动才是真到边界。maxScrollOf 是瞬时值，摘一块立刻变，
+                // 旧实现拿它比 scrollY，内容变矮时就误判成“到顶”翻上一章。
+                if (scrollY == before) {
+                    crownMotion.cancel()
+                    crownFrameAt = 0L
+                    onBoundary?.invoke(want > 0, kotlin.math.abs(want))
+                    return
+                }
                 if (crownMotion.running) {
                     crownFramePosted = true
                     postOnAnimation(this)
@@ -866,6 +891,7 @@ object Widgets {
         fun cancelCrownAnimation() {
             if (crownFramePosted) removeCallbacks(crownFrame)
             crownFramePosted = false
+            crownFrameAt = 0L
             crownMotion.cancel()
             stopNativeFling()
         }
@@ -889,16 +915,11 @@ object Widgets {
             onInputStart?.invoke()
             // 只在原生 fling 留有状态时终止一次，不对每个表冠事件重建原生惯性。
             stopNativeFling()
-            // 保留尚未追平的表冠目标，快转不丢位移。
-            val max = maxScrollOf(this)
-            val forward = delta > 0f
-            if ((forward && scrollY >= max) || (!forward && scrollY <= 0)) {
-                cancelCrownAnimation()
-                onBoundary?.invoke(forward, kotlin.math.abs(delta).toInt().coerceAtLeast(1))
-                return true
-            }
-            crownMotion.add(scrollY, max, delta,
-                android.view.animation.AnimationUtils.currentAnimationTimeMillis())
+            // 保留尚未走完的余量，快转不丢位移。
+            // 这里不再预判边界：滚动到底时本帧 scrollBy 走不动，由 crownFrame 回调。
+            // 预判用的是 maxScrollOf 瞬时值，摘块后立刻变，正是误判翻章的来源。
+            crownMotion.add(delta)
+            crownFrameAt = 0L
             if (!crownFramePosted) {
                 crownFramePosted = true
                 postOnAnimation(crownFrame)

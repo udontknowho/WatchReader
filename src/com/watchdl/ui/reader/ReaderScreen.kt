@@ -691,6 +691,9 @@ internal fun MainActivity.showReader(
      */
     fun pruneWindow() {
         if (pruneBusy || win.size <= 1) return
+        // 表冠飞行中不摘块：摘块改变内容总高，正在走的位移会落到别的字上；
+        // 表冠一停，滚动监听下一次就会把这次摘块补上。窗口上限 winCap = 4。
+        if (body.isCrownRunning) return
         val drop = ReaderPaging.dropOutside(win.map { it.ch }, cursor, info.chapters.size, index)
         if (drop.isEmpty()) return
         // 摘之前先量：这是内容整体上移的距离，拿量好的块高直接减，不依赖重排结果。
@@ -1250,8 +1253,14 @@ internal fun MainActivity.showReader(
         ReaderAuto.cancel()
         if (!ReaderMenu.open && ReaderAuto.on) scheduleAuto()
     }
+    // 上一次翻章的时间戳（uptimeMillis）。表冠停在边界持续转动时用它隔开两次翻章。
+    var lastHopAt = 0L
     body.onBoundary = { forward, distance ->
-        if (!ReaderMenu.open && !chapterPending() && body.isLaidOut) {
+        // 表冠贴着边界继续转时，每帧都会回一次 onBoundary。没有冷却就是一次翻好几章
+        // （「跳回两章前」的另一半：翻完之后游标仍在边界，下一帧又触发一次）。
+        val now = android.os.SystemClock.uptimeMillis()
+        if (!ReaderMenu.open && !chapterPending() && body.isLaidOut && now - lastHopAt >= 400L) {
+            lastHopAt = now
             if (forward) toNext() else toPrevious()
         }
     }
@@ -2242,6 +2251,22 @@ private fun MainActivity.loadOpening(
     }
 }
 
+/**
+ * 只读本地缓存，不解析书源、不联网。返回 null 表示本地没有这章。
+ *
+ * 冷启动点书慢在 [sourceForBook]：要解包资源包、解析 80 多个书源 JSON、
+ * 再同步等一次 DeviceRegister。手表上这是十秒级，而读者要的只是正文。
+ * 本地有正文时上面那条链路一次都用不上，所以先单独走一遍只读本地的捷径。
+ */
+private fun MainActivity.readLocalChapter(info: BookInfo, ch: ChapterRef): String? {
+    if (matchingBookJob(info) == null) return null
+    val line = jobsStore().readChapter(info.bookId, ch.itemId) ?: return null
+    val html = TinyJson.path(line, "content") ?: return null
+    if (html.isBlank()) return null
+    // 替换规则照旧应用：本地正文也可能被规则改过。
+    return applyChapterRules(info, bodyText(html, LocalImport.isLocal(info.bookId)))
+}
+
 private fun MainActivity.readChapterText(info: BookInfo, ch: ChapterRef, src: BookSource?): String {
     val line = if (matchingBookJob(info) != null) jobsStore().readChapter(info.bookId, ch.itemId) else null
     val localHtml = line?.let { TinyJson.path(it, "content") }
@@ -2373,6 +2398,16 @@ internal fun MainActivity.preview(
         root.removeAllViews()
         readerBackground = Md3.surface
         root.setBackgroundColor(readerBackground)
+        // 冷启动点书在手表上要等好几秒。白屏看着像卡死，先铺一句占位；
+        // 正文到了 showReader 会 removeAllViews，整屏换掉。
+        root.addView(android.widget.TextView(this).apply {
+            text = "正在打开…"
+            gravity = android.view.Gravity.CENTER
+            setTextColor(Md3.onSurfaceVariant)
+            textSize = 13f
+        }, android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT))
     }
 
     // 读者停在 Toc / Reader 屏上点章节，回来时应该还在原来的屏。
@@ -2410,6 +2445,18 @@ internal fun MainActivity.preview(
     // 命中完成缓存也在后台应用替换规则，避免正则处理阻塞上屏。
     thread {
         try {
+            // 本地命中就先上屏：这条捷径不碰书源。
+            // 冷启动的十秒几乎全在 sourceForBook（解包 + 80 多个书源 JSON + DeviceRegister），
+            // 本地已有正文时那条链路一次都用不上。
+            val localText = readLocalChapter(info, ch)
+            if (localText != null) {
+                postAlive(owner) {
+                    if (token != ReaderUi.pageToken) return@postAlive
+                    clearRequest()
+                    showReader(info, index, localText, src, atEnd)
+                }
+                return@thread
+            }
             val source = src ?: if (LocalImport.isLocal(info.bookId)) null else sourceForBook(info)
             val text = loadOpening(info, ch, source)
             postAlive(owner) {
