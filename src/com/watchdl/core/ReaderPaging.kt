@@ -88,6 +88,24 @@ object ReaderPaging {
         return blocks.filter { it !in keep && it != exempt }
     }
 
+    /**
+     * 字符偏移落在第几行。[starts] 是每行起始字符偏移的升序表（`Layout.getLineStart`）。
+     *
+     * 位置的真源是 (章号, 章内字符偏移)：像素只当显示。恢复时要把字符换回行顶，
+     * 换错行是「一进章就跳到底」的观感，所以这一步单独抽出来做纯逻辑测试。
+     * 偏移超长一律夹到末行（正文短了的情况：换字号、换源后文字有出入）。
+     */
+    fun lineOfOffset(starts: IntArray, chars: Int): Int {
+        if (starts.isEmpty()) return 0
+        var lo = 0
+        var hi = starts.size - 1
+        while (lo < hi) {
+            val mid = (lo + hi + 1) / 2
+            if (starts[mid] <= chars) lo = mid else hi = mid - 1
+        }
+        return lo.coerceAtLeast(0)
+    }
+
     /** 保留行内距离，也保留视口仍在下一章标题上方时的负距离。 */
     fun anchor(chars: Int, desiredTop: Int, blockTop: Int, lineTop: Int): Anchor =
         Anchor(chars, desiredTop - blockTop - lineTop)

@@ -122,9 +122,11 @@ internal fun MainActivity.showMarks(info: BookInfo) {
 
 /** 跳到一条书签：恢复章 + 章内位置。 */
 private fun MainActivity.jumpToMark(info: BookInfo, b: Bookmark) {
-    // 位置要在 preview 之前写：preview 建完视图才读 readOffset，
-    // 那时候再写就和「上次读到哪」混在一起了。
-    if (b.offset > 0) saveOffset(info, b.index, b.offset, sync = true)
+    // 书签存的是**像素**（书签本来就是「这一屏」），走 pinned 像素分支；
+    // 别写进 `off_` / `offc_`：那是「上次读到哪」的存档，会被随后的 preview 覆盖。
+    ReaderUi.restoreKey = "${readingId(info)}#${b.index}"
+    ReaderUi.restoreAt = if (b.offset > 0) b.offset else -1
+    ReaderUi.restoreChars = -1
     preview(info, b.index)
 }
 
@@ -455,7 +457,8 @@ internal fun MainActivity.addMark(info: BookInfo, index: Int, text: String) {
             bookName = info.name,
             index = index,
             title = title,
-            offset = readOffset(info),
+            // 书签记的是像素：阅读位置改存字符之后 `off_` 不再更新，直接取屏上滚动值。
+            offset = readerBody?.scrollY ?: 0,
             excerpt = excerpt,
             at = System.currentTimeMillis(),
         )

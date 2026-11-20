@@ -99,9 +99,10 @@ internal object ReaderUi {
     var badgeOn = true
 
     /**
-     * 阅读锚点（legado 的「返回原阅读位置」）：(书号, 章号, 滚动偏移)。
+     * 阅读锚点（legado 的「返回原阅读位置」）：(书号, 章号, 章内字符偏移)。
      *
      * 从目录 / 进度滑条 / 章内查找跳到别的章之前记下，新章底就会出「返回刚才那章」。
+     * 第三项是**字符偏移**不是像素：两块正文在各自页上的绝对 y 差着一整章高。
      * 不落盘：重启后旧位置已无意义，留着只会在下次开书时弹一个过期胶囊。
      */
     var anchor: Triple<String, Int, Int>? = null
@@ -112,22 +113,29 @@ internal object ReaderUi {
     /** 换源前正在读的章标题；换源成功后由 showToc 消费掉，用来回到原章。进程内，不落盘。 */
     var swapReturnTitle = ""
 
-    /** 换源前那一屏的滚动偏移（px）；回来时落在原屏，不是章首。进程内，不落盘。 */
+    /** 换源前那一屏的章内**字符偏移**；回来时落在原屏，不是章首。进程内，不落盘。 */
     var swapReturnAt = 0
 
     /** 下一次重建时要钉住的滚动位置：键是「书号#章号」，-1 表示按记录位置恢复。 */
     var restoreKey = ""
+
+    /**
+     * 像素落点；**只有书签用**（书签本身就存像素），-1 表示没有。
+     *
+     * 其余一切位置恢复走 [restoreChars]：像素只有在「同一页、同一排版」里才有意义，
+     * 换章重建后多着前一章的正文，拿像素落位就会跳到章末。
+     */
     var restoreAt = -1
 
     /**
-     * 同上，但落点存的是**正文字符偏移**而不是像素：拼接块读完换章时用。
+     * 同上，但落点存的是**正文字符偏移**而不是像素。
      *
+     * 这是位置的真源：拼接块读完换章、换源回跳、返回胶囊、冷启动续读都用它。
      * 两块文本同源（下一章正文的头部），字符偏移到新页仍指同一行；
      * 用像素的话拼接块在旧页里排在整章正文之后，绝对 y 会多出一个章高。
      * -1 表示没有这个落点。
      */
     var restoreChars = -1
-    var restoreDelta = 0
 
     /**
      * 正在显示的正文与标题。
@@ -313,7 +321,10 @@ internal fun readerInkFor(bg: Int): Int = ReaderStyle.inkOverride(bg)
  * (书号, 章号, 滚动偏移)，新章底就会出「返回刚才那章」。只放进程内，不落盘。
  */
 private fun MainActivity.markAnchor(info: BookInfo, index: Int) {
-    ReaderUi.anchor = Triple(readingId(info), index, readerBody?.scrollY ?: 0)
+    // 章号与偏移同一次取值：分开取会碰到「章号已换、偏移还是上一章」的错配。
+    // 有阅读页在屏时一律以视口为准（拼接区里 [index] 还是建屏那一章）。
+    val pos = readerPos?.invoke()
+    ReaderUi.anchor = Triple(readingId(info), pos?.first ?: index, pos?.second ?: 0)
 }
 
 /** 工具格能放的按钮 id（legado 的 `ReadBookButtonIds` 里手表认得的那些）。 */
@@ -729,19 +740,32 @@ internal fun MainActivity.showReader(
     }
 
     /**
-     * 把当前位置记成「第 [ch] 章的字符偏移」，写进 [ReaderUi.restoreChars]。
+     * 把视口顶那一行换算成「哪一章 + 章内字符偏移」。
      *
-     * 只在视口顶正落在 [ch] 那一块时成立：跨章时字符偏移属于另一段正文，
-     * 落到新页会指错行。写不成返回 false，调用方退回像素路径（[ReaderUi.restoreAt]）。
+     * 位置的真源就是这两个数：存盘、返回胶囊、换源回跳、换章前保存全走它。
+     * 取不到布局（正文未排版）时返回 null，调用方自己退回章首。
      */
-    fun rememberChars(ch: Int): Boolean {
-        val (block, anchor) = anchorAt(body.scrollY + body.paddingTop) ?: return false
-        if (block.ch != ch) return false
-        ReaderUi.restoreKey = "${readingId(info)}#$ch"
-        ReaderUi.restoreChars = anchor.chars
-        ReaderUi.restoreDelta = anchor.delta
-        ReaderUi.restoreAt = -1
-        return true
+    fun savedPos(): Pair<Int, Int>? {
+        val (block, anchor) = anchorAt(body.scrollY + body.paddingTop) ?: return null
+        return block.ch to anchor.chars
+    }
+
+    /**
+     * 章内字符偏移 → 滚动位置（那一行的行顶）。
+     *
+     * 这是恢复位置的唯一口径。两件事必须说清楚：
+     * - 换算用**新页自己的 layout**：字符偏移不变，行号与像素每次重排都会变。
+     * - 夹取只能用 [scrollLimit]，绝不能用 [mainLimit]。后者是本章正文底，
+     *   存档值一大就被它夹到章末 —— 这就是「一进章就跳到底」的元凶。
+     */
+    fun charToScroll(chars: Int): Int {
+        val l = tv.layout ?: return 0
+        if (l.lineCount == 0) return 0
+        val starts = IntArray(l.lineCount) { l.getLineStart(it) }
+        val line = ReaderPaging.lineOfOffset(starts, chars.coerceAtLeast(0))
+        val lineTop = l.getLineTop(line.coerceIn(0, l.lineCount - 1))
+        return (childTopIn(body, tv) + tv.paddingTop + lineTop - body.paddingTop)
+            .coerceIn(0, scrollLimit(body))
     }
 
     /**
@@ -897,6 +921,8 @@ internal fun MainActivity.showReader(
      */
     fun applyCursor(at: Int) {
         if (at == cursor) return
+        com.watchdl.core.DevLog.log("Reader",
+            "cursor at=$at prev=$cursor y=${body.scrollY} vp=${body.height}")
         cursor = at
         readerIndex = at
         readerOffset = body.scrollY
@@ -939,14 +965,16 @@ internal fun MainActivity.showReader(
     }
 
     /**
-     * 现在该落盘的章内偏移。
-     *
-     * 防抖存盘、换章前保存、onPause 落盘三处共用一条口径，不再各算各的：
-     * 拼接区里整屏 `scrollY` 会被限幅成「读完」，回读就落到后一章
-     * （表现的却是「显示第 3 章、实际停在第 5 章」）。
+     * 落位埋点。章内滚动一跳不留任何日志，这正是多轮修不掉的原因，所以四处落点必须留痕：
+     * [src] 说明是哪个分支落下去的（atEnd / chars / bookmark / restore），
+     * 三个上限同时打出来，一眼就能看出是哪个口径把落点夹到了章末。
      */
-    fun savedOffset(at: Int): Int = ReaderPaging.savedOffset(
-        chapBounds, at, body.scrollY, body.paddingTop, mainLimit())
+    fun logPlace(src: String, chars: Int, y: Int): Int {
+        com.watchdl.core.DevLog.log("Reader",
+            "place src=$src chars=$chars y=$y limit=${scrollLimit(body)}" +
+                " ml=${mainLimit()} vp=${body.height} cursor=$cursor")
+        return y
+    }
 
     /**
      * 滚动内容坐标 [y] 落在哪一块正文上：返回那块 layout 与它文字顶边的 y。
@@ -1131,6 +1159,8 @@ internal fun MainActivity.showReader(
                 top + layout.getLineTop(li) - body.paddingTop
             }
         }
+        com.watchdl.core.DevLog.log("Reader",
+            "page from=$from to=$target limit=$limit vp=$vp cursor=$cursor")
         if (target == from) return
         // 覆盖：先把当前屏定格成位图，正文瞬间滚到目标，再让定格的旧屏整体滑出，
         // 露出下面的新屏 —— 就是 legado 的「新一屏从下往上盖住旧的」。
@@ -1319,7 +1349,7 @@ internal fun MainActivity.showReader(
     swapBtn.setOnClickListener {
         ReaderUi.swapReturnTitle = info.chapters.getOrNull(index)?.title.orEmpty()
         // 连章内滚动位置一起记：换源回来时落在原屏，不是章首。
-        ReaderUi.swapReturnAt = readerBody?.scrollY ?: 0
+        ReaderUi.swapReturnAt = readerPos?.invoke()?.second ?: 0
         rememberReturn(); showSwap(info, src)
     }
     bar.addView(swapBtn, LinearLayout.LayoutParams(
@@ -1392,7 +1422,7 @@ internal fun MainActivity.showReader(
             "setting" -> showReaderSettings(info, index, text, src)
             "change_source" -> {
                 ReaderUi.swapReturnTitle = info.chapters.getOrNull(index)?.title.orEmpty()
-                ReaderUi.swapReturnAt = readerBody?.scrollY ?: 0
+                ReaderUi.swapReturnAt = readerPos?.invoke()?.second ?: 0
                 rememberReturn(); showSwap(info, src)
             }
             "cache" -> startDownload(info)
@@ -1455,7 +1485,9 @@ internal fun MainActivity.showReader(
         return v
     }
 
-    val prev = chapterArrow("上一章", false) { prevChapter(info, cursor) }
+    // 上一章：以**视口所在章**为基准。用 cursor 会在摘块补偿那一帧差一章，
+    // 用 index 会把拼接区里已经读到的后面几章退回去。
+    val prev = chapterArrow("上一章", false) { prevChapter(info, vpChapter()) }
     // 第一章时置灰并真的禁用：以前只调 alpha，点了还能按，弹一句「已是第一章」。
     if (index <= 0) { prev.alpha = 0.35f; prev.isClickable = false }
     foot.addView(prev, LinearLayout.LayoutParams(Md3.dp(this, 28), Md3.dp(this, 28)))
@@ -1505,8 +1537,9 @@ internal fun MainActivity.showReader(
     foot.addView(seek, LinearLayout.LayoutParams(0, Md3.dp(this, 32), 1f))
 
     val next = chapterArrow("下一章", true) {
-        // 已读进窗口的章不能再跳一遍：底栏从窗口末章往后取。
-        nextChapter(info, maxOf(cursor, win.lastOrNull()?.ch ?: cursor))
+        // 视口章的下一章。不能用窗口末章（`win.lastOrNull().ch`）：窗口会预填到 +3 章，
+        // 拿它 +1 就是「一下跳 4 章」。
+        nextChapter(info, vpChapter() + 1)
     }
     if (index >= total - 1) { next.alpha = 0.35f; next.isClickable = false }
     foot.addView(next, LinearLayout.LayoutParams(Md3.dp(this, 28), Md3.dp(this, 28)))
@@ -1623,9 +1656,9 @@ internal fun MainActivity.showReader(
     readerBody = body
     readerBookId = readingId(info)
     readerIndex = index
-    // 生命周期落盘 / 换章前保存都问这里要位置：章号跟游标走，偏移是章内值。
-    // 给整屏 scrollY 就会在拼接区存下一大串数字，回读时被限幅到章末、跳进后一章。
-    readerPos = { cursor to savedOffset(cursor) }
+    // 生命周期落盘 / 换章前保存都问这里要位置：(视口所在章, 章内字符偏移)。
+    // 像素不再参与存盘 —— 拼接区里整屏 scrollY 会被限幅成「读完」，回读跳进后一章。
+    readerPos = { savedPos() }
     body.setOnScrollChangeListener { _, _, y, _, _ ->
         val prevY = readerOffset
         readerOffset = y
@@ -1649,10 +1682,11 @@ internal fun MainActivity.showReader(
         }
         scrollSave?.let { body.removeCallbacks(it) }
         val task = Runnable {
-            // 章内偏移，不是整屏 scrollY：`off_` 是按章内限幅恢复的。
-            // 在拼接区读第 N 章时，整屏值会远超首章可读高度，被限幅成「读完」，
-            // 下次打开就从那一章的末尾甚至后一章开始，看着像跳到别处。
-            saveOffset(info, cursor, savedOffset(cursor))
+            // 章内**字符**偏移，不是像素：像素在拼接区里会被限幅成「读完」。
+            val (ch, chars) = savedPos() ?: return@Runnable
+            saveOffsetChars(info, ch, chars)
+            com.watchdl.core.DevLog.log("Reader",
+                "save ch=$ch chars=$chars y=$y limit=${scrollLimit(body)} ml=${mainLimit()}")
         }
         scrollSave = task
         body.postDelayed(task, 400)
@@ -1664,32 +1698,29 @@ internal fun MainActivity.showReader(
     // 「返回刚才那章」胶囊回跳时位置是钉死的：落回当时那一屏，不是那一章上次读到的位置。
     val pinned = if (ReaderUi.restoreKey == findKey) ReaderUi.restoreAt else -1
     val pinnedChars = if (ReaderUi.restoreKey == findKey) ReaderUi.restoreChars else -1
-    val pinnedDelta = if (ReaderUi.restoreKey == findKey) ReaderUi.restoreDelta else 0
     if (ReaderUi.restoreKey == findKey) {
         ReaderUi.restoreKey = ""
         ReaderUi.restoreAt = -1
         ReaderUi.restoreChars = -1
-        ReaderUi.restoreDelta = 0
     }
-    val restore = readOffset(info).takeIf { it > 0 }
+    // 冷启动续读：只读 `offc_`（字符）。旧 `off_` 是像素，当字符用等于把「跳章末」原样保留，
+    // 所以缺 `offc_` 就落章首，不做迁移。
+    val restore = readOffsetChars(info)
     if (atEnd) {
         // 从上屏退上来的：落在上一章末屏，接着往上读。
         // legado 的窗口一次带四页，退一屏跨章时看到的正是上一章的末页，不是章首。
         // 有拼接块时章末是正文底边：整页底会落进下一章的开头（读的是别人的字）。
-        placeBeforeDraw { mainLimit() }
+        placeBeforeDraw { logPlace("atEnd", -1, mainLimit()) }
     } else if (pinnedChars >= 0) {
-        // 拼接块里读完换过来的：按字符偏移落位。新页自己排版后的行号才是准的，
-        // 旧页的像素坐标在这里没有意义（那个坐标里多着一整章正文）。
-        placeBeforeDraw {
-            val l = tv.layout
-            if (l == null) 0 else ReaderPaging.restore(
-                ReaderPaging.Anchor(pinnedChars, pinnedDelta), childTopIn(body, tv) + tv.paddingTop,
-                l.getLineTop(l.getLineForOffset(pinnedChars.coerceIn(0, l.text.length))), body.paddingTop)
-        }
+        // 拼接块里读完换过来的 / 换源回跳 / 返回胶囊：按字符偏移落位。
+        // 新页自己排版后的行号才是准的，旧页的像素坐标在这里没有意义（多着一整章正文）。
+        placeBeforeDraw { logPlace("chars", pinnedChars, charToScroll(pinnedChars)) }
     } else if (pinned >= 0) {
-        placeBeforeDraw { pinned.coerceIn(0, mainLimit()) }
-    } else if (restore != null) {
-        placeBeforeDraw { restore.coerceIn(0, mainLimit()) }
+        // 书签：书签存的就是像素，且只在同一排版下才有意义。
+        // 夹取只能用 scrollLimit（placeBeforeDraw 里做），不能用 mainLimit。
+        placeBeforeDraw { logPlace("bookmark", -1, pinned) }
+    } else if (restore > 0) {
+        placeBeforeDraw { logPlace("restore", restore, charToScroll(restore)) }
     }
 
     // ── 下一章开头：异步取，接到正文之后 ──────────────────────
@@ -1787,8 +1818,10 @@ internal fun MainActivity.showReader(
     if (anchor != null && anchor.first == readingId(info) && anchor.second != index) {
         pill("back", "返回刚才那章") {
             // 先钉住位置再跳：这一章的滚动位置会被新页覆盖，不先记下就回不到原屏。
+            // 钉的是**字符**偏移（与存档同一口径），不是像素。
             ReaderUi.restoreKey = "${readingId(info)}#${anchor.second}"
-            ReaderUi.restoreAt = anchor.third
+            ReaderUi.restoreChars = anchor.third
+            ReaderUi.restoreAt = -1
             preview(info, anchor.second)
         }
     }
@@ -1798,7 +1831,8 @@ internal fun MainActivity.showReader(
         pill("brightness", if (light) "切换到深色模式" else "切换到浅色模式") {
             // 只换底色，字号行距不动；重建页是因为整套前景色都得跟着换。
             ReaderUi.restoreKey = findKey
-            ReaderUi.restoreAt = body.scrollY
+            ReaderUi.restoreAt = -1
+            ReaderUi.restoreChars = savedPos()?.second ?: 0
             // 留在当前配色族里换亮度：米色主题下切到深色要变「米·夜」，不是夜间中性色。
             // 主题 id 显式传，不让 saveReaderPrefs 从底色反推 —— 反推只能分四档。
             val family = Palette.family(Md3.palette.id)
@@ -1991,7 +2025,7 @@ private fun MainActivity.showReaderMenu(
     if (!LocalImport.isLocal(info.bookId)) {
         row("换源", "swap") {
             ReaderUi.swapReturnTitle = info.chapters.getOrNull(index)?.title.orEmpty()
-            ReaderUi.swapReturnAt = readerBody?.scrollY ?: 0
+            ReaderUi.swapReturnAt = readerPos?.invoke()?.second ?: 0
             rememberReturn(); showSwap(info, src)
         }
     }
@@ -2351,12 +2385,12 @@ internal fun MainActivity.preview(
     // previous 为 null，没有「从哪儿读过来」的空间关系，硬加位移只是闪。
     ReaderUi.enterDir = ReaderTransition.dirFor(
         prevIndex = previous?.takeIf { it.info == info }?.index, index = index)
-    val previousOffset = readerBody?.scrollY ?: 0
     scrollSave?.let { readerBody?.removeCallbacks(it) }
     if (previous != null) {
         // 章号跟游标走：拼接区里 previous.index 还是首章，拿它配整屏 scrollY 会存到错章。
+        // 存的是章内字符偏移；取不到位置就按章首算，不把像素写进字符键。
         val pos = readerPos?.invoke()
-        saveOffset(previous.info, pos?.first ?: previous.index, pos?.second ?: previousOffset)
+        saveOffsetChars(previous.info, pos?.first ?: previous.index, pos?.second ?: 0)
     }
 
     fun clearRequest() {
@@ -2368,7 +2402,6 @@ internal fun MainActivity.preview(
         ReaderUi.restoreKey = ""
         ReaderUi.restoreAt = -1
         ReaderUi.restoreChars = -1
-        ReaderUi.restoreDelta = 0
         toast("正文失败：${error.message}")
         if (previous == null) showToc(info, src)
         else ReaderAuto.reschedule?.invoke()

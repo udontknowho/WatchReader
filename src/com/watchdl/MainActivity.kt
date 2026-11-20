@@ -432,7 +432,7 @@ class MainActivity : Activity() {
      * onPause 落盘与换章前保存都问它要位置，否则回到书里会落到别的章 ——
      * 显示第 3 章、实际停在第 5 章那种不一致。
      */
-    internal var readerPos: (() -> Pair<Int, Int>)? = null
+    internal var readerPos: (() -> Pair<Int, Int>?)? = null
 
     /**
      * 表冠灵敏度：每格位移（px）。表冠一格系统只给 1 个单位，必须放大才看得出。
@@ -525,12 +525,27 @@ class MainActivity : Activity() {
         getSharedPreferences("reader", MODE_PRIVATE).getLong("last_" + readerProgressTag(info), 0L)
     internal fun readOffset(info: BookInfo): Int =
         getSharedPreferences("reader", MODE_PRIVATE).getInt("off_" + readerProgressTag(info), 0)
+
+    /**
+     * 读到本章第几个**字符**。位置的真源就是它（像素只在同一排版下才有意义）。
+     *
+     * 缺 `offc_` 就返回 0 = 章首，不拿旧 `off_` 顶：旧值是像素，当字符用等于
+     * 把「一进章就跳到底」原样保留。
+     */
+    internal fun readOffsetChars(info: BookInfo): Int =
+        getSharedPreferences("reader", MODE_PRIVATE).getInt("offc_" + readerProgressTag(info), 0)
+
     internal fun saveProgress(info: BookInfo, index: Int, rememberBook: Boolean = true) {
         if (rememberBook) saveReadingBook(info, null)
         saveProgressFor(info, index)
     }
+    /** 像素偏移。只为书签留着（书签存的是像素），阅读位置一律走 [saveOffsetChars]。 */
     internal fun saveOffset(info: BookInfo, index: Int, offset: Int, sync: Boolean = false) =
         saveOffset(readingId(info), index, offset, sync)
+
+    /** 章内字符偏移落盘。口径与 [saveOffset] 一致：章号对不上就不写。 */
+    internal fun saveOffsetChars(info: BookInfo, index: Int, chars: Int, sync: Boolean = false) =
+        saveOffsetChars(readingId(info), index, chars, sync)
 
     internal fun readProgress(bookId: String): Int {
         val info = resolveReadingBook(bookId) ?: return 0
@@ -576,7 +591,7 @@ class MainActivity : Activity() {
         // 旧值不先解包：搬运工作由 readProgress 负责，存进来的永远是纯章号。
         e.putInt("pos_$tag", index)
         // 换章时滚动偏移作废，否则沿用上一章的像素位置，进新章可能直接顶到底。
-        if (prevIndex != index) e.putInt("off_$tag", 0)
+        if (prevIndex != index) e.putInt("off_$tag", 0).putInt("offc_$tag", 0)
         // apply 先更新内存；生命周期的偏移 commit 会同时刷新这些进度键。
         e.apply()
         val dir = filesDir
@@ -652,6 +667,24 @@ class MainActivity : Activity() {
     internal fun readOffset(bookId: String): Int =
         getSharedPreferences("reader", MODE_PRIVATE).getInt("off_" + readerProgressTag(bookId), 0)
 
+    /** 上次读到本章的**章内字符偏移**。换章时清零。 */
+    internal fun readOffsetChars(bookId: String): Int =
+        getSharedPreferences("reader", MODE_PRIVATE).getInt("offc_" + readerProgressTag(bookId), 0)
+
+    internal fun saveOffsetChars(bookId: String, index: Int, chars: Int, sync: Boolean = false) {
+        if (bookId.isBlank() || index < 0) return
+        val info = resolveReadingBook(bookId) ?: return
+        val prefs = getSharedPreferences("reader", MODE_PRIVATE)
+        val tag = readerProgressTag(info)
+        // 偏移只对当时那一章有意义。章号对不上就丢弃：字符偏移换一章就指向别的字。
+        if (prefs.getInt("oidx_$tag", -1) != index) return
+        prefs.edit().putInt("offc_$tag", chars.coerceAtLeast(0)).apply()
+        if (sync) historyWriter.execute {
+            runCatching { prefs.edit().commit() }
+                .onFailure { DevLog.log("History", "阅读位置刷盘失败：${it.message}") }
+        }
+    }
+
     internal fun saveOffset(bookId: String, index: Int, offset: Int, sync: Boolean = false) {
         if (bookId.isBlank() || index < 0) return
         val info = resolveReadingBook(bookId) ?: return
@@ -676,14 +709,14 @@ class MainActivity : Activity() {
         if (readerBookId.isBlank() || readerIndex < 0) return
         scrollSave?.let { body.removeCallbacks(it) }
         // 章号与偏移同一次取值：分开取会碰到「章号已换、偏移还是上一章」的错配。
-        // 拼接区里必须用章内偏移，整屏 scrollY 会被 mainLimit 限幅成「读完」。
+        // 落盘的是**章内字符偏移**：像素在拼接区里会被 mainLimit 限幅成「读完」。
         val pos = readerPos?.invoke()
         val index = pos?.first ?: readerIndex
         // 翻开后原地滚动的会话不会触发 saveProgress，这里补一次写章号（先写 oidx_，
         // 否则下面的 saveOffset 会因为章号对不上而丢）。
         saveProgress(readerBookId, index)
         // 记住的是「屏幕上那行」的位置，不是上次防抖触发的旧值。
-        saveOffset(readerBookId, index, pos?.second ?: body.scrollY, sync = true)
+        saveOffsetChars(readerBookId, index, pos?.second ?: 0, sync = true)
     }
 
     internal fun saveReaderPrefs(size: Float, spacing: Float, bg: Int, themeId: String? = null) {
@@ -1074,7 +1107,10 @@ class MainActivity : Activity() {
                 // 钉住换源前那一屏：showReader 里 pinned 分支会按 restoreKey/restoreAt 落位。
                 // 只写章号的话回来是章首，读到一半的人得自己再滑回去。
                 ReaderUi.restoreKey = "${readingId(info)}#$at"
-                ReaderUi.restoreAt = ReaderUi.swapReturnAt
+                // 换源前那一屏的**字符**偏移：同一章在另一个源里文字略有出入，
+                // 字符偏移仍指得着大致位置，像素换完源就完全没意义。
+                ReaderUi.restoreAt = -1
+                ReaderUi.restoreChars = ReaderUi.swapReturnAt
                 preview(info, at, src = useSrc); return
             }
             toast("没找到原章节，从目录挑一章")
@@ -1520,7 +1556,7 @@ class MainActivity : Activity() {
                 val old = swappingFrom ?: oldFavorite?.info
                 if (old != null && old.bookId != full.bookId) {
                     val (index, matched) = swappedChapterIndex(old, full, readProgress(old))
-                    val offset = if (matched) readOffset(old) else 0
+                    val offset = if (matched) readOffsetChars(old) else 0
                     val saved = runCatching {
                         oldFavorite?.let { shelfStore().replaceSource(it.shelfId, full, hit.sourceName, valid) }
                     }
@@ -1529,7 +1565,7 @@ class MainActivity : Activity() {
                         return@bg
                     }
                     saveProgress(full, index)
-                    saveOffset(full, index, offset, sync = true)
+                    saveOffsetChars(full, index, offset, sync = true)
                     if (!matched) {
                         ReaderUi.swapReturnTitle = ""
                         ReaderUi.swapReturnAt = 0

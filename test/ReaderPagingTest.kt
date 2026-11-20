@@ -111,6 +111,30 @@ fun main() {
     eq(ReaderPaging.cursorAt(w4, vp7 - 1600, 6), 5)
     eq(ReaderPaging.windowAround(5, 12).contains(5), true)
 
+    // ── 字符 → 行号：恢复位置的真源是章内字符偏移 ────────────
+    // 四行正文，行首偏移 0 / 10 / 20 / 30（模拟排版后的 getLineStart）。
+    val starts = intArrayOf(0, 10, 20, 30)
+    eq(ReaderPaging.lineOfOffset(starts, 0), 0)
+    eq(ReaderPaging.lineOfOffset(starts, 9), 0)
+    eq(ReaderPaging.lineOfOffset(starts, 10), 1)   // 行首那一字符归本行
+    eq(ReaderPaging.lineOfOffset(starts, 25), 2)
+    eq(ReaderPaging.lineOfOffset(starts, 30), 3)
+    // 单调：偏移只增不减，行号不许回头。
+    run {
+        var last = 0
+        for (c in 0..40) {
+            val line = ReaderPaging.lineOfOffset(starts, c)
+            eq(line >= last, true)
+            last = line
+        }
+    }
+    // 换字号 / 换源后正文短了：偏移超长夹到末行，不能抛异常。
+    eq(ReaderPaging.lineOfOffset(starts, 9999), 3)
+    // 负数与空表：落首行（章首），不返回 −1 让调用方去 coerce。
+    eq(ReaderPaging.lineOfOffset(starts, -5), 0)
+    eq(ReaderPaging.lineOfOffset(IntArray(0), 42), 0)
+    eq(ReaderPaging.lineOfOffset(intArrayOf(0), 42), 0)
+
     // ── 视口落在哪一块，章号就是哪一块 ────────────────────
     val b3 = listOf(4 to 0, 5 to 800, 6 to 1600)
     eq(ReaderPaging.cursorAt(b3, 800, 4), 5)      // 块顶那一刻就归这一章
