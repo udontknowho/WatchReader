@@ -1,9 +1,10 @@
 /**
  * 图标路径数据自检。
  *
- * 图标是手抄的 Material 24dp 路径字符串，写错一个数字画面就是一团乱码，
+ * 图标几何来自 reicon（生成到 `ReiconData.kt`），写错一个数字画面就是一团乱码，
  * 而 UI 层进不了 JVM 自检（依赖 Android 框架）。所以这里直接扫源码文本：
- * 把 `Icons.DATA` 的每一对名字与路径抽出来，验证语法与坐标范围。
+ * 把每一段路径抽出来，验证语法、闭合性与坐标范围；再验 `Icons.ALIAS`
+ * 没有指向不存在的图标名（那样调用点会静默退成文字字形）。
  */
 import java.io.File
 
@@ -14,31 +15,58 @@ fun main() {
         else { bad++; println("  ✗ $name${if (detail.isEmpty()) "" else " → $detail"}") }
     }
 
-    val f = File("src/com/watchdl/ui/theme/Icons.kt")
-    if (!f.isFile) { println("  ✗ 找不到 Icons.kt"); return kotlin.system.exitProcess(1) }
-    val text = f.readText()
+    val data = File("src/com/watchdl/ui/theme/ReiconData.kt")
+    val icons = File("src/com/watchdl/ui/theme/Icons.kt")
+    if (!data.isFile) { println("  ✗ 找不到 ReiconData.kt"); return kotlin.system.exitProcess(1) }
+    if (!icons.isFile) { println("  ✗ 找不到 Icons.kt"); return kotlin.system.exitProcess(1) }
 
-    // 一行一条：`"name" to "M..."`，长的用 `+` 续到下一行，所以先把续行拼回去。
-    val joined = text.replace(Regex("\"\\s*\\+\\s*\\n\\s*\""), "")
-    val entry = Regex("\"([a-z_]+)\" to \"([^\"]+)\"")
-    val entries = entry.findAll(joined).toList()
-    check("抽到图标条目", entries.size >= 20, "${entries.size} 条")
+    // "name" to listOf( ReiconPath("d", evenOdd, stroke), ... ),
+    // 一条路径可能很长但不会换行（生成器不折行），所以逐行扫就够。
+    val entry = Regex("\"([a-z_]+)\" to listOf\\(")
+    val pathEntry = Regex("ReiconPath\\(\"([^\"]+)\", (true|false), (true|false)\\)")
+    val texts = data.readText().lines()
+
+    val names = ArrayList<String>()
+    val paths = ArrayList<Triple<String, String, Boolean>>()   // 图标名, d, 是否描边
+    var current: String? = null
+    for (line in texts) {
+        val hit = entry.find(line)
+        if (hit != null) {
+            current = hit.groupValues[1]
+            names.add(hit.groupValues[1])
+            continue
+        }
+        val m = pathEntry.find(line) ?: continue
+        val owner = current
+        if (owner == null) {
+            bad++
+            println("  ✗ 有路径不属于任何图标：$line")
+            continue
+        }
+        paths.add(Triple(owner, m.groupValues[1], m.groupValues[3] == "true"))
+    }
+
+    check("抽到图标", names.size >= 20, "${names.size} 个")
+    check("每个图标都有路径", names.all { n -> paths.any { it.first == n } },
+        names.filter { n -> paths.none { it.first == n } }.joinToString(", "))
+    check("图标名不重复", names.size == names.toSet().size,
+        names.groupBy { it }.filter { it.value.size > 1 }.keys.joinToString(", "))
 
     val token = Regex("[A-Za-z]|-?(?:[0-9]*\\.)?[0-9]+")
     val supported = "MmLlHhVvCcSsQqTtZz"
     val badCmd = mutableListOf<String>()
     val badNum = mutableListOf<String>()
+    val unclosed = mutableListOf<String>()
     val outOfGrid = mutableListOf<String>()
 
-    for (m in entries) {
-        val name = m.groupValues[1]
-        val d = m.groupValues[2]
+    for ((name, d, stroke) in paths) {
         val toks = token.findAll(d).map { it.value }.toList()
         if (toks.isEmpty() || toks[0].uppercase() != "M") {
             badCmd.add("$name 不以 M 开头"); continue
         }
-        if (!d.trim().endsWith("z") && !d.trim().endsWith("Z")) badCmd.add("$name 没有闭合")
-        // 指令必须在支持集内；数字必须是数字。
+        // 描边路径是开放折线（chevron 就是一个 V 形），不该闭合；
+        // 填充轮廓则必须闭合，否则填出来缺一块。
+        if (!stroke && !d.trim().endsWith("z") && !d.trim().endsWith("Z")) unclosed.add(name)
         for (t in toks) {
             if (t.length == 1 && t[0].isLetter()) {
                 if (!supported.contains(t[0])) badCmd.add("$name 用了 $t")
@@ -46,20 +74,20 @@ fun main() {
                 badNum.add("$name 的 $t")
             }
         }
-        // 坐标范围：先把指令展开成绝对坐标，再量。
-        // 相对指令的负值是相对偏移（`l-8 8`），直接拿去当坐标量会全部误判。
         val oob = outOfGridAfterWalk(d)
         if (oob.isNotEmpty()) outOfGrid.add("$name 的 $oob")
     }
 
     check("指令都在支持集内", badCmd.isEmpty(), badCmd.joinToString(", "))
     check("数字都能解析", badNum.isEmpty(), badNum.joinToString(", "))
-    check("坐标都在 24 网格内", outOfGrid.isEmpty(), outOfGrid.joinToString(", "))
+    check("填充轮廓都闭合", unclosed.isEmpty(), unclosed.distinct().joinToString(", "))
+    check("坐标都在 24 网格内", outOfGrid.isEmpty(), outOfGrid.distinct().joinToString(", "))
 
     // ALIAS 指向的名字必须存在，否则调用点会静默退成文字字形。
-    val names = entries.map { it.groupValues[1] }.toSet()
+    val iconText = icons.readText()
     val aliasBlock = Regex("private val ALIAS = mapOf\\(([\\s\\S]*?)\\n    \\)")
-        .find(text)?.groupValues?.get(1).orEmpty()
+        .find(iconText)?.groupValues?.get(1).orEmpty()
+    check("找得到 ALIAS 表", aliasBlock.isNotEmpty())
     val dangling = Regex("\"([^\"]+)\" to \"([a-z_]+)\"")
         .findAll(aliasBlock)
         .map { it.groupValues[2] }
@@ -68,11 +96,10 @@ fun main() {
     check("别名都指向已有图标", dangling.isEmpty(), dangling.joinToString(", "))
 
     // 每个图标至少两个指令：只有一个 M 的路径是画不出东西的。
-    val thin = entries.filter { m ->
-        Regex("[A-Za-z]|-?(?:[0-9]*\\.)?[0-9]+").findAll(m.groupValues[2])
-            .count { it.value.length == 1 && it.value[0].isLetter() } < 2
-    }.map { it.groupValues[1] }
-    check("没有空图标", thin.isEmpty(), thin.joinToString(", "))
+    val thin = paths.filter { p ->
+        token.findAll(p.second).count { it.value.length == 1 && it.value[0].isLetter() } < 2
+    }.map { it.first }
+    check("没有空图标", thin.isEmpty(), thin.distinct().joinToString(", "))
 
     if (bad == 0) println("IconDataTest: 全部通过") else kotlin.system.exitProcess(1)
 }

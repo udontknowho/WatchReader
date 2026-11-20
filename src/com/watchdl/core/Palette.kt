@@ -71,13 +71,15 @@ class Palette(
         /** 配色族：米（MIUIX / HyperOS 观感）。 */
         const val FAMILY_MIUIX = "miuix"
 
-        /** 两个维度组合成主题 id。表内一定有四套全部对应项。 */
-        fun combine(dark: Boolean, family: String): String =
-            if (family == FAMILY_MIUIX) {
-                if (dark) "miuixnight" else "miuix"
-            } else {
-                if (dark) "night" else "day"
-            }
+        /** 配色族：astryx（Meta 开源设计系统的中性观感：近灰底、黑主色、无彩偏）。 */
+        const val FAMILY_ASTRYX = "astryx"
+
+        /** 三个维度组合成主题 id。表内一定有六套全部对应项。 */
+        fun combine(dark: Boolean, family: String): String = when (family) {
+            FAMILY_MIUIX -> if (dark) "miuixnight" else "miuix"
+            FAMILY_ASTRYX -> if (dark) "astryxnight" else "astryx"
+            else -> if (dark) "night" else "day"
+        }
 
         /**
          * 反查配色族，供段式条回显选中态。
@@ -86,6 +88,7 @@ class Palette(
          */
         fun family(id: String?): String = when (find(id).id) {
             "miuix", "miuixnight" -> FAMILY_MIUIX
+            "astryx", "astryxnight" -> FAMILY_ASTRYX
             else -> FAMILY_DEFAULT
         }
 
@@ -348,6 +351,54 @@ class Palette(
                 surfaceContainerHighest = 0xFF2E323A.toInt(),
                 inverseSurface = 0xFFE3E3E9.toInt(), inverseOnSurface = 0xFF121316.toInt(),
                 inversePrimary = 0xFF0B6BCB.toInt(),
+            ),
+            /*
+             * astryx 观感：取自 Meta 开源设计系统（Astryx）neutral 主题的实际取值。
+             *
+             * 特点是无彩：主色就是黑（夜间是白），层级靠中性灰拉开，没有色相偏。
+             * 层级方向照本应用的约定（surface1..4 浅色逐级变暗），不是 Astryx 自己
+             * 那套「卡片比底色亮」的排法——主题要能彼此替换，层级方向得一致。
+             * 对比度：正文 #000 / #f1f1f1 ≈ 17.9:1，次要文字 ≈ 7.3:1。
+             */
+            Palette(
+                id = "astryx", name = "astryx",
+                primary = 0xFF1B1B1B.toInt(), onPrimary = 0xFFFFFFFF.toInt(),
+                primaryContainer = 0xFFD4D4D4.toInt(), onPrimaryContainer = 0xFF000000.toInt(),
+                secondaryContainer = 0xFFE7E7E7.toInt(), onSecondaryContainer = 0xFF1B1B1B.toInt(),
+                surface = 0xFFF1F1F1.toInt(), surface1 = 0xFFEDEDED.toInt(), surface2 = 0xFFE8E8E8.toInt(),
+                surface3 = 0xFFE3E3E3.toInt(), surface4 = 0xFFDDDDDD.toInt(),
+                onSurface = 0xFF000000.toInt(), onSurfaceVariant = 0xFF474747.toInt(),
+                outline = 0xFFBDBDBD.toInt(), outlineVariant = 0xFFE0E0E0.toInt(),
+                error = 0xFFC0262C.toInt(),
+                dark = false,
+                surfaceTint = 0xFF1B1B1B.toInt(),
+                surfaceContainerLowest = 0xFFFFFFFF.toInt(), surfaceContainerLow = 0xFFF7F7F7.toInt(),
+                surfaceContainer = 0xFFF1F1F1.toInt(), surfaceContainerHigh = 0xFFEBEBEB.toInt(),
+                surfaceContainerHighest = 0xFFE4E4E4.toInt(),
+                inverseSurface = 0xFF1B1B1B.toInt(), inverseOnSurface = 0xFFF1F1F1.toInt(),
+                inversePrimary = 0xFFF1F1F1.toInt(),
+            ),
+            /*
+             * astryx 的夜间版。底色 #1b1b1b 是 Astryx 的 body 色，卡片 #262626 是它的 surface 色；
+             * 主色翻成白，与日间黑主色对称。
+             */
+            Palette(
+                id = "astryxnight", name = "astryx·夜",
+                primary = 0xFFF1F1F1.toInt(), onPrimary = 0xFF1B1B1B.toInt(),
+                primaryContainer = 0xFF474747.toInt(), onPrimaryContainer = 0xFFF1F1F1.toInt(),
+                secondaryContainer = 0xFF333333.toInt(), onSecondaryContainer = 0xFFE8E8E8.toInt(),
+                surface = 0xFF1B1B1B.toInt(), surface1 = 0xFF212121.toInt(), surface2 = 0xFF262626.toInt(),
+                surface3 = 0xFF2E2E2E.toInt(), surface4 = 0xFF383838.toInt(),
+                onSurface = 0xFFFFFFFF.toInt(), onSurfaceVariant = 0xFF9E9E9E.toInt(),
+                outline = 0xFF6B6B6B.toInt(), outlineVariant = 0xFF3A3A3A.toInt(),
+                error = 0xFFFFAEA7.toInt(),
+                dark = true,
+                surfaceTint = 0xFFF1F1F1.toInt(),
+                surfaceContainerLowest = 0xFF161616.toInt(), surfaceContainerLow = 0xFF1B1B1B.toInt(),
+                surfaceContainer = 0xFF212121.toInt(), surfaceContainerHigh = 0xFF272727.toInt(),
+                surfaceContainerHighest = 0xFF2E2E2E.toInt(),
+                inverseSurface = 0xFFF1F1F1.toInt(), inverseOnSurface = 0xFF1B1B1B.toInt(),
+                inversePrimary = 0xFF1B1B1B.toInt(),
             ),
         )
 

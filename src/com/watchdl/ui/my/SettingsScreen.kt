@@ -135,6 +135,7 @@ private fun MainActivity.settingsTheme(col: LinearLayout) {
     // 日间看到的米色点是浅蓝，夜间看到的是深色版的浅蓝，与真切过去的结果一致。
     val defDot = Palette.find(Palette.combine(cur.dark, Palette.FAMILY_DEFAULT)).primary
     val miuixDot = Palette.find(Palette.combine(cur.dark, Palette.FAMILY_MIUIX)).primary
+    val astryxDot = Palette.find(Palette.combine(cur.dark, Palette.FAMILY_ASTRYX)).primary
 
     col.addView(Widgets.groupCard(this, "亮度") { g ->
         g.addView(Widgets.segBar(this, "", listOf(
@@ -151,7 +152,8 @@ private fun MainActivity.settingsTheme(col: LinearLayout) {
     col.addView(Widgets.groupCard(this, "配色") { g ->
         g.addView(Widgets.segBar(this, "", listOf(
             Widgets.SegOption(Palette.FAMILY_DEFAULT, "默认", defDot),
-            Widgets.SegOption(Palette.FAMILY_MIUIX, "米", miuixDot)),
+            Widgets.SegOption(Palette.FAMILY_MIUIX, "米", miuixDot),
+            Widgets.SegOption(Palette.FAMILY_ASTRYX, "中性", astryxDot)),
             selected = family,
             onPick = {
                 // 同上：配色族与当前亮度一次算好，只重画一次本页。
